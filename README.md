@@ -74,7 +74,7 @@ pip install researchbuddy
 ### Option B — from source
 
 ```bash
-git clone https://github.com/swarag-thota/ResearchBuddy.git
+git clone https://github.com/SwaragThaikkandi/ResearchBuddy.git
 cd ResearchBuddy
 pip install -e .
 ```

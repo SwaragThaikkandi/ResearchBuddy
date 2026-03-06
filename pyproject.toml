@@ -37,9 +37,9 @@ dependencies = [
 researchbuddy = "researchbuddy.cli:main"
 
 [project.urls]
-Homepage   = "https://github.com/swarag-thota/ResearchBuddy"
-Repository = "https://github.com/swarag-thota/ResearchBuddy"
-Issues     = "https://github.com/swarag-thota/ResearchBuddy/issues"
+Homepage   = "https://github.com/SwaragThaikkandi/ResearchBuddy"
+Repository = "https://github.com/SwaragThaikkandi/ResearchBuddy"
+Issues     = "https://github.com/SwaragThaikkandi/ResearchBuddy/issues"
 
 [tool.setuptools.packages.find]
 where   = ["."]
