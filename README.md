@@ -68,7 +68,7 @@ Your PDF folder
 ### Option A — pip install (recommended)
 
 ```bash
-pip install researchbuddy
+pip install git+https://github.com/SwaragThaikkandi/ResearchBuddy.git
 ```
 
 ### Option B — from source
