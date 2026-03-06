@@ -500,6 +500,49 @@ class HierarchicalResearchGraph:
         self._context_dirty = True
         self._fused_W       = None
 
+    # ── Pickle backward compatibility ──────────────────────────────────────────
+
+    def __setstate__(self, state: dict):
+        """
+        Called by pickle.load() when deserialising an older saved graph.
+        Initialises any attributes that did not exist in earlier versions.
+        """
+        self.__dict__.update(state)
+        # v0.3.0 additions — absent from v0.2.0 pickles
+        if not hasattr(self, "_clusters"):
+            self._clusters: dict = {}
+        if not hasattr(self, "G_semantic"):
+            self.G_semantic = nx.DiGraph()
+        if not hasattr(self, "G_citation"):
+            self.G_citation = nx.DiGraph()
+        if not hasattr(self, "_refs"):
+            self._refs: dict = {}
+        if not hasattr(self, "_fused_W"):
+            self._fused_W = None
+        if not hasattr(self, "_fused_ids"):
+            self._fused_ids: list = []
+        if not hasattr(self, "_context_vec"):
+            self._context_vec = None
+        if not hasattr(self, "_context_dirty"):
+            self._context_dirty = True
+        # v0.2.0 used n_levels; v0.3.0 uses alpha only
+        if not hasattr(self, "alpha"):
+            self.alpha = FUSION_ALPHA
+        # Ensure combined graph exists
+        if not hasattr(self, "G") or self.G is None:
+            self.G = nx.DiGraph()
+        # Rebuild three networks from scratch if we only have the old single G
+        if (self.G_semantic.number_of_nodes() == 0
+                and len(self._papers) >= 3):
+            print("[graph] Migrating v0.2.0 graph to v0.3.0 three-network format ...")
+            # Seed all paper nodes into the three graphs
+            for meta in self._papers.values():
+                for graph in (self.G_semantic, self.G_citation, self.G):
+                    if not graph.has_node(meta.paper_id):
+                        graph.add_node(meta.paper_id, level=0,
+                                       node_type="paper",
+                                       weight=meta.effective_weight)
+
     @staticmethod
     def make_id(title: str, doi: str = "", s2_id: str = "", arxiv_id: str = "") -> str:
         if s2_id:
