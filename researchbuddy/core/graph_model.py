@@ -36,7 +36,8 @@ from researchbuddy.core.hierarchy import (
     build_adaptive_hswn, ClusterNode, n_levels_detected,
 )
 from researchbuddy.core.citation_network import (
-    citation_similarity_matrix, build_citation_graph, fetch_all_references,
+    citation_similarity_matrix, build_citation_graph,
+    fetch_all_refs, fetch_all_references,
 )
 from researchbuddy.core.fusion import snf, fuse_scores
 
@@ -202,6 +203,7 @@ class HierarchicalResearchGraph:
         E      = np.stack(embs)
         W_sem  = E @ E.T
         np.fill_diagonal(W_sem, 0.0)
+        # _refs is now keyed by paper_id; s2_ids passed for legacy edge building
         W_cit  = citation_similarity_matrix(ids, s2_ids, self._refs)
         np.fill_diagonal(W_cit, 0.0)
         self._fused_W   = snf(W_sem, W_cit, alpha=self.alpha, k=SNF_KNN, n_iter=SNF_ITER)
@@ -264,15 +266,20 @@ class HierarchicalResearchGraph:
     # ── Fetch citations ────────────────────────────────────────────────────────
 
     def fetch_citations(self, verbose: bool = True):
-        s2_needed = [m.s2_id for m in self._papers.values()
-                     if m.s2_id and m.s2_id not in self._refs]
-        if not s2_needed:
+        """
+        Fetch references for every paper that does not yet have citation data.
+        Uses OpenAlex (DOI → title) as primary source, Semantic Scholar as fallback.
+        """
+        need = [m for m in self._papers.values()
+                if m.paper_id not in self._refs]
+        if not need:
             if verbose:
                 print("[graph] Citation data already up to date.")
             return
         if verbose:
-            print(f"[graph] Fetching citations for {len(s2_needed)} papers ...")
-        self._refs = fetch_all_references(s2_needed, self._refs)
+            print(f"[graph] Fetching citations for {len(need)} papers "
+                  f"via OpenAlex (DOI/title) ...")
+        self._refs = fetch_all_refs(need, existing=self._refs, verbose=verbose)
         self._invalidate()
 
     # ── Comprehensive multi-level scoring ──────────────────────────────────────
@@ -339,16 +346,18 @@ class HierarchicalResearchGraph:
         return float(np.clip(fused, 0.0, 1.0))
 
     def _citation_score(self, meta: PaperMeta) -> float:
-        if not meta.s2_id or meta.s2_id not in self._refs:
-            return 0.0
-        refs_c = self._refs.get(meta.s2_id, set())
+        """
+        Bibliographic coupling between a candidate and all corpus papers.
+        Uses paper_id-keyed refs (OpenAlex IDs or S2 IDs).
+        """
+        refs_c = self._refs.get(meta.paper_id, set())
         if not refs_c:
             return 0.0
         scores = []
         for m in self._papers.values():
-            if not m.s2_id or m.effective_weight == 0:
+            if m.effective_weight == 0:
                 continue
-            refs_m = self._refs.get(m.s2_id, set())
+            refs_m = self._refs.get(m.paper_id, set())
             if not refs_m:
                 continue
             overlap = len(refs_c & refs_m)
@@ -517,6 +526,14 @@ class HierarchicalResearchGraph:
             self.G_citation = nx.DiGraph()
         if not hasattr(self, "_refs"):
             self._refs: dict = {}
+        else:
+            # v0.3.0 refs were keyed by s2_id; v0.3.1+ uses paper_id.
+            # Detect by checking if any key looks like a paper_id (short hex/prefix).
+            # If refs are s2-keyed, reset — they will be re-fetched via OpenAlex.
+            paper_id_set = set(getattr(self, "_papers", {}).keys())
+            if self._refs and not any(k in paper_id_set for k in self._refs):
+                print("[graph] Migrating citation refs to new format (will re-fetch) ...")
+                self._refs = {}
         if not hasattr(self, "_fused_W"):
             self._fused_W = None
         if not hasattr(self, "_fused_ids"):

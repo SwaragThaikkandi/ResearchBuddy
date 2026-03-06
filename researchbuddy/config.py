@@ -37,6 +37,7 @@ S2_SEARCH_URL        = "https://api.semanticscholar.org/graph/v1/paper/search"
 S2_REC_URL           = "https://api.semanticscholar.org/recommendations/v1/papers"
 S2_PAPER_URL         = "https://api.semanticscholar.org/graph/v1/paper"
 ARXIV_SEARCH_URL     = "https://export.arxiv.org/api/query"
+OPENALEX_URL         = "https://api.openalex.org/works"   # free, no key needed
 MAX_SEARCH_RESULTS   = 30
 REQUEST_TIMEOUT      = 15
 REQUEST_DELAY        = 1.0

@@ -25,6 +25,7 @@ class ExtractedPaper:
     abstract: str
     full_text: str         # first ~5000 chars of body text
     chunks: list[str] = field(default_factory=list)  # paragraphs for embedding
+    doi: str = ""          # DOI extracted from PDF text (e.g. 10.1234/abc)
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -51,6 +52,14 @@ def _extract_abstract(text: str) -> str:
     if m:
         return _clean(m.group(1))[:1200]
     return _clean(text)[:500]
+
+
+def _extract_doi(text: str) -> str:
+    """Return the first DOI found in text, stripped of trailing punctuation."""
+    m = re.search(r'\b(10\.\d{4,9}/[^\s"<>\[\]{}|\\^`]+)', text)
+    if m:
+        return m.group(1).strip(".,;:)(")
+    return ""
 
 
 def _to_chunks(text: str, chunk_size: int = 400, overlap: int = 80) -> list[str]:
@@ -101,6 +110,10 @@ def extract_from_pdf(filepath: str | Path) -> Optional[ExtractedPaper]:
         paras  = [p.strip() for p in full_clean.split('\n\n') if len(p.strip()) > 80]
         chunks = [abstract] + paras[:8]
 
+        # Try to extract DOI from first 3 pages (most likely location)
+        first_pages = '\n'.join(pages_text[:3])
+        doi = _extract_doi(first_pages) or _extract_doi(full_clean)
+
         return ExtractedPaper(
             filepath  = str(filepath),
             paper_id  = _stable_id(str(filepath)),
@@ -108,6 +121,7 @@ def extract_from_pdf(filepath: str | Path) -> Optional[ExtractedPaper]:
             abstract  = abstract,
             full_text = body,
             chunks    = chunks,
+            doi       = doi,
         )
     except Exception as e:
         print(f"[pdf_processor] Could not read {filepath.name}: {e}")

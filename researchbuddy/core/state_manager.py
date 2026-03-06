@@ -66,6 +66,7 @@ def import_pdf_folder(graph: HierarchicalResearchGraph, folder: str | Path) -> i
             abstract = ep.abstract,
             source   = "seed",
             filepath = ep.filepath,
+            doi      = ep.doi,          # DOI extracted from PDF text
         )
         graph.embed_paper(meta, ep.chunks)
 
@@ -76,6 +77,8 @@ def import_pdf_folder(graph: HierarchicalResearchGraph, folder: str | Path) -> i
 
     print(f"[state] {added} new seed papers added ({len(extracted)} PDFs processed).")
     if added > 0:
+        print("[state] Fetching citation data via OpenAlex (DOI/title lookup) ...")
+        graph.fetch_citations(verbose=True)
         print("[state] Rebuilding hierarchy ...")
         graph.rebuild_hierarchy()
     return added
