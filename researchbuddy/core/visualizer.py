@@ -377,38 +377,79 @@ def save_semantic_pdf(graph: "HierarchicalResearchGraph", output_path: Path):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _cit_page_overview(pdf, G_cit, paper_ids, weights, titles, cluster_map):
-    """Directed citation graph: arrows show A → B (A cites B)."""
+    """
+    Citation network overview.
+    Blue lines: bibliographic coupling (shared external references).
+    Orange arrows: direct citation within corpus (rare for small sets).
+    Node size ∝ user rating.
+    """
     paper_nodes = [n for n in G_cit.nodes() if n in set(paper_ids)]
     if not paper_nodes:
         return
 
-    pos = _spring_pos(G_cit.subgraph(paper_nodes))
+    sub = G_cit.subgraph(paper_nodes)
+    n_bib = sum(1 for _, _, d in sub.edges(data=True) if d.get("etype") == "bib_coupling")
+    n_cit = sum(1 for _, _, d in sub.edges(data=True) if d.get("etype") == "citation")
+
+    # Use spring layout weighted by coupling strength so tightly-coupled papers cluster
+    weight_dict = {(u, v): d.get("weight", 0.1)
+                   for u, v, d in sub.edges(data=True)
+                   if d.get("etype") == "bib_coupling"}
+    if weight_dict:
+        import networkx as nx_inner
+        pos = nx_inner.spring_layout(sub, weight="weight", seed=42,
+                                     k=2.0 / max(len(sub), 1) ** 0.5,
+                                     iterations=80)
+    else:
+        pos = _spring_pos(sub)
 
     fig, ax = plt.subplots(figsize=(14, 10))
-    n_cit = sum(1 for _, _, d in G_cit.edges(data=True) if d.get("etype") == "citation")
     ax.set_title(
-        f"ResearchBuddy — Citation Network\n"
-        f"{len(paper_nodes)} papers  ·  {n_cit} citation edges",
+        f"ResearchBuddy — Citation / Bibliographic Coupling Network\n"
+        f"{len(paper_nodes)} papers  ·  "
+        f"{n_bib} coupling edges  ·  {n_cit} direct citation edges",
         fontsize=13, fontweight="bold", pad=12
     )
     ax.axis("off")
 
-    _draw_arrows(ax, G_cit.subgraph(paper_nodes), pos)
+    # Draw bibliographic coupling edges (thickness ∝ coupling strength)
+    for u, v, d in sub.edges(data=True):
+        if u not in pos or v not in pos:
+            continue
+        etype = d.get("etype", "")
+        if etype == "bib_coupling":
+            w = d.get("weight", 0.1)
+            ax.plot([pos[u][0], pos[v][0]], [pos[u][1], pos[v][1]],
+                    color="#4C72B0", alpha=min(0.15 + w * 0.6, 0.75),
+                    lw=0.5 + w * 2.5, zorder=1)
+
+    # Draw direct citation arrows on top
+    for u, v, d in sub.edges(data=True):
+        if u not in pos or v not in pos:
+            continue
+        if d.get("etype") == "citation":
+            ax.annotate("", xy=pos[v], xytext=pos[u],
+                        arrowprops=dict(arrowstyle="-|>", color="#DD8452",
+                                        alpha=0.8, lw=1.2, mutation_scale=10))
+
     _scatter_papers(ax, paper_nodes, pos, cluster_map, weights)
 
-    # Label high-degree nodes (most cited in corpus)
-    in_deg = dict(G_cit.subgraph(paper_nodes).in_degree())
-    top_cited = sorted(in_deg.items(), key=lambda x: x[1], reverse=True)[:8]
-    for pid, deg in top_cited:
+    # Label highest-degree nodes by coupling
+    degree = dict(sub.degree(weight="weight"))
+    top_nodes = sorted(degree.items(), key=lambda x: x[1], reverse=True)[:10]
+    for pid, deg in top_nodes:
         if pid in pos and deg > 0:
             ax.annotate(
-                f"{textwrap.shorten(titles.get(pid, pid), 25)} ({deg}×)",
+                textwrap.shorten(titles.get(pid, pid), 28),
                 pos[pid], textcoords="offset points",
                 xytext=(4, 4), fontsize=5, alpha=0.8
             )
 
     legend_patches = [
-        mpatches.Patch(color="#DD8452", label="Citation edge (A → B means A cites B)"),
+        mpatches.Patch(color="#4C72B0",
+                       label="Bibliographic coupling (shared references, width ∝ strength)"),
+        mpatches.Patch(color="#DD8452",
+                       label="Direct citation within corpus"),
     ]
     ax.legend(handles=legend_patches, loc="lower right", fontsize=8, framealpha=0.7)
     plt.tight_layout()
@@ -416,27 +457,38 @@ def _cit_page_overview(pdf, G_cit, paper_ids, weights, titles, cluster_map):
     plt.close(fig)
 
 
-def _cit_page_in_degree(pdf, G_cit, paper_ids, titles):
-    """Bar chart: top papers by in-degree (most cited within corpus)."""
+def _cit_page_coupling_heatmap(pdf, G_cit, paper_ids, titles):
+    """
+    Coupling strength matrix and top-coupling pairs bar chart.
+    Shows which pairs of papers share the most references.
+    """
     paper_nodes = [n for n in G_cit.nodes() if n in set(paper_ids)]
-    if not paper_nodes:
+    sub = G_cit.subgraph(paper_nodes)
+
+    # Collect coupling pairs
+    pairs = [(u, v, d["weight"], d.get("shared_refs", 0))
+             for u, v, d in sub.edges(data=True)
+             if d.get("etype") == "bib_coupling" and u < v]
+    if not pairs:
         return
 
-    in_deg  = dict(G_cit.subgraph(paper_nodes).in_degree())
-    top     = sorted(in_deg.items(), key=lambda x: x[1], reverse=True)[:15]
-    if not any(v > 0 for _, v in top):
-        return
+    pairs.sort(key=lambda x: x[2], reverse=True)
+    top = pairs[:15]
 
     fig, ax = plt.subplots(figsize=(12, 6))
-    labels  = [textwrap.shorten(titles.get(pid, pid), 35) for pid, _ in top]
-    values  = [v for _, v in top]
+    labels = [f"{textwrap.shorten(titles.get(u,'?'), 20)} ↔ "
+              f"{textwrap.shorten(titles.get(v,'?'), 20)}"
+              for u, v, w, sr in top]
+    values = [w for _, _, w, _ in top]
+    shared = [sr for _, _, _, sr in top]
     colours = [_LEVEL_COLOURS[i % len(_LEVEL_COLOURS)] for i in range(len(top))]
-    bars = ax.barh(labels[::-1], values[::-1], color=colours[::-1], alpha=0.85,
-                   edgecolor="white")
-    ax.bar_label(bars, padding=3, fontsize=9)
-    ax.set_title("Most-Cited Papers in Corpus (in-degree)", fontsize=13,
-                 fontweight="bold")
-    ax.set_xlabel("Times cited by other corpus papers")
+    bars = ax.barh(labels[::-1], values[::-1], color=colours[::-1],
+                   alpha=0.85, edgecolor="white")
+    for bar, sr in zip(bars, shared[::-1]):
+        ax.text(bar.get_width() + 0.002, bar.get_y() + bar.get_height() / 2,
+                f"{sr} shared refs", va="center", fontsize=7)
+    ax.set_title("Top Bibliographically Coupled Pairs", fontsize=13, fontweight="bold")
+    ax.set_xlabel("Coupling strength (Kessler normalised)")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     plt.tight_layout()
@@ -470,7 +522,7 @@ def save_citation_pdf(graph: "HierarchicalResearchGraph", output_path: Path):
         d["Subject"] = "Directed citation graph"
 
         _cit_page_overview(pdf, G_cit, paper_ids, weights, titles, cluster_map)
-        _cit_page_in_degree(pdf, G_cit, paper_ids, titles)
+        _cit_page_coupling_heatmap(pdf, G_cit, paper_ids, titles)
         _page_stats(pdf, graph.stats(), top_papers)
 
     print(f"[viz] Citation network PDF saved → {output_path}")

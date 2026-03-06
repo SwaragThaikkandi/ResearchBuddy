@@ -1,37 +1,28 @@
 """
 citation_network.py
-Build a citation-based similarity network using OpenAlex (primary) and
-Semantic Scholar (fallback).
+Build a citation-based similarity network.
 
-Resolution strategy
+Resolution strategy (tried in order for each paper):
+  1. Extract DOI from title/abstract text via regex
+  2. CrossRef by DOI       → cited DOIs (most reliable for published papers)
+  3. CrossRef by bibliographic query (title + abstract snippet)
+  4. OpenAlex by DOI       → cited OpenAlex Work IDs
+  5. OpenAlex by title     → cited OpenAlex Work IDs
+  6. Semantic Scholar by S2 ID  (legacy fallback)
+
+Similarity measures
 -------------------
-For each paper, we attempt to find its reference list via:
-  1. OpenAlex by DOI  (fastest, most reliable for DOI-bearing papers)
-  2. OpenAlex by title search  (fallback if no DOI or DOI lookup fails)
-  3. Semantic Scholar by S2 ID  (legacy fallback)
-
-References are stored as normalised OpenAlex Work IDs ("W1234567890")
-or Semantic Scholar paper IDs, whichever source succeeded.  Bibliographic
-coupling and co-citation still work correctly as long as all refs for a
-given paper come from the same namespace — set intersections are key.
-
-Citation graph
---------------
-Directed: A → B means paper A cites paper B (B is inside our corpus).
-
-Bibliographic coupling (Kessler 1963)
---------------------------------------
+Bibliographic coupling (Kessler 1963):
   coupling(A, B) = |refs(A) ∩ refs(B)| / sqrt(|refs(A)| × |refs(B)|)
 
-Co-citation similarity
------------------------
-  co_cite(A, B) = |citers(A) ∩ citers(B)| / sqrt(|citers(A)| × |citers(B)|)
+Two papers are strongly coupled if they cite many of the same external works
+— this holds even for small corpora where direct intra-corpus citations are rare.
 """
 
 from __future__ import annotations
 
-import time
 import re
+import time
 import numpy as np
 import networkx as nx
 from typing import Optional
@@ -39,82 +30,136 @@ from typing import Optional
 import requests
 
 from researchbuddy.config import (
-    S2_PAPER_URL, REQUEST_TIMEOUT, REQUEST_DELAY,
-    OPENALEX_URL,
+    S2_PAPER_URL, REQUEST_TIMEOUT, REQUEST_DELAY, OPENALEX_URL,
 )
 
 _HEADERS = {
-    "User-Agent": "ResearchBuddy/0.3 (literature search assistant; "
+    "User-Agent": "ResearchBuddy/0.3 (research assistant; "
                   "https://github.com/SwaragThaikkandi/ResearchBuddy)"
 }
 
+_CROSSREF_URL = "https://api.crossref.org/works"
 
-# ── OpenAlex helpers ───────────────────────────────────────────────────────────
-
-def _oa_work_by_doi(doi: str) -> Optional[dict]:
-    """Fetch a single OpenAlex Work object by DOI."""
-    doi_clean = doi.strip().lstrip("https://doi.org/").lstrip("http://dx.doi.org/")
-    url = f"{OPENALEX_URL}/https://doi.org/{doi_clean}"
-    try:
-        r = requests.get(url, headers=_HEADERS, timeout=REQUEST_TIMEOUT)
-        if r.status_code == 200:
-            return r.json()
-    except Exception:
-        pass
-    return None
+# Minimum DOI length to avoid matching truncated DOIs
+_MIN_DOI_LEN = 12
 
 
-def _oa_work_by_title(title: str) -> Optional[dict]:
-    """Fetch best OpenAlex Work match by title search."""
+# ── DOI utilities ──────────────────────────────────────────────────────────────
+
+def extract_doi_from_text(text: str) -> str:
+    """
+    Find the first plausible DOI in any text string.
+    Handles 'doi:10.xxx', 'https://doi.org/10.xxx', plain '10.xxx/yyy'.
+    """
+    m = re.search(r'10\.\d{4,9}/[^\s"\'<>\[\]{},;]+', text)
+    if m:
+        doi = m.group(0).strip(".,;:)(")
+        if len(doi) >= _MIN_DOI_LEN:
+            return doi
+    return ""
+
+
+# ── CrossRef (primary source — returns cited DOIs directly) ───────────────────
+
+def _crossref_by_doi(doi: str) -> list[str]:
+    """
+    Fetch the reference list for a paper by its DOI via CrossRef.
+    Returns a list of cited DOIs.
+    """
     try:
         r = requests.get(
-            OPENALEX_URL,
-            params={"filter": f"title.search:{title[:120]}", "per-page": 1,
-                    "select": "id,doi,title,referenced_works"},
+            f"{_CROSSREF_URL}/{doi}",
             headers=_HEADERS,
             timeout=REQUEST_TIMEOUT,
         )
         if r.status_code == 200:
-            results = r.json().get("results", [])
-            if results:
-                return results[0]
+            msg = r.json().get("message", {})
+            return [ref["DOI"].lower().strip()
+                    for ref in msg.get("reference", [])
+                    if "DOI" in ref and ref["DOI"]]
     except Exception:
         pass
-    return None
+    return []
 
+
+def _crossref_by_query(query: str) -> tuple[str, list[str]]:
+    """
+    Bibliographic search via CrossRef. Sends up to 250 chars of combined
+    title+abstract text. Returns (found_doi, cited_dois).
+    CrossRef is very good at fuzzy bibliographic matching.
+    """
+    try:
+        r = requests.get(
+            _CROSSREF_URL,
+            params={
+                "query.bibliographic": query[:250],
+                "rows": 1,
+                "select": "DOI,title,reference,score",
+            },
+            headers=_HEADERS,
+            timeout=REQUEST_TIMEOUT,
+        )
+        if r.status_code == 200:
+            items = r.json().get("message", {}).get("items", [])
+            if items and items[0].get("score", 0) > 50:   # confidence threshold
+                item = items[0]
+                doi  = item.get("DOI", "").lower().strip()
+                refs = [ref["DOI"].lower().strip()
+                        for ref in item.get("reference", [])
+                        if "DOI" in ref and ref["DOI"]]
+                return doi, refs
+    except Exception:
+        pass
+    return "", []
+
+
+# ── OpenAlex (secondary — returns OpenAlex Work IDs) ──────────────────────────
 
 def _normalise_oa_id(raw: str) -> str:
     """'https://openalex.org/W123' → 'W123'"""
     return raw.split("/")[-1] if raw else ""
 
 
-def fetch_openalex_refs(doi: str = "", title: str = "") -> tuple[str, list[str]]:
-    """
-    Look up a paper on OpenAlex and return its reference list.
-
-    Returns
-    -------
-    (canonical_doi, [normalised_openalex_work_ids])
-    canonical_doi is empty string if not found.
-    """
-    work = None
-    if doi:
-        work = _oa_work_by_doi(doi)
-    if work is None and title:
-        work = _oa_work_by_title(title)
-    if work is None:
-        return "", []
-
-    canonical = (work.get("doi") or "").replace("https://doi.org/", "")
-    raw_refs  = work.get("referenced_works", [])
-    refs      = [_normalise_oa_id(r) for r in raw_refs if r]
-    return canonical, refs
+def _openalex_by_doi(doi: str) -> list[str]:
+    """Fetch referenced OpenAlex Work IDs by DOI."""
+    doi_clean = re.sub(r'^https?://(dx\.)?doi\.org/', '', doi)
+    url = f"{OPENALEX_URL}/https://doi.org/{doi_clean}"
+    try:
+        r = requests.get(url, headers=_HEADERS, timeout=REQUEST_TIMEOUT)
+        if r.status_code == 200:
+            raw = r.json().get("referenced_works", [])
+            return [_normalise_oa_id(x) for x in raw if x]
+    except Exception:
+        pass
+    return []
 
 
-# ── Semantic Scholar fallback ──────────────────────────────────────────────────
+def _openalex_by_title(title: str) -> list[str]:
+    """Search OpenAlex by title and return referenced Work IDs."""
+    try:
+        r = requests.get(
+            OPENALEX_URL,
+            params={
+                "filter": f"title.search:{title[:120]}",
+                "per-page": 1,
+                "select": "id,doi,referenced_works",
+            },
+            headers=_HEADERS,
+            timeout=REQUEST_TIMEOUT,
+        )
+        if r.status_code == 200:
+            items = r.json().get("results", [])
+            if items:
+                raw = items[0].get("referenced_works", [])
+                return [_normalise_oa_id(x) for x in raw if x]
+    except Exception:
+        pass
+    return []
+
+
+# ── S2 fallback ────────────────────────────────────────────────────────────────
 
 def _s2_refs(s2_id: str, limit: int = 150) -> list[str]:
-    """Return S2 paper IDs cited by s2_id."""
     url = f"{S2_PAPER_URL}/{s2_id}/references"
     try:
         r = requests.get(
@@ -139,75 +184,120 @@ def fetch_refs_for_paper(
     paper_id: str,
     doi: str = "",
     title: str = "",
+    abstract: str = "",
     s2_id: str = "",
     verbose: bool = True,
 ) -> tuple[str, set[str]]:
     """
-    Fetch the reference list for a single paper, trying all available identifiers.
+    Fetch the reference list for a single paper, trying every available
+    identifier.  Returns (source_label, set_of_ref_ids).
 
-    Returns
-    -------
-    (source_label, set_of_ref_ids)
-    source_label is one of "openalex", "s2", or "none".
+    Strategy:
+      1. Extract DOI from title/abstract text if doi param is empty
+      2. CrossRef by DOI  (most reliable, returns cited DOIs)
+      3. CrossRef bibliographic query  (title + abstract snippet, fuzzy)
+      4. OpenAlex by DOI
+      5. OpenAlex by title
+      6. Semantic Scholar (s2_id fallback)
     """
-    # 1. OpenAlex (DOI first, then title)
-    if doi or title:
-        canonical, refs = fetch_openalex_refs(doi=doi, title=title)
+    combined_text = f"{title} {abstract}".strip()
+
+    # Step 1: try to extract DOI from the paper's own text
+    if not doi and combined_text:
+        doi = extract_doi_from_text(combined_text)
+
+    # Step 2: CrossRef by DOI
+    if doi:
+        refs = _crossref_by_doi(doi)
         if refs:
             if verbose:
-                tag = f"doi={doi}" if doi else f"title={title[:50]}"
-                print(f"  [citation] OpenAlex  {len(refs):>4} refs  ({tag})")
-            return "openalex", set(refs)
+                print(f"  [citation] CrossRef/DOI  {len(refs):>4} refs  doi={doi[:50]}")
+            return "crossref_doi", set(refs)
 
-    # 2. Semantic Scholar fallback
+    # Step 3: CrossRef bibliographic query
+    # Feed real text from the PDF — CrossRef fuzzy-matches well
+    if combined_text:
+        # Use abstract if long enough (often contains real title + authors)
+        query = abstract[:250] if len(abstract) > 60 else combined_text[:250]
+        found_doi, refs = _crossref_by_query(query)
+        if refs:
+            if verbose:
+                print(f"  [citation] CrossRef/query {len(refs):>4} refs  "
+                      f"found_doi={found_doi[:40]}")
+            # Cache the found DOI back
+            return "crossref_query", set(refs)
+
+    # Step 4: OpenAlex by DOI
+    if doi:
+        refs = _openalex_by_doi(doi)
+        if refs:
+            if verbose:
+                print(f"  [citation] OpenAlex/DOI  {len(refs):>4} refs  doi={doi[:50]}")
+            return "openalex_doi", set(refs)
+
+    # Step 5: OpenAlex by title
+    if title and len(title) > 20:
+        refs = _openalex_by_title(title)
+        if refs:
+            if verbose:
+                print(f"  [citation] OpenAlex/title {len(refs):>4} refs  "
+                      f"title={title[:50]}")
+            return "openalex_title", set(refs)
+
+    # Step 6: Semantic Scholar
     if s2_id:
         refs = _s2_refs(s2_id)
         if refs:
             if verbose:
-                print(f"  [citation] S2        {len(refs):>4} refs  (s2={s2_id})")
+                print(f"  [citation] S2           {len(refs):>4} refs  s2={s2_id}")
             return "s2", set(refs)
 
     if verbose:
         label = doi or title[:40] or s2_id or paper_id
-        print(f"  [citation] No refs found for: {label}")
+        print(f"  [citation] Not found: {label[:60]}")
     return "none", set()
 
 
 def fetch_all_refs(
-    papers,                          # list of PaperMeta
+    papers,
     existing: dict[str, set[str]] | None = None,
     verbose: bool = True,
 ) -> dict[str, set[str]]:
     """
-    Fetch references for every paper in `papers` that does not already have
-    an entry in `existing`.
-
-    `existing` is keyed by `paper_id` (internal), values are sets of external
-    reference IDs (OpenAlex Work IDs or S2 paper IDs).
-
-    Returns the updated dict.
+    Fetch references for every paper in `papers` that is not already in `existing`.
+    Keyed by internal paper_id.
     """
     refs = dict(existing) if existing else {}
-    for meta in papers:
-        if meta.paper_id in refs:
-            continue
+    need = [m for m in papers if m.paper_id not in refs]
+    if not need:
+        return refs
+
+    if verbose:
+        print(f"[citation] Fetching references for {len(need)} papers "
+              f"(CrossRef → OpenAlex → S2) ...")
+
+    for meta in need:
         source, ref_set = fetch_refs_for_paper(
             paper_id = meta.paper_id,
             doi      = getattr(meta, "doi", "") or "",
             title    = meta.title or "",
+            abstract = getattr(meta, "abstract", "") or "",
             s2_id    = getattr(meta, "s2_id", "") or "",
             verbose  = verbose,
         )
         if ref_set:
             refs[meta.paper_id] = ref_set
         time.sleep(REQUEST_DELAY)
+
+    n_ok = sum(1 for pid in [m.paper_id for m in need] if pid in refs)
+    if verbose:
+        print(f"[citation] Got references for {n_ok}/{len(need)} papers.")
     return refs
 
 
-# ── Legacy S2-keyed fetch (kept for backward compatibility) ───────────────────
+# ── Legacy shims (kept for old callers) ───────────────────────────────────────
 
 def fetch_references(s2_id: str, limit: int = 100) -> list[str]:
-    """Compatibility shim: fetch via S2, return list of S2 paper IDs."""
     return _s2_refs(s2_id, limit)
 
 
@@ -215,11 +305,9 @@ def fetch_all_references(
     s2_ids: list[str],
     existing_refs: dict[str, set[str]] | None = None,
 ) -> dict[str, set[str]]:
-    """Compatibility shim for old callers using S2-keyed refs."""
     refs = dict(existing_refs) if existing_refs else {}
     for s2_id in s2_ids:
         if s2_id not in refs:
-            print(f"  [citation] Fetching S2 refs for {s2_id} …")
             refs[s2_id] = set(_s2_refs(s2_id))
             time.sleep(REQUEST_DELAY)
     return refs
@@ -233,7 +321,8 @@ def bibliographic_coupling_matrix(
 ) -> np.ndarray:
     """
     Symmetric (n×n) bibliographic coupling matrix.
-    `refs[paper_id]` = set of external ref IDs for that paper.
+    refs[paper_id] = set of external reference IDs (DOIs, OA IDs, S2 IDs).
+    Works regardless of ID type — only set intersections matter.
     """
     n = len(paper_ids)
     W = np.zeros((n, n), dtype=float)
@@ -253,82 +342,35 @@ def bibliographic_coupling_matrix(
     return W
 
 
-def co_citation_matrix(
-    paper_ids: list[str],
-    refs: dict[str, set[str]],
-) -> np.ndarray:
-    """
-    Symmetric (n×n) co-citation matrix.
-    co_cite(A, B) = how many papers in our set cite both A and B.
-    """
-    n = len(paper_ids)
-    # Build inverted index: ref_id → set of paper_ids (in our set) that cite it
-    citers: dict[str, set[str]] = {}
-    for pid in paper_ids:
-        for ref in refs.get(pid, set()):
-            citers.setdefault(ref, set()).add(pid)
-
-    W = np.zeros((n, n), dtype=float)
-    for i in range(n):
-        citing_i = {ref for ref in refs.get(paper_ids[i], set())}
-        c_i = {pid for ref in citing_i for pid in citers.get(ref, set())} - {paper_ids[i]}
-        if not c_i:
-            continue
-        for j in range(i + 1, n):
-            citing_j = {ref for ref in refs.get(paper_ids[j], set())}
-            c_j = {pid for ref in citing_j for pid in citers.get(ref, set())} - {paper_ids[j]}
-            overlap = len(c_i & c_j)
-            if overlap:
-                score = overlap / np.sqrt(len(c_i) * len(c_j))
-                W[i, j] = score
-                W[j, i] = score
-    return W
-
-
 def citation_similarity_matrix(
     paper_ids: list[str],
-    s2_ids: list[str],          # kept for API compat; not used internally now
+    s2_ids: list[str],          # kept for API compat; not used internally
     refs: dict[str, set[str]],  # keyed by paper_id
-    bib_weight: float = 0.6,
+    bib_weight: float = 1.0,    # only bib coupling now (co-cit needs citing data)
 ) -> np.ndarray:
-    """
-    Combined citation similarity: bib_weight × bib_coupling + (1-bib_weight) × co_citation.
-    """
-    W_bib = bibliographic_coupling_matrix(paper_ids, refs)
-    W_coc = co_citation_matrix(paper_ids, refs)
-    return bib_weight * W_bib + (1.0 - bib_weight) * W_coc
+    return bibliographic_coupling_matrix(paper_ids, refs)
 
 
 # ── Citation graph (directed) ──────────────────────────────────────────────────
 
 def build_citation_graph(
     paper_ids: list[str],
-    s2_ids: list[str],          # kept for API compat
+    s2_ids: list[str],
     refs: dict[str, set[str]],  # keyed by paper_id
 ) -> nx.DiGraph:
     """
-    Directed citation graph: edge A → B means A cites B.
-    Only edges where both A and B are in our corpus are included.
+    Build a directed citation graph.
 
-    Note: since refs now store external IDs (OpenAlex/S2), we cannot directly
-    match them to internal paper_ids.  Instead we use cross-corpus bibliographic
-    coupling strength as a proxy edge weight.
+    Two types of edges:
+    1. Bibliographic coupling (bib_coupling): undirected strength between any
+       two papers that share external references. Always populated when refs exist.
+    2. Direct citation (citation): A → B when A cites B directly (only when
+       both papers are in the corpus AND identified by the same ID namespace).
     """
     G = nx.DiGraph()
     G.add_nodes_from(paper_ids)
 
-    # Direct citation edges (only possible when refs are S2 paper IDs and
-    # papers also have S2 IDs — legacy path)
-    s2_to_internal = {s2: pid for pid, s2 in zip(paper_ids, s2_ids) if s2}
-    for pid, s2 in zip(paper_ids, s2_ids):
-        if not s2:
-            continue
-        for cited_s2 in refs.get(pid, set()):
-            if cited_s2 in s2_to_internal and s2_to_internal[cited_s2] != pid:
-                G.add_edge(pid, s2_to_internal[cited_s2],
-                           weight=1.0, etype="citation")
-
-    # Bibliographic coupling edges (works for all papers regardless of ID type)
+    # ── Bibliographic coupling edges ──────────────────────────────────────────
     n = len(paper_ids)
     for i in range(n):
         refs_i = refs.get(paper_ids[i], set())
@@ -340,10 +382,24 @@ def build_citation_graph(
                 continue
             overlap = len(refs_i & refs_j)
             if overlap:
-                coupling = overlap / np.sqrt(len(refs_i) * len(refs_j))
+                w = overlap / np.sqrt(len(refs_i) * len(refs_j))
                 G.add_edge(paper_ids[i], paper_ids[j],
-                           weight=coupling, etype="bib_coupling")
+                           weight=round(w, 4), etype="bib_coupling",
+                           shared_refs=overlap)
                 G.add_edge(paper_ids[j], paper_ids[i],
-                           weight=coupling, etype="bib_coupling")
+                           weight=round(w, 4), etype="bib_coupling",
+                           shared_refs=overlap)
+
+    # ── Direct citation edges (S2 namespace only) ─────────────────────────────
+    s2_to_internal = {s2: pid for pid, s2 in zip(paper_ids, s2_ids) if s2}
+    for pid, s2 in zip(paper_ids, s2_ids):
+        if not s2:
+            continue
+        for cited_s2 in refs.get(pid, set()):
+            target = s2_to_internal.get(cited_s2)
+            if target and target != pid:
+                # Only add if not already a stronger bib_coupling edge
+                if not G.has_edge(pid, target):
+                    G.add_edge(pid, target, weight=1.0, etype="citation")
 
     return G

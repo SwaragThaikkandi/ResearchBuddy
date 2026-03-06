@@ -19,6 +19,7 @@ Prediction is multi-level:
 from __future__ import annotations
 
 import hashlib
+import re
 import numpy as np
 import networkx as nx
 from collections import defaultdict
@@ -37,7 +38,7 @@ from researchbuddy.core.hierarchy import (
 )
 from researchbuddy.core.citation_network import (
     citation_similarity_matrix, build_citation_graph,
-    fetch_all_refs, fetch_all_references,
+    fetch_all_refs, fetch_all_references, extract_doi_from_text,
 )
 from researchbuddy.core.fusion import snf, fuse_scores
 
@@ -142,7 +143,15 @@ class HierarchicalResearchGraph:
         """
         Rebuild all three networks from scratch using current papers.
         The number of hierarchy levels is determined automatically by the data.
+        Auto-fetches missing citation data before rebuilding.
         """
+        # Auto-fetch citations for papers that don't have them yet
+        n_missing = sum(1 for m in self._papers.values()
+                        if m.paper_id not in self._refs)
+        if n_missing > 0:
+            print(f"[graph] Auto-fetching citations for {n_missing} papers ...")
+            self.fetch_citations(verbose=True)
+
         papers_with_emb = [m for m in self._papers.values() if m.embedding is not None]
         if len(papers_with_emb) < 3:
             return
@@ -268,8 +277,22 @@ class HierarchicalResearchGraph:
     def fetch_citations(self, verbose: bool = True):
         """
         Fetch references for every paper that does not yet have citation data.
-        Uses OpenAlex (DOI → title) as primary source, Semantic Scholar as fallback.
+        Strategy (per paper):
+          1. Extract DOI from title/abstract text if not already set
+          2. CrossRef by DOI  (returns cited DOIs — most reliable)
+          3. CrossRef bibliographic query  (fuzzy, uses abstract text)
+          4. OpenAlex by DOI / title
+          5. Semantic Scholar fallback
         """
+        # Scan existing text for DOIs that weren't extracted during import
+        for meta in self._papers.values():
+            if not getattr(meta, "doi", ""):
+                doi = extract_doi_from_text(
+                    (meta.title or "") + " " + (meta.abstract or "")
+                )
+                if doi:
+                    meta.doi = doi
+
         need = [m for m in self._papers.values()
                 if m.paper_id not in self._refs]
         if not need:
@@ -277,8 +300,7 @@ class HierarchicalResearchGraph:
                 print("[graph] Citation data already up to date.")
             return
         if verbose:
-            print(f"[graph] Fetching citations for {len(need)} papers "
-                  f"via OpenAlex (DOI/title) ...")
+            print(f"[graph] Fetching citations for {len(need)} papers ...")
         self._refs = fetch_all_refs(need, existing=self._refs, verbose=verbose)
         self._invalidate()
 
