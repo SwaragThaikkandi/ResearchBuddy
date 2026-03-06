@@ -1,32 +1,43 @@
 from pathlib import Path
 
-# ── User data directory (persists across installs / reinstalls) ────────────────
+# ── User data directory ────────────────────────────────────────────────────────
 DATA_DIR   = Path.home() / ".researchbuddy"
 STATE_FILE = DATA_DIR / "research_graph.pkl"
 TEMP_DIR   = DATA_DIR / "temp_papers"
+GRAPH_PDF  = DATA_DIR / "graph.pdf"
 
 # ── Embedding ──────────────────────────────────────────────────────────────────
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"   # Fast, 384-dim, runs on CPU fine
+EMBEDDING_MODEL      = "all-MiniLM-L6-v2"   # 384-dim, CPU-friendly
 
-# ── Graph ─────────────────────────────────────────────────────────────────────
-SIMILARITY_THRESHOLD  = 0.45    # Min cosine similarity to draw an edge
-DEFAULT_SEED_WEIGHT   = 5.0     # Implicit rating for seed PDFs (1-10 scale)
-LEARNING_RATE         = 0.15    # How much a new rating shifts edge weights
-MAX_EDGE_WEIGHT       = 10.0
+# ── Graph / edges ──────────────────────────────────────────────────────────────
+SIMILARITY_THRESHOLD = 0.45    # min cosine sim to draw an edge
+DEFAULT_SEED_WEIGHT  = 5.0     # implicit rating for unrated seed PDFs
+LEARNING_RATE        = 0.15    # how fast ratings shift edge weights
+
+# ── Hierarchy (Hierarchical Small World Network) ───────────────────────────────
+N_HIERARCHY_LEVELS   = 2       # 1=niches only, 2=niches+areas, 3=+domains
+
+# ── Fusion (Similarity Network Fusion) ────────────────────────────────────────
+FUSION_ALPHA         = 0.6     # weight for semantic stream  (1-alpha = citation)
+SNF_KNN              = 10      # k for KNN-kernel in SNF diffusion
+SNF_ITER             = 15      # diffusion iterations
 
 # ── Recommendations ────────────────────────────────────────────────────────────
-N_RECOMMENDATIONS     = 10      # Papers shown per search session
-EXPLORATION_RATIO     = 0.25    # Fraction of suggestions that are exploratory
-MIN_NOVELTY_DISTANCE  = 0.30    # Cosine distance for "exploratory" papers
+N_RECOMMENDATIONS    = 10
+EXPLORATION_RATIO    = 0.25    # fraction of suggestions that are exploratory
+MIN_NOVELTY_DISTANCE = 0.30    # min distance from graph for "explore" papers
 
 # ── Search ────────────────────────────────────────────────────────────────────
-S2_SEARCH_URL         = "https://api.semanticscholar.org/graph/v1/paper/search"
-S2_REC_URL            = "https://api.semanticscholar.org/recommendations/v1/papers"
-S2_PAPER_URL          = "https://api.semanticscholar.org/graph/v1/paper"
-ARXIV_SEARCH_URL      = "https://export.arxiv.org/api/query"
-MAX_SEARCH_RESULTS    = 30      # Max candidates fetched per query
-REQUEST_TIMEOUT       = 15      # Seconds
-REQUEST_DELAY         = 1.0     # Polite delay between API calls (seconds)
+S2_SEARCH_URL        = "https://api.semanticscholar.org/graph/v1/paper/search"
+S2_REC_URL           = "https://api.semanticscholar.org/recommendations/v1/papers"
+S2_PAPER_URL         = "https://api.semanticscholar.org/graph/v1/paper"
+ARXIV_SEARCH_URL     = "https://export.arxiv.org/api/query"
+MAX_SEARCH_RESULTS   = 30
+REQUEST_TIMEOUT      = 15
+REQUEST_DELAY        = 1.0
 
 # ── Keyword extraction ─────────────────────────────────────────────────────────
-TOP_KEYWORDS          = 8       # Keywords extracted per context vector
+TOP_KEYWORDS         = 8
+
+# ── Visualization ─────────────────────────────────────────────────────────────
+SAVE_GRAPH_PDF       = True    # disable with --no-plot CLI flag

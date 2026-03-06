@@ -3,12 +3,20 @@
 ResearchBuddy CLI — interactive literature search session.
 
 Usage (after pip install):
-    researchbuddy                     # load saved graph and start session
-    researchbuddy --pdf <folder>      # import PDFs then start session
-    researchbuddy --reset             # discard saved state, start fresh
+    researchbuddy                         # load saved graph and start session
+    researchbuddy --pdf <folder>          # import PDFs then start session
+    researchbuddy --reset                 # clear saved state, start fresh
 
-Usage (without install):
-    python -m researchbuddy           # same as above
+Tunable parameters (override config defaults):
+    researchbuddy --alpha 0.7             # more weight on semantic similarity
+    researchbuddy --exploration-ratio 0.4 # more exploratory suggestions
+    researchbuddy --similarity-threshold 0.5
+    researchbuddy --n-levels 3            # deeper hierarchy
+    researchbuddy --n-recommendations 15
+    researchbuddy --no-plot               # skip PDF graph export
+
+Run without installing:
+    python -m researchbuddy [flags]
 """
 
 from __future__ import annotations
@@ -17,8 +25,8 @@ import argparse
 import textwrap
 import time
 
-from researchbuddy.config import N_RECOMMENDATIONS, STATE_FILE
-from researchbuddy.core.graph_model   import ResearchGraph, PaperMeta
+import researchbuddy.config as cfg
+from researchbuddy.core.graph_model   import HierarchicalResearchGraph, PaperMeta
 from researchbuddy.core.state_manager import save, load, import_pdf_folder, resolve_seed_s2_ids
 from researchbuddy.core.searcher      import find_candidates
 
@@ -75,7 +83,7 @@ def ask(prompt: str, default: str = "") -> str:
 # ── Paper display ──────────────────────────────────────────────────────────────
 
 def display_paper(idx: int, meta: PaperMeta, score: float, label: str):
-    score_pct = f"{score*100:.0f}%"
+    score_pct = f"{score * 100:.0f}%"
     year      = str(meta.year) if meta.year else "?"
     auth      = ", ".join(meta.authors[:2]) if meta.authors else "Unknown"
     if len(meta.authors) > 2:
@@ -115,12 +123,14 @@ def display_results(results: list[tuple[PaperMeta, float, str]]):
 
 # ── Rating workflow ────────────────────────────────────────────────────────────
 
-def rating_session(graph: ResearchGraph, results: list[tuple[PaperMeta, float, str]]):
+def rating_session(graph: HierarchicalResearchGraph, results: list[tuple[PaperMeta, float, str]]):
     if not results:
         return
     print_header("Rate Papers")
     print_info("Rate 1-10 (0 or Enter = skip, q = done).  * = exploratory paper.")
     print()
+
+    rated_any = False
     for i, (meta, _, label) in enumerate(results, start=1):
         tag = "[*] " if label == "explore" else "    "
         if HAS_RICH:
@@ -129,7 +139,7 @@ def rating_session(graph: ResearchGraph, results: list[tuple[PaperMeta, float, s
             print(f"  [{i}] {tag}{meta.title[:80]}")
 
         raw = ask("      Rating", "0")
-        if raw.lower() == 'q':
+        if raw.lower() == "q":
             break
         try:
             rating = int(raw)
@@ -144,19 +154,24 @@ def rating_session(graph: ResearchGraph, results: list[tuple[PaperMeta, float, s
         if meta.paper_id not in [p.paper_id for p in graph.all_papers()]:
             graph.embed_abstract(meta)
             graph.add_paper(meta, meta.embedding)
-        graph.rate_paper(meta.paper_id, rating)
+        graph.rate_paper(meta.paper_id, float(rating))
+        rated_any = True
 
         if rating >= 7:
-            print_success(f"      Marked highly relevant (weight={rating}).")
+            print_success(f"      Highly relevant (weight={rating}).")
         elif rating >= 4:
-            print_info(f"      Added with moderate relevance (weight={rating}).")
+            print_info(f"      Moderate relevance (weight={rating}).")
         else:
-            print_warn(f"      Recorded as low relevance (negative example).")
+            print_warn(f"      Low relevance — will be used as negative example.")
+
+    if rated_any:
+        print_info("\n[graph] Rebuilding hierarchy with new ratings ...")
+        graph.rebuild_hierarchy()
 
 
 # ── Stats ──────────────────────────────────────────────────────────────────────
 
-def show_stats(graph: ResearchGraph):
+def show_stats(graph: HierarchicalResearchGraph):
     stats = graph.stats()
     print_header("Graph Statistics")
     if HAS_RICH:
@@ -168,7 +183,7 @@ def show_stats(graph: ResearchGraph):
         console.print(t)
     else:
         for k, v in stats.items():
-            print(f"  {k:20s}: {v}")
+            print(f"  {k:25s}: {v}")
 
     rated = sorted(
         [m for m in graph.rated_papers() if m.user_rating is not None],
@@ -179,16 +194,22 @@ def show_stats(graph: ResearchGraph):
         for m in rated[:5]:
             print(f"    [{m.user_rating:.0f}/10] {m.title[:70]}")
 
+    print_info(f"\n  Active parameters:")
+    print_info(f"    alpha (semantic weight) = {graph.alpha}")
+    print_info(f"    hierarchy levels        = {graph.n_levels}")
+    print_info(f"    exploration ratio       = {cfg.EXPLORATION_RATIO}")
+    print_info(f"    similarity threshold    = {cfg.SIMILARITY_THRESHOLD}")
+
 
 # ── Search session ─────────────────────────────────────────────────────────────
 
-def search_session(graph: ResearchGraph):
+def search_session(graph: HierarchicalResearchGraph, plot: bool = True):
     if graph.context_vector() is None:
         print_warn("No context vector yet. Add seed PDFs (option 3) or rate some papers first.")
         return
 
     print_info("\nOptional: extra search keywords (comma-separated), or Enter to skip:")
-    raw = ask("Keywords", "")
+    raw   = ask("Keywords", "")
     extra = [kw.strip() for kw in raw.split(",") if kw.strip()] if raw.strip() else []
 
     print()
@@ -198,25 +219,42 @@ def search_session(graph: ResearchGraph):
         print_warn("No results returned. Check your internet connection.")
         return
 
-    print_info("Ranking candidates ...")
-    results = graph.rank_candidates(candidates, n=N_RECOMMENDATIONS)
-
+    print_info("Ranking candidates (fused semantic + citation scores) ...")
+    results = graph.rank_candidates(candidates, n=cfg.N_RECOMMENDATIONS,
+                                    exploration_ratio=cfg.EXPLORATION_RATIO)
     display_results(results)
+
     if results:
         if ask("\nRate these papers? (y/n)", "y").lower() == "y":
             rating_session(graph, results)
         print_info("Auto-saving ...")
         save(graph)
 
+    # Generate PDF graph after each search session
+    if plot and cfg.SAVE_GRAPH_PDF:
+        _try_plot(graph)
+
+
+def _try_plot(graph: HierarchicalResearchGraph):
+    try:
+        from researchbuddy.core.visualizer import save_graph_pdf
+        print_info("Generating graph PDF ...")
+        save_graph_pdf(graph, cfg.GRAPH_PDF)
+        print_success(f"Graph saved → {cfg.GRAPH_PDF}")
+    except Exception as e:
+        print_warn(f"Graph PDF skipped: {e}")
+
 
 # ── Main menu ──────────────────────────────────────────────────────────────────
 
-def main_menu(graph: ResearchGraph):
+def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
     options = {
         "1": "Search for new papers",
         "2": "Show graph statistics",
         "3": "Add PDF folder",
-        "4": "Resolve Semantic Scholar IDs (improves recommendations)",
+        "4": "Fetch citation data (improves fusion quality)",
+        "5": "Resolve Semantic Scholar IDs for seed papers",
+        "6": "Rebuild hierarchy & regenerate graph PDF",
         "q": "Save & quit",
     }
     while True:
@@ -224,7 +262,8 @@ def main_menu(graph: ResearchGraph):
         s = graph.stats()
         print_info(
             f"  {s['total_papers']} papers  |  {s['rated_papers']} rated  |  "
-            f"{s['graph_edges']} edges  |  context: {'ready' if s['context_ready'] else 'not ready'}"
+            f"{s['niche_clusters']} niches  |  {s['area_clusters']} areas  |  "
+            f"{s['graph_edges']} edges"
         )
         print()
         for key, desc in options.items():
@@ -239,7 +278,7 @@ def main_menu(graph: ResearchGraph):
         if choice == "q":
             break
         elif choice == "1":
-            search_session(graph)
+            search_session(graph, plot=plot)
         elif choice == "2":
             show_stats(graph)
         elif choice == "3":
@@ -248,44 +287,101 @@ def main_menu(graph: ResearchGraph):
                 import_pdf_folder(graph, folder)
                 save(graph)
         elif choice == "4":
-            if ask("This makes API calls for each seed paper. Proceed? (y/n)", "n").lower() == "y":
+            graph.fetch_citations()
+            graph.rebuild_hierarchy()
+            save(graph)
+        elif choice == "5":
+            if ask("Make API calls to S2 for each seed paper? (y/n)", "n").lower() == "y":
                 resolve_seed_s2_ids(graph)
                 save(graph)
+        elif choice == "6":
+            print_info("Rebuilding hierarchy ...")
+            graph.rebuild_hierarchy()
+            save(graph)
+            if plot:
+                _try_plot(graph)
         else:
             print_warn("Unknown option.")
+
+
+# ── CLI argument parser ────────────────────────────────────────────────────────
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description="ResearchBuddy – hierarchical graph-based literature search assistant",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument("--pdf",    metavar="FOLDER", help="Import PDFs from folder on startup")
+    p.add_argument("--reset",  action="store_true", help="Clear saved state and start fresh")
+
+    # ── Tunable parameters ──────────────────────────────────────────────────
+    g = p.add_argument_group("model parameters (override config.py defaults)")
+    g.add_argument("--alpha", type=float, default=None,
+                   metavar="FLOAT",
+                   help=f"Semantic vs citation weight (0-1). Default: {cfg.FUSION_ALPHA}")
+    g.add_argument("--exploration-ratio", type=float, default=None,
+                   metavar="FLOAT",
+                   help=f"Fraction of suggestions that are exploratory. Default: {cfg.EXPLORATION_RATIO}")
+    g.add_argument("--similarity-threshold", type=float, default=None,
+                   metavar="FLOAT",
+                   help=f"Min cosine sim to draw a graph edge. Default: {cfg.SIMILARITY_THRESHOLD}")
+    g.add_argument("--n-levels", type=int, default=None,
+                   metavar="INT",
+                   help=f"Hierarchy depth (1=niches, 2=+areas, 3=+domains). Default: {cfg.N_HIERARCHY_LEVELS}")
+    g.add_argument("--n-recommendations", type=int, default=None,
+                   metavar="INT",
+                   help=f"Papers shown per search session. Default: {cfg.N_RECOMMENDATIONS}")
+    g.add_argument("--no-plot", action="store_true",
+                   help="Disable PDF graph generation after each session")
+    return p
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="ResearchBuddy – graph-based literature search assistant"
-    )
-    parser.add_argument("--pdf",   metavar="FOLDER", help="Import PDFs from folder on startup")
-    parser.add_argument("--reset", action="store_true", help="Clear saved state and start fresh")
-    args = parser.parse_args()
+    args = _build_parser().parse_args()
+
+    # Apply CLI overrides to config module (affects all imports)
+    if args.alpha               is not None: cfg.FUSION_ALPHA         = args.alpha
+    if args.exploration_ratio   is not None: cfg.EXPLORATION_RATIO    = args.exploration_ratio
+    if args.similarity_threshold is not None: cfg.SIMILARITY_THRESHOLD = args.similarity_threshold
+    if args.n_levels            is not None: cfg.N_HIERARCHY_LEVELS   = args.n_levels
+    if args.n_recommendations   is not None: cfg.N_RECOMMENDATIONS    = args.n_recommendations
+    if args.no_plot:                          cfg.SAVE_GRAPH_PDF       = False
+    plot = not args.no_plot
 
     if HAS_RICH:
         console.print(Panel.fit(
-            "[bold cyan]ResearchBuddy[/]\n[dim]Graph-based literature search assistant[/]",
+            "[bold cyan]ResearchBuddy[/]\n"
+            "[dim]Hierarchical graph-based literature search assistant[/]",
             border_style="cyan"
         ))
     else:
         print("=" * 60)
-        print("  ResearchBuddy - Graph-based literature search assistant")
+        print("  ResearchBuddy - Hierarchical literature search assistant")
         print("=" * 60)
 
-    if args.reset and STATE_FILE.exists():
-        STATE_FILE.unlink()
+    if args.reset and cfg.STATE_FILE.exists():
+        cfg.STATE_FILE.unlink()
         print_info("Saved state cleared.")
 
     graph = load()
     if graph is None:
-        graph = ResearchGraph()
+        graph = HierarchicalResearchGraph(
+            n_levels=cfg.N_HIERARCHY_LEVELS,
+            alpha=cfg.FUSION_ALPHA,
+        )
         print_info("Starting with a fresh graph.")
     else:
+        # Apply CLI overrides to loaded graph
+        if args.alpha   is not None: graph.alpha    = cfg.FUSION_ALPHA
+        if args.n_levels is not None: graph.n_levels = cfg.N_HIERARCHY_LEVELS
         s = graph.stats()
-        print_success(f"Loaded graph: {s['total_papers']} papers, {s['rated_papers']} rated.")
+        print_success(
+            f"Loaded: {s['total_papers']} papers, "
+            f"{s['niche_clusters']} niches, "
+            f"{s['rated_papers']} rated."
+        )
 
     if args.pdf:
         import_pdf_folder(graph, args.pdf)
@@ -298,7 +394,7 @@ def main():
             save(graph)
 
     try:
-        main_menu(graph)
+        main_menu(graph, plot=plot)
     except KeyboardInterrupt:
         print("\n[Interrupted]")
 

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name            = "researchbuddy"
-version         = "0.1.0"
-description     = "Graph-based literature search assistant for researchers"
+version         = "0.2.0"
+description     = "Hierarchical graph-based literature search assistant for researchers"
 readme          = "README.md"
 requires-python = ">=3.9"
 license         = {text = "MIT"}
@@ -31,6 +31,7 @@ dependencies = [
     "scikit-learn>=1.2.0",
     "rich>=13.0.0",
     "keybert>=0.7.0",
+    "matplotlib>=3.7.0",
 ]
 
 [project.scripts]

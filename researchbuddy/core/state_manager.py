@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from researchbuddy.config import STATE_FILE, DATA_DIR
-from researchbuddy.core.graph_model import ResearchGraph, PaperMeta
+from researchbuddy.core.graph_model import HierarchicalResearchGraph, ResearchGraph, PaperMeta
 from researchbuddy.core.pdf_processor import extract_from_folder, ExtractedPaper
 
 
@@ -25,12 +25,15 @@ def save(graph: ResearchGraph, path: Path = STATE_FILE) -> None:
     print(f"[state] Graph saved → {path}")
 
 
-def load(path: Path = STATE_FILE) -> Optional[ResearchGraph]:
+def load(path: Path = STATE_FILE) -> Optional[HierarchicalResearchGraph]:
     if not path.exists():
         return None
     try:
         with open(path, "rb") as f:
-            graph: ResearchGraph = pickle.load(f)
+            graph = pickle.load(f)
+        # Migrate old flat ResearchGraph to HierarchicalResearchGraph
+        if not isinstance(graph, HierarchicalResearchGraph):
+            graph = HierarchicalResearchGraph.from_legacy(graph)
         print(f"[state] Graph loaded <- {path}")
         return graph
     except Exception as e:
@@ -40,7 +43,7 @@ def load(path: Path = STATE_FILE) -> Optional[ResearchGraph]:
 
 # ── Import seed PDFs ───────────────────────────────────────────────────────────
 
-def import_pdf_folder(graph: ResearchGraph, folder: str | Path) -> int:
+def import_pdf_folder(graph: HierarchicalResearchGraph, folder: str | Path) -> int:
     """
     Extract text + embeddings from every PDF in `folder` and add them to the
     graph as seed nodes. Returns the number of newly added papers.
@@ -72,6 +75,9 @@ def import_pdf_folder(graph: ResearchGraph, folder: str | Path) -> int:
             print(f"  ~ Already in graph: {ep.title[:70]}")
 
     print(f"[state] {added} new seed papers added ({len(extracted)} PDFs processed).")
+    if added > 0:
+        print("[state] Rebuilding hierarchy ...")
+        graph.rebuild_hierarchy()
     return added
 
 
