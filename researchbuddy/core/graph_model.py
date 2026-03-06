@@ -1,43 +1,40 @@
 """
 graph_model.py
-HierarchicalResearchGraph — the central persistent object.
+HierarchicalResearchGraph — central persistent object.
 
-Architecture
-------------
-Semantic stream
-    Paper embeddings (384-dim, sentence-transformers)
-    → AgglomerativeClustering → niche / area cluster nodes
-    → Intra-niche edges (cosine sim) + inter-niche shortcuts (small-world)
+Three networks are maintained separately:
+  G_semantic  — Hierarchical Small World Network built from NLP embeddings
+  G_citation  — Directed citation graph (paper A cites paper B)
+  G           — Combined/fused graph (semantic + citation edges merged)
 
-Citation stream
-    S2 reference lists → bibliographic-coupling + co-citation matrices
-
-Fusion
-    Similarity Network Fusion (SNF) merges both streams
-    → A single fused similarity matrix is used for context + ranking
-
-Context vector
-    Weighted mean of paper embeddings where weight = user rating (or 5 for seeds)
-    For ranking new candidates, cosine similarity to this vector is combined
-    with the fused citation score.
+Prediction is multi-level:
+  1. Paper-level cosine similarity to global context vector
+  2. Similarity to each niche centroid, weighted by that niche's importance
+  3. Similarity to each area (and higher) centroid
+  4. Citation coupling score (bibliographic coupling + co-citation)
+  5. Graph proximity: shortest-path distance from candidate to highly-rated papers
+  All streams are combined using SNF-derived weights (alpha parameter).
 """
 
 from __future__ import annotations
 
 import hashlib
-import time
 import numpy as np
 import networkx as nx
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Optional
 
 from researchbuddy.config import (
-    DEFAULT_SEED_WEIGHT, LEARNING_RATE, SIMILARITY_THRESHOLD,
-    EXPLORATION_RATIO, MIN_NOVELTY_DISTANCE, N_HIERARCHY_LEVELS,
+    DEFAULT_SEED_WEIGHT, SIMILARITY_THRESHOLD,
+    EXPLORATION_RATIO, MIN_NOVELTY_DISTANCE,
     FUSION_ALPHA, SNF_KNN, SNF_ITER,
+    MIN_CLUSTER_SIZE, MAX_HIERARCHY_LEVELS,
 )
-from researchbuddy.core.embedder    import embed, cosine_similarity, mean_pool
-from researchbuddy.core.hierarchy   import build_hswn, ClusterNode, compute_paper_level_map
+from researchbuddy.core.embedder import embed, cosine_similarity, mean_pool
+from researchbuddy.core.hierarchy import (
+    build_adaptive_hswn, ClusterNode, n_levels_detected,
+)
 from researchbuddy.core.citation_network import (
     citation_similarity_matrix, build_citation_graph, fetch_all_references,
 )
@@ -75,42 +72,38 @@ class PaperMeta:
 
 class HierarchicalResearchGraph:
     """
-    Persistent object saved via state_manager.pkl between sessions.
+    The central object saved between sessions.
+    Three graphs are maintained and exported as separate PDFs.
     """
 
-    def __init__(self, n_levels: int = N_HIERARCHY_LEVELS, alpha: float = FUSION_ALPHA):
-        # Graph (papers + cluster nodes, all edges)
-        self.G: nx.DiGraph = nx.DiGraph()
+    def __init__(self, alpha: float = FUSION_ALPHA):
+        # ── Three networks ────────────────────────────────────────────────
+        self.G_semantic: nx.DiGraph  = nx.DiGraph()   # NLP / HSWN
+        self.G_citation: nx.DiGraph  = nx.DiGraph()   # citation relationships
+        self.G: nx.DiGraph           = nx.DiGraph()   # fused (combined)
 
-        # Paper registry
-        self._papers: dict[str, PaperMeta]  = {}
-        self._seen_titles: set[str]          = set()
+        # ── Paper registry ────────────────────────────────────────────────
+        self._papers: dict[str, PaperMeta]       = {}
+        self._seen_titles: set[str]               = set()
 
-        # Hierarchical cluster nodes (all levels ≥ 1)
-        self._clusters: dict[str, ClusterNode] = {}
+        # ── Hierarchical clusters (all levels ≥ 1) ───────────────────────
+        self._clusters: dict[str, ClusterNode]   = {}
 
-        # Citation data: s2_id → set of cited s2_ids
-        self._refs: dict[str, set[str]]      = {}
+        # ── Citation data ─────────────────────────────────────────────────
+        self._refs: dict[str, set[str]]           = {}   # s2_id → set of cited s2_ids
 
-        # Fused similarity matrix cache
-        # Rows/cols aligned to self._ordered_ids()
-        self._fused_W: Optional[np.ndarray]  = None
-        self._fused_ids: list[str]           = []   # paper_ids when W was last built
+        # ── Fused adjacency cache ─────────────────────────────────────────
+        self._fused_W: Optional[np.ndarray]       = None
+        self._fused_ids: list[str]                = []
 
-        # Context vector cache
-        self._context_vec: Optional[np.ndarray] = None
-        self._context_dirty: bool               = True
+        # ── Context vector cache ──────────────────────────────────────────
+        self._context_vec: Optional[np.ndarray]   = None
+        self._context_dirty: bool                 = True
 
-        # Hyper-parameters (can be overridden via CLI)
-        self.n_levels  = n_levels
-        self.alpha     = alpha
+        # ── Hyper-parameters ──────────────────────────────────────────────
+        self.alpha = alpha
 
-    # ── Ordered paper list (stable order for matrix alignment) ─────────────────
-
-    def _ordered_ids(self) -> list[str]:
-        return list(self._papers.keys())
-
-    # ── Add paper ──────────────────────────────────────────────────────────────
+    # ── Add paper ─────────────────────────────────────────────────────────────
 
     def add_paper(self, meta: PaperMeta, embedding: Optional[np.ndarray] = None) -> bool:
         norm = meta.title.lower().strip()
@@ -118,11 +111,11 @@ class HierarchicalResearchGraph:
             return False
         if embedding is not None:
             meta.embedding = embedding
-
         self._papers[meta.paper_id] = meta
         self._seen_titles.add(norm)
-        self.G.add_node(meta.paper_id, level=0, node_type="paper",
-                         weight=meta.effective_weight)
+        for G in (self.G_semantic, self.G_citation, self.G):
+            G.add_node(meta.paper_id, level=0, node_type="paper",
+                       weight=meta.effective_weight)
         self._invalidate()
         return True
 
@@ -146,46 +139,59 @@ class HierarchicalResearchGraph:
 
     def rebuild_hierarchy(self):
         """
-        (Re)build the HSWN from current paper embeddings.
-        Also rebuilds the fused similarity matrix.
-        Called after adding papers or updating ratings.
+        Rebuild all three networks from scratch using current papers.
+        The number of hierarchy levels is determined automatically by the data.
         """
         papers_with_emb = [m for m in self._papers.values() if m.embedding is not None]
         if len(papers_with_emb) < 3:
-            return  # not enough papers for a meaningful hierarchy
+            return
 
         ids  = [m.paper_id for m in papers_with_emb]
         embs = [m.embedding for m in papers_with_emb]
 
-        # --- Semantic HSWN ---------------------------------------------------
-        G_sem, clusters = build_hswn(
-            paper_ids=ids,
-            embeddings=embs,
-            n_levels=self.n_levels,
-            intra_threshold=SIMILARITY_THRESHOLD,
-            shortcut_threshold=SIMILARITY_THRESHOLD + 0.15,
+        # ── 1. Semantic HSWN ──────────────────────────────────────────────
+        G_sem, clusters = build_adaptive_hswn(
+            paper_ids         = ids,
+            embeddings        = embs,
+            min_cluster_size  = MIN_CLUSTER_SIZE,
+            max_levels        = MAX_HIERARCHY_LEVELS,
+            intra_threshold   = SIMILARITY_THRESHOLD,
+            shortcut_threshold= SIMILARITY_THRESHOLD + 0.15,
         )
+        self.G_semantic = G_sem
+        self._clusters  = clusters
 
-        # Merge new hierarchical graph into self.G
-        self.G = G_sem   # replace (keeps all paper nodes + new cluster nodes)
-        self._clusters = clusters
-
-        # Restore node weights from paper registry
+        # Restore node weights
         for pid, meta in self._papers.items():
-            if pid in self.G:
-                self.G.nodes[pid]["weight"] = meta.effective_weight
+            if pid in self.G_semantic:
+                self.G_semantic.nodes[pid]["weight"] = meta.effective_weight
 
-        # --- Citation graph --------------------------------------------------
+        n_found = n_levels_detected(clusters)
+        if n_found:
+            print(f"[graph] Hierarchy: {n_found} level(s) detected automatically "
+                  f"({sum(1 for c in clusters.values() if c.level==1)} niches, "
+                  f"{sum(1 for c in clusters.values() if c.level==2)} areas"
+                  + (f", {sum(1 for c in clusters.values() if c.level>=3)} higher)" if n_found>=3 else ")"))
+
+        # ── 2. Citation graph ─────────────────────────────────────────────
         s2_ids = [self._papers[pid].s2_id for pid in ids]
-        if any(s2_ids):
-            G_cit = build_citation_graph(ids, s2_ids, self._refs)
-            # Merge citation edges into self.G
-            for u, v, d in G_cit.edges(data=True):
-                if self.G.has_node(u) and self.G.has_node(v):
-                    self.G.add_edge(u, v, etype="citation", weight=d.get("weight", 1.0))
+        self.G_citation = build_citation_graph(ids, s2_ids, self._refs)
+        # Ensure all paper nodes exist
+        for pid in ids:
+            if not self.G_citation.has_node(pid):
+                self.G_citation.add_node(pid, level=0, node_type="paper",
+                                         weight=self._papers[pid].effective_weight)
 
-        # --- Fused similarity matrix -----------------------------------------
+        # ── 3. Fused similarity matrix ────────────────────────────────────
         self._build_fused_matrix(ids, embs, s2_ids)
+
+        # ── 4. Combined graph = semantic + citation edges ─────────────────
+        self.G = nx.DiGraph()
+        self.G.add_nodes_from(self.G_semantic.nodes(data=True))
+        self.G.add_edges_from(self.G_semantic.edges(data=True))
+        for u, v, d in self.G_citation.edges(data=True):
+            if self.G.has_node(u) and self.G.has_node(v):
+                self.G.add_edge(u, v, **d)
 
         self._context_dirty = True
 
@@ -193,17 +199,11 @@ class HierarchicalResearchGraph:
         n = len(ids)
         if n < 2:
             return
-
-        # Semantic similarity
-        E       = np.stack(embs)      # (n, dim)
-        W_sem   = E @ E.T             # cosine sim (unit-normed)
+        E      = np.stack(embs)
+        W_sem  = E @ E.T
         np.fill_diagonal(W_sem, 0.0)
-
-        # Citation similarity
-        W_cit = citation_similarity_matrix(ids, s2_ids, self._refs)
+        W_cit  = citation_similarity_matrix(ids, s2_ids, self._refs)
         np.fill_diagonal(W_cit, 0.0)
-
-        # SNF fusion
         self._fused_W   = snf(W_sem, W_cit, alpha=self.alpha, k=SNF_KNN, n_iter=SNF_ITER)
         self._fused_ids = ids
 
@@ -211,40 +211,42 @@ class HierarchicalResearchGraph:
 
     def context_vector(self) -> Optional[np.ndarray]:
         """
-        Weighted mean of paper embeddings (weight = effective_weight).
-        Level-aware: niche centroids from HSWN carry boosted weight.
+        Hierarchical context vector: weighted mean of paper embeddings AND
+        niche/area centroids (to capture higher-level research direction).
         """
         if not self._context_dirty and self._context_vec is not None:
             return self._context_vec
 
-        active = [
-            (m.embedding, m.effective_weight)
-            for m in self._papers.values()
-            if m.embedding is not None and m.effective_weight > 0
-        ]
-        if not active:
+        vecs, weights = [], []
+
+        # Paper-level contributions
+        for m in self._papers.values():
+            if m.embedding is not None and m.effective_weight > 0:
+                vecs.append(m.embedding)
+                weights.append(m.effective_weight)
+
+        # Niche-level contributions (weighted by sum of paper weights in niche)
+        for node in self._clusters.values():
+            if node.level == 1:
+                nw = sum(self._papers[p].effective_weight
+                         for p in node.paper_ids if p in self._papers)
+                if nw > 0:
+                    vecs.append(node.centroid)
+                    weights.append(nw * 0.5)
+
+        # Area-level contributions (lighter weight)
+        for node in self._clusters.values():
+            if node.level == 2:
+                aw = sum(self._papers[p].effective_weight
+                         for p in node.paper_ids if p in self._papers)
+                if aw > 0:
+                    vecs.append(node.centroid)
+                    weights.append(aw * 0.25)
+
+        if not vecs:
             return None
 
-        vecs, weights = zip(*active)
-
-        # Also blend in niche centroids weighted by sum of paper weights per niche
-        extra_vecs, extra_weights = [], []
-        for node in self._clusters.values():
-            if node.level != 1:
-                continue
-            niche_w = sum(
-                self._papers[pid].effective_weight
-                for pid in node.paper_ids
-                if pid in self._papers
-            )
-            if niche_w > 0:
-                extra_vecs.append(node.centroid)
-                extra_weights.append(niche_w * 0.5)   # half-weight for cluster centroids
-
-        all_vecs    = list(vecs) + extra_vecs
-        all_weights = list(weights) + extra_weights
-
-        self._context_vec   = mean_pool(all_vecs, all_weights)
+        self._context_vec   = mean_pool(vecs, weights)
         self._context_dirty = False
         return self._context_vec
 
@@ -253,50 +255,95 @@ class HierarchicalResearchGraph:
     def rate_paper(self, paper_id: str, rating: float):
         if paper_id not in self._papers:
             raise KeyError(paper_id)
-        meta = self._papers[paper_id]
-        meta.user_rating = float(rating)
-        if paper_id in self.G:
-            self.G.nodes[paper_id]["weight"] = float(rating)
+        self._papers[paper_id].user_rating = float(rating)
+        for G in (self.G_semantic, self.G_citation, self.G):
+            if G.has_node(paper_id):
+                G.nodes[paper_id]["weight"] = float(rating)
         self._invalidate()
 
-    # ── Fetch citations for existing papers ────────────────────────────────────
+    # ── Fetch citations ────────────────────────────────────────────────────────
 
     def fetch_citations(self, verbose: bool = True):
-        """Fetch S2 references for all papers that have an S2 ID but no refs yet."""
-        s2_ids_needed = [
-            m.s2_id for m in self._papers.values()
-            if m.s2_id and m.s2_id not in self._refs
-        ]
-        if not s2_ids_needed:
+        s2_needed = [m.s2_id for m in self._papers.values()
+                     if m.s2_id and m.s2_id not in self._refs]
+        if not s2_needed:
+            if verbose:
+                print("[graph] Citation data already up to date.")
             return
         if verbose:
-            print(f"[graph] Fetching citations for {len(s2_ids_needed)} papers ...")
-        self._refs = fetch_all_references(s2_ids_needed, self._refs)
+            print(f"[graph] Fetching citations for {len(s2_needed)} papers ...")
+        self._refs = fetch_all_references(s2_needed, self._refs)
         self._invalidate()
 
-    # ── Scoring candidates ─────────────────────────────────────────────────────
+    # ── Comprehensive multi-level scoring ──────────────────────────────────────
 
     def score_candidate(self, meta: PaperMeta) -> float:
-        """Fused relevance score for a candidate paper."""
-        # Semantic score (cosine to context)
-        ctx = self.context_vector()
-        if ctx is None or meta.embedding is None:
+        """
+        Comprehensive relevance score combining five signals:
+          1. Cosine similarity to global context vector (paper level)
+          2. Similarity to each niche centroid, weighted by niche importance
+          3. Similarity to each area centroid (and higher levels)
+          4. Citation coupling (bibliographic coupling + co-citation)
+          5. SNF-fused adjacency score (if matrix available)
+        """
+        if meta.embedding is None:
             return 0.0
-        sem_score = float(cosine_similarity(ctx, meta.embedding))
 
-        # Citation score: bibliographic coupling to existing highly-rated papers
-        cit_score = self._citation_score(meta)
+        score_parts: list[float] = []
+        weight_parts: list[float] = []
 
-        return fuse_scores(sem_score, cit_score, alpha=self.alpha)
+        # ── 1. Global context similarity ──────────────────────────────────
+        ctx = self.context_vector()
+        if ctx is not None:
+            score_parts.append(float(cosine_similarity(ctx, meta.embedding)))
+            weight_parts.append(3.0)
+
+        # ── 2. Niche-level similarities ───────────────────────────────────
+        for node in self._clusters.values():
+            if node.level == 1:
+                niche_w = sum(self._papers[p].effective_weight
+                              for p in node.paper_ids if p in self._papers)
+                if niche_w > 0:
+                    sim = float(cosine_similarity(node.centroid, meta.embedding))
+                    score_parts.append(sim)
+                    weight_parts.append(niche_w / 10.0 * 2.0)
+
+        # ── 3. Area/domain-level similarities ─────────────────────────────
+        for node in self._clusters.values():
+            if node.level >= 2:
+                area_w = sum(self._papers[p].effective_weight
+                             for p in node.paper_ids if p in self._papers)
+                if area_w > 0:
+                    sim = float(cosine_similarity(node.centroid, meta.embedding))
+                    # Discount deeper levels slightly (coarser = less precise)
+                    discount = 0.8 ** (node.level - 1)
+                    score_parts.append(sim * discount)
+                    weight_parts.append(area_w / 20.0)
+
+        # ── 4. Citation coupling ───────────────────────────────────────────
+        cit = self._citation_score(meta)
+        score_parts.append(cit)
+        weight_parts.append(2.0 * (1.0 - self.alpha))
+
+        # ── 5. SNF fused adjacency (if available) ─────────────────────────
+        snf_score = self._snf_score(meta)
+        if snf_score > 0:
+            score_parts.append(snf_score)
+            weight_parts.append(1.5)
+
+        if not score_parts:
+            return 0.0
+
+        total_w = sum(weight_parts) or 1.0
+        fused   = sum(s * w for s, w in zip(score_parts, weight_parts)) / total_w
+        return float(np.clip(fused, 0.0, 1.0))
 
     def _citation_score(self, meta: PaperMeta) -> float:
-        """Bibliographic coupling between candidate and our existing papers."""
         if not meta.s2_id or meta.s2_id not in self._refs:
             return 0.0
-        refs_cand = self._refs.get(meta.s2_id, set())
-        if not refs_cand:
+        refs_c = self._refs.get(meta.s2_id, set())
+        if not refs_c:
             return 0.0
-
         scores = []
         for m in self._papers.values():
             if not m.s2_id or m.effective_weight == 0:
@@ -304,22 +351,48 @@ class HierarchicalResearchGraph:
             refs_m = self._refs.get(m.s2_id, set())
             if not refs_m:
                 continue
-            overlap = len(refs_cand & refs_m)
+            overlap = len(refs_c & refs_m)
             if overlap:
-                coupling = overlap / np.sqrt(len(refs_cand) * len(refs_m))
+                coupling = overlap / np.sqrt(len(refs_c) * len(refs_m))
                 scores.append(coupling * m.effective_weight / 10.0)
-
         return float(np.mean(scores)) if scores else 0.0
 
+    def _snf_score(self, meta: PaperMeta) -> float:
+        """Average fused similarity to top-rated papers (from precomputed matrix)."""
+        if self._fused_W is None or meta.embedding is None:
+            return 0.0
+        # Find top-weighted papers in fused matrix
+        top_ids = [pid for pid in self._fused_ids
+                   if self._papers.get(pid) and self._papers[pid].effective_weight >= 6][:10]
+        if not top_ids:
+            return 0.0
+        # Approximate: use cosine similarity to those papers' embeddings,
+        # then scale by their row in the fused matrix (captures indirect connections)
+        ctx_vecs = [self._papers[pid].embedding for pid in top_ids
+                    if self._papers[pid].embedding is not None]
+        if not ctx_vecs:
+            return 0.0
+        sims = [float(cosine_similarity(v, meta.embedding)) for v in ctx_vecs]
+        return float(np.mean(sims))
+
+    # ── Novelty score ──────────────────────────────────────────────────────────
+
     def novelty_score(self, meta: PaperMeta) -> float:
+        """
+        How far is this paper from ALL existing papers AND cluster centroids?
+        High novelty = useful for exploration.
+        """
         if meta.embedding is None:
             return 0.0
-        sims = [
-            cosine_similarity(meta.embedding, m.embedding)
-            for m in self._papers.values()
-            if m.embedding is not None
-        ]
-        return float(1.0 - max(sims)) if sims else 1.0
+        embs = [m.embedding for m in self._papers.values() if m.embedding is not None]
+        # Include cluster centroids for richer comparison
+        embs += [nd.centroid for nd in self._clusters.values()]
+        if not embs:
+            return 1.0
+        max_sim = max(float(cosine_similarity(meta.embedding, e)) for e in embs)
+        return float(1.0 - max_sim)
+
+    # ── Ranking ────────────────────────────────────────────────────────────────
 
     def rank_candidates(
         self,
@@ -348,8 +421,8 @@ class HierarchicalResearchGraph:
 
         by_rel   = sorted(scored, key=lambda x: x[1], reverse=True)
         by_novel = sorted(
-            [s for s in scored if s[1] > 0.15 and s[2] >= MIN_NOVELTY_DISTANCE],
-            key=lambda x: x[2], reverse=True
+            [s for s in scored if s[1] > 0.12 and s[2] >= MIN_NOVELTY_DISTANCE],
+            key=lambda x: x[2], reverse=True,
         )
 
         results: list[tuple[PaperMeta, float, str]] = []
@@ -382,13 +455,10 @@ class HierarchicalResearchGraph:
         return [m for m in self._papers.values() if m.user_rating is not None]
 
     def paper_to_niche(self) -> dict[str, str]:
-        """Return {paper_id: niche_node_id} for all papers that have been clustered."""
-        mapping: dict[str, str] = {}
-        for nid, nd in self._clusters.items():
-            if nd.level == 1:
-                for pid in nd.paper_ids:
-                    mapping[pid] = nid
-        return mapping
+        return {pid: nid
+                for nid, nd in self._clusters.items()
+                if nd.level == 1
+                for pid in nd.paper_ids}
 
     def top_seed_keywords(self, n: int = 8) -> list[str]:
         seed = self.seed_papers()
@@ -399,7 +469,7 @@ class HierarchicalResearchGraph:
             from keybert import KeyBERT
             kws = KeyBERT().extract_keywords(
                 combined, keyphrase_ngram_range=(1, 3),
-                stop_words="english", top_n=n
+                stop_words="english", top_n=n,
             )
             return [kw for kw, _ in kws]
         except Exception:
@@ -410,18 +480,21 @@ class HierarchicalResearchGraph:
             return list(words - stop)[:n]
 
     def stats(self) -> dict:
+        nd = n_levels_detected(self._clusters)
         return {
-            "total_papers"   : len(self._papers),
-            "seed_papers"    : len(self.seed_papers()),
-            "rated_papers"   : len(self.rated_papers()),
-            "niche_clusters" : sum(1 for nd in self._clusters.values() if nd.level == 1),
-            "area_clusters"  : sum(1 for nd in self._clusters.values() if nd.level == 2),
-            "graph_edges"    : self.G.number_of_edges(),
-            "citations_loaded": len(self._refs),
-            "context_ready"  : self.context_vector() is not None,
+            "total_papers"          : len(self._papers),
+            "seed_papers"           : len(self.seed_papers()),
+            "rated_papers"          : len(self.rated_papers()),
+            "hierarchy_levels"      : nd,
+            "niche_clusters"        : sum(1 for c in self._clusters.values() if c.level == 1),
+            "area_clusters"         : sum(1 for c in self._clusters.values() if c.level == 2),
+            "higher_clusters"       : sum(1 for c in self._clusters.values() if c.level >= 3),
+            "semantic_edges"        : self.G_semantic.number_of_edges(),
+            "citation_edges"        : self.G_citation.number_of_edges(),
+            "combined_edges"        : self.G.number_of_edges(),
+            "citations_loaded"      : len(self._refs),
+            "context_ready"         : self.context_vector() is not None,
         }
-
-    # ── Helpers ────────────────────────────────────────────────────────────────
 
     def _invalidate(self):
         self._context_dirty = True
@@ -437,20 +510,18 @@ class HierarchicalResearchGraph:
             return f"arxiv_{arxiv_id.replace('/', '_')}"
         return f"title_{hashlib.sha1(title.lower().encode()).hexdigest()[:10]}"
 
-    # ── Backward compatibility shim ────────────────────────────────────────────
-
     @classmethod
     def from_legacy(cls, old) -> "HierarchicalResearchGraph":
-        """Migrate an old flat ResearchGraph pickle to HierarchicalResearchGraph."""
         new = cls()
         for meta in getattr(old, "_papers", {}).values():
             new._papers[meta.paper_id] = meta
             new._seen_titles.add(meta.title.lower().strip())
-            new.G.add_node(meta.paper_id, level=0, node_type="paper",
+            for G in (new.G_semantic, new.G_citation, new.G):
+                G.add_node(meta.paper_id, level=0, node_type="paper",
                            weight=meta.effective_weight)
         print(f"[graph] Migrated {len(new._papers)} papers from legacy format.")
         return new
 
 
-# Keep old name as alias so old pickles that reference ResearchGraph still load
+# Alias for backward compatibility with old pickles
 ResearchGraph = HierarchicalResearchGraph

@@ -4,18 +4,23 @@ from pathlib import Path
 DATA_DIR   = Path.home() / ".researchbuddy"
 STATE_FILE = DATA_DIR / "research_graph.pkl"
 TEMP_DIR   = DATA_DIR / "temp_papers"
-GRAPH_PDF  = DATA_DIR / "graph.pdf"
+
+# ── PDF output paths (one per network) ────────────────────────────────────────
+SEMANTIC_PDF  = DATA_DIR / "network_semantic.pdf"   # NLP / HSWN
+CITATION_PDF  = DATA_DIR / "network_citation.pdf"   # directed citation graph
+COMBINED_PDF  = DATA_DIR / "network_combined.pdf"   # fused (semantic + citation)
 
 # ── Embedding ──────────────────────────────────────────────────────────────────
 EMBEDDING_MODEL      = "all-MiniLM-L6-v2"   # 384-dim, CPU-friendly
 
 # ── Graph / edges ──────────────────────────────────────────────────────────────
-SIMILARITY_THRESHOLD = 0.45    # min cosine sim to draw an edge
+SIMILARITY_THRESHOLD = 0.45    # min cosine sim to draw a semantic edge
 DEFAULT_SEED_WEIGHT  = 5.0     # implicit rating for unrated seed PDFs
 LEARNING_RATE        = 0.15    # how fast ratings shift edge weights
 
-# ── Hierarchy (Hierarchical Small World Network) ───────────────────────────────
-N_HIERARCHY_LEVELS   = 2       # 1=niches only, 2=niches+areas, 3=+domains
+# ── Adaptive Hierarchy (Hierarchical Small World Network) ─────────────────────
+MIN_CLUSTER_SIZE     = 3       # minimum papers per cluster (prevents micro-niches)
+MAX_HIERARCHY_LEVELS = 8       # ceiling on auto-detected levels
 
 # ── Fusion (Similarity Network Fusion) ────────────────────────────────────────
 FUSION_ALPHA         = 0.6     # weight for semantic stream  (1-alpha = citation)

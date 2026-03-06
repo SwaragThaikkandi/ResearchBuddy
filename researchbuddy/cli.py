@@ -11,7 +11,6 @@ Tunable parameters (override config defaults):
     researchbuddy --alpha 0.7             # more weight on semantic similarity
     researchbuddy --exploration-ratio 0.4 # more exploratory suggestions
     researchbuddy --similarity-threshold 0.5
-    researchbuddy --n-levels 3            # deeper hierarchy
     researchbuddy --n-recommendations 15
     researchbuddy --no-plot               # skip PDF graph export
 
@@ -196,7 +195,7 @@ def show_stats(graph: HierarchicalResearchGraph):
 
     print_info(f"\n  Active parameters:")
     print_info(f"    alpha (semantic weight) = {graph.alpha}")
-    print_info(f"    hierarchy levels        = {graph.n_levels}")
+    print_info(f"    hierarchy levels        = auto-detected ({stats.get('hierarchy_levels', 0)})")
     print_info(f"    exploration ratio       = {cfg.EXPLORATION_RATIO}")
     print_info(f"    similarity threshold    = {cfg.SIMILARITY_THRESHOLD}")
 
@@ -230,19 +229,20 @@ def search_session(graph: HierarchicalResearchGraph, plot: bool = True):
         print_info("Auto-saving ...")
         save(graph)
 
-    # Generate PDF graph after each search session
+    # Generate all three PDF graphs after each search session
     if plot and cfg.SAVE_GRAPH_PDF:
-        _try_plot(graph)
+        _try_plot_all(graph)
 
 
-def _try_plot(graph: HierarchicalResearchGraph):
+def _try_plot_all(graph: HierarchicalResearchGraph):
+    """Generate semantic, citation, and combined PDF graphs."""
     try:
-        from researchbuddy.core.visualizer import save_graph_pdf
-        print_info("Generating graph PDF ...")
-        save_graph_pdf(graph, cfg.GRAPH_PDF)
-        print_success(f"Graph saved → {cfg.GRAPH_PDF}")
+        from researchbuddy.core.visualizer import save_all_pdfs
+        print_info("Generating network PDFs (semantic / citation / combined) ...")
+        save_all_pdfs(graph)
+        print_success(f"PDFs saved to {cfg.DATA_DIR}/")
     except Exception as e:
-        print_warn(f"Graph PDF skipped: {e}")
+        print_warn(f"Graph PDF generation skipped: {e}")
 
 
 # ── Main menu ──────────────────────────────────────────────────────────────────
@@ -254,7 +254,7 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
         "3": "Add PDF folder",
         "4": "Fetch citation data (improves fusion quality)",
         "5": "Resolve Semantic Scholar IDs for seed papers",
-        "6": "Rebuild hierarchy & regenerate graph PDF",
+        "6": "Rebuild hierarchy & regenerate all graph PDFs",
         "q": "Save & quit",
     }
     while True:
@@ -262,8 +262,9 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
         s = graph.stats()
         print_info(
             f"  {s['total_papers']} papers  |  {s['rated_papers']} rated  |  "
+            f"{s['hierarchy_levels']} levels  |  "
             f"{s['niche_clusters']} niches  |  {s['area_clusters']} areas  |  "
-            f"{s['graph_edges']} edges"
+            f"sem={s['semantic_edges']} edges  cit={s['citation_edges']} edges"
         )
         print()
         for key, desc in options.items():
@@ -299,7 +300,7 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
             graph.rebuild_hierarchy()
             save(graph)
             if plot:
-                _try_plot(graph)
+                _try_plot_all(graph)
         else:
             print_warn("Unknown option.")
 
@@ -325,9 +326,6 @@ def _build_parser() -> argparse.ArgumentParser:
     g.add_argument("--similarity-threshold", type=float, default=None,
                    metavar="FLOAT",
                    help=f"Min cosine sim to draw a graph edge. Default: {cfg.SIMILARITY_THRESHOLD}")
-    g.add_argument("--n-levels", type=int, default=None,
-                   metavar="INT",
-                   help=f"Hierarchy depth (1=niches, 2=+areas, 3=+domains). Default: {cfg.N_HIERARCHY_LEVELS}")
     g.add_argument("--n-recommendations", type=int, default=None,
                    metavar="INT",
                    help=f"Papers shown per search session. Default: {cfg.N_RECOMMENDATIONS}")
@@ -342,12 +340,11 @@ def main():
     args = _build_parser().parse_args()
 
     # Apply CLI overrides to config module (affects all imports)
-    if args.alpha               is not None: cfg.FUSION_ALPHA         = args.alpha
-    if args.exploration_ratio   is not None: cfg.EXPLORATION_RATIO    = args.exploration_ratio
+    if args.alpha                is not None: cfg.FUSION_ALPHA         = args.alpha
+    if args.exploration_ratio    is not None: cfg.EXPLORATION_RATIO    = args.exploration_ratio
     if args.similarity_threshold is not None: cfg.SIMILARITY_THRESHOLD = args.similarity_threshold
-    if args.n_levels            is not None: cfg.N_HIERARCHY_LEVELS   = args.n_levels
-    if args.n_recommendations   is not None: cfg.N_RECOMMENDATIONS    = args.n_recommendations
-    if args.no_plot:                          cfg.SAVE_GRAPH_PDF       = False
+    if args.n_recommendations    is not None: cfg.N_RECOMMENDATIONS    = args.n_recommendations
+    if args.no_plot:                           cfg.SAVE_GRAPH_PDF       = False
     plot = not args.no_plot
 
     if HAS_RICH:
@@ -367,18 +364,15 @@ def main():
 
     graph = load()
     if graph is None:
-        graph = HierarchicalResearchGraph(
-            n_levels=cfg.N_HIERARCHY_LEVELS,
-            alpha=cfg.FUSION_ALPHA,
-        )
+        graph = HierarchicalResearchGraph(alpha=cfg.FUSION_ALPHA)
         print_info("Starting with a fresh graph.")
     else:
-        # Apply CLI overrides to loaded graph
-        if args.alpha   is not None: graph.alpha    = cfg.FUSION_ALPHA
-        if args.n_levels is not None: graph.n_levels = cfg.N_HIERARCHY_LEVELS
+        if args.alpha is not None:
+            graph.alpha = cfg.FUSION_ALPHA
         s = graph.stats()
         print_success(
             f"Loaded: {s['total_papers']} papers, "
+            f"{s['hierarchy_levels']} levels, "
             f"{s['niche_clusters']} niches, "
             f"{s['rated_papers']} rated."
         )
