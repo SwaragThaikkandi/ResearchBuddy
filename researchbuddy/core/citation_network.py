@@ -5,7 +5,7 @@ Build a citation-based similarity network.
 Resolution strategy (tried in order for each paper):
   1. Extract DOI from title/abstract text via regex
   2. CrossRef by DOI       → cited DOIs (most reliable for published papers)
-  3. CrossRef by bibliographic query (title + abstract snippet)
+  3. CrossRef by bibliographic query (multiple cleaned text variants, fuzzy)
   4. OpenAlex by DOI       → cited OpenAlex Work IDs
   5. OpenAlex by title     → cited OpenAlex Work IDs
   6. Semantic Scholar by S2 ID  (legacy fallback)
@@ -59,6 +59,115 @@ def extract_doi_from_text(text: str) -> str:
     return ""
 
 
+# ── Query cleaning helpers ─────────────────────────────────────────────────────
+
+# Patterns that indicate a line is journal/publisher metadata, not paper content
+_META_PATTERNS = [
+    re.compile(r'article\s+in\s+press', re.IGNORECASE),
+    re.compile(r'^art[iI][cC][lL][eE][sS]?$', re.IGNORECASE),
+    re.compile(r'this\s+article\s+was\s+download', re.IGNORECASE),
+    re.compile(r'available\s+online\s+at', re.IGNORECASE),
+    re.compile(r'www\.\S+\.(com|org|net|edu)', re.IGNORECASE),
+    re.compile(r'https?://', re.IGNORECASE),
+    re.compile(r'doi\s*:\s*10\.', re.IGNORECASE),
+    re.compile(r'^\s*©\s*\d{4}'),                          # copyright lines
+    re.compile(r'elsevier|springer|wiley|taylor\s*&\s*francis|sage\s+pub',
+               re.IGNORECASE),
+    re.compile(r'received\s+\d|accepted\s+\d|published\s+(online|by)',
+               re.IGNORECASE),
+    re.compile(r'open\s+access|creative\s+commons|cc\s+by', re.IGNORECASE),
+    re.compile(r'volume\s+\d|vol\.\s*\d|issue\s+\d', re.IGNORECASE),
+    re.compile(r'pages?\s+\d+[-–]\d+', re.IGNORECASE),
+    re.compile(r'^\s*[A-Z][a-z]+\s+(journal|review|bulletin|letters|science|'
+               r'psychology|behavior|cogniti)\b', re.IGNORECASE),
+    re.compile(r'^\s*\d[\d\s.,–\-]{3,}$'),                # pure number lines
+]
+
+# Journal-header block: "JournalName91(2019)1437–1460"
+_JOURNAL_HEADER_RE = re.compile(
+    r'^[A-Za-z][A-Za-z\s]+\d{1,4}\s*\(\d{4}\)\s*\d+'
+)
+
+
+def _is_metadata_line(line: str) -> bool:
+    """Return True if this line looks like journal/download/publisher metadata."""
+    stripped = line.strip()
+    if not stripped or len(stripped) < 4:
+        return True
+    for pat in _META_PATTERNS:
+        if pat.search(stripped):
+            return True
+    if _JOURNAL_HEADER_RE.match(stripped):
+        return True
+    # Line with very few alphabetic chars relative to total — likely codes/numbers
+    alpha = sum(c.isalpha() for c in stripped)
+    if len(stripped) < 60 and alpha < len(stripped) * 0.40:
+        return True
+    return False
+
+
+def _smart_clean_query(text: str) -> str:
+    """
+    Strip journal-metadata noise from abstract/title text.
+    Returns cleaned text suitable for a CrossRef bibliographic query.
+    """
+    lines = re.split(r'[\n\r]+', text)
+    good = [l.strip() for l in lines if not _is_metadata_line(l)]
+    result = ' '.join(good)
+    # Collapse multiple spaces
+    result = re.sub(r'\s{2,}', ' ', result)
+    # Strip leading journal-citation block: "Name46(2002)704-715 Title…"
+    result = re.sub(r'^[A-Za-z\s]+\d+\s*\(\d{4}\)\s*[\d\-–]+\s*', '', result)
+    # Strip ALL-CAPS section headers ("ABSTRACT", "INTRODUCTION", etc.)
+    result = re.sub(r'\b[A-Z]{5,}\b\s*', '', result)
+    return result.strip()
+
+
+def _prepare_queries(title: str, abstract: str) -> list[str]:
+    """
+    Return an ordered list of query strings to try with CrossRef, best first.
+    Tries cleaning, skipping headers, raw fallbacks, and title-only.
+    """
+    candidates: list[str] = []
+
+    # 1. Cleaned abstract — strips journal-header noise
+    if abstract and len(abstract) > 40:
+        q = _smart_clean_query(abstract)
+        if len(q) > 40:
+            candidates.append(q[:250])
+
+    # 2. Skip first 60 chars (often journal header) → take next 250
+    if abstract and len(abstract) > 110:
+        mid = _smart_clean_query(abstract[60:350])
+        if len(mid) > 40:
+            candidates.append(mid[:250])
+
+    # 3. Raw abstract first 250 chars (if cleaning was too aggressive)
+    if abstract and len(abstract) > 40:
+        raw = abstract[:250].strip()
+        candidates.append(raw)
+
+    # 4. Cleaned title
+    if title and len(title) > 20:
+        t = _smart_clean_query(title)
+        if len(t) > 20:
+            candidates.append(t[:200])
+
+    # 5. Raw title fallback
+    if title and len(title) > 20:
+        candidates.append(title[:200])
+
+    # Deduplicate preserving order (compare first 60 chars as key)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for c in candidates:
+        key = c[:60].lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(c)
+    return unique
+
+
 # ── CrossRef (primary source — returns cited DOIs directly) ───────────────────
 
 def _crossref_by_doi(doi: str) -> list[str]:
@@ -82,34 +191,46 @@ def _crossref_by_doi(doi: str) -> list[str]:
     return []
 
 
-def _crossref_by_query(query: str) -> tuple[str, list[str]]:
+def _crossref_by_query(
+    queries: list[str],
+    min_score: float = 25.0,
+) -> tuple[str, list[str]]:
     """
-    Bibliographic search via CrossRef. Sends up to 250 chars of combined
-    title+abstract text. Returns (found_doi, cited_dois).
-    CrossRef is very good at fuzzy bibliographic matching.
+    Try each query candidate in order against CrossRef bibliographic search.
+    Returns (found_doi, cited_dois) for the first successful hit.
+
+    Threshold lowered from 50 → min_score (default 25) for better recall;
+    we still require at least one cited DOI to avoid false positives.
     """
-    try:
-        r = requests.get(
-            _CROSSREF_URL,
-            params={
-                "query.bibliographic": query[:250],
-                "rows": 1,
-                "select": "DOI,title,reference,score",
-            },
-            headers=_HEADERS,
-            timeout=REQUEST_TIMEOUT,
-        )
-        if r.status_code == 200:
-            items = r.json().get("message", {}).get("items", [])
-            if items and items[0].get("score", 0) > 50:   # confidence threshold
-                item = items[0]
-                doi  = item.get("DOI", "").lower().strip()
-                refs = [ref["DOI"].lower().strip()
-                        for ref in item.get("reference", [])
-                        if "DOI" in ref and ref["DOI"]]
-                return doi, refs
-    except Exception:
-        pass
+    for query in queries:
+        if not query or len(query) < 20:
+            continue
+        try:
+            r = requests.get(
+                _CROSSREF_URL,
+                params={
+                    "query.bibliographic": query[:250],
+                    "rows": 1,
+                    "select": "DOI,title,reference,score",
+                },
+                headers=_HEADERS,
+                timeout=REQUEST_TIMEOUT,
+            )
+            if r.status_code == 200:
+                items = r.json().get("message", {}).get("items", [])
+                if items:
+                    item  = items[0]
+                    score = item.get("score", 0)
+                    refs  = [ref["DOI"].lower().strip()
+                             for ref in item.get("reference", [])
+                             if "DOI" in ref and ref["DOI"]]
+                    # Accept if score passes threshold AND there are real refs
+                    if score >= min_score and refs:
+                        doi = item.get("DOI", "").lower().strip()
+                        return doi, refs
+        except Exception:
+            pass
+        time.sleep(0.2)   # small gap between retry attempts
     return "", []
 
 
@@ -195,7 +316,7 @@ def fetch_refs_for_paper(
     Strategy:
       1. Extract DOI from title/abstract text if doi param is empty
       2. CrossRef by DOI  (most reliable, returns cited DOIs)
-      3. CrossRef bibliographic query  (title + abstract snippet, fuzzy)
+      3. CrossRef bibliographic query  (multiple cleaned variants, fuzzy)
       4. OpenAlex by DOI
       5. OpenAlex by title
       6. Semantic Scholar (s2_id fallback)
@@ -214,17 +335,14 @@ def fetch_refs_for_paper(
                 print(f"  [citation] CrossRef/DOI  {len(refs):>4} refs  doi={doi[:50]}")
             return "crossref_doi", set(refs)
 
-    # Step 3: CrossRef bibliographic query
-    # Feed real text from the PDF — CrossRef fuzzy-matches well
-    if combined_text:
-        # Use abstract if long enough (often contains real title + authors)
-        query = abstract[:250] if len(abstract) > 60 else combined_text[:250]
-        found_doi, refs = _crossref_by_query(query)
+    # Step 3: CrossRef bibliographic query (multiple cleaned query candidates)
+    queries = _prepare_queries(title, abstract)
+    if queries:
+        found_doi, refs = _crossref_by_query(queries)
         if refs:
             if verbose:
                 print(f"  [citation] CrossRef/query {len(refs):>4} refs  "
                       f"found_doi={found_doi[:40]}")
-            # Cache the found DOI back
             return "crossref_query", set(refs)
 
     # Step 4: OpenAlex by DOI
