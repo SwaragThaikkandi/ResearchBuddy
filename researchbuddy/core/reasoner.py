@@ -396,12 +396,20 @@ class Reasoner:
                            or graph.G_citation.has_edge(pid_b, pid_a))
                 has_sem = (graph.G_semantic.has_edge(pid_a, pid_b)
                            or graph.G_semantic.has_edge(pid_b, pid_a))
-                if has_cit and has_sem:
-                    desc = "linked by citation + semantic similarity"
-                elif has_cit:
-                    desc = "citation link"
+                if has_cit:
+                    # Retrieve annotated citation type from edge attributes
+                    cit_type = "mentions"
+                    for u, v in [(pid_a, pid_b), (pid_b, pid_a)]:
+                        if graph.G_citation.has_edge(u, v):
+                            cit_type = graph.G_citation[u][v].get(
+                                "cit_type", "mentions")
+                            break
+                    if has_sem:
+                        desc = f"citation ({cit_type}) + semantic similarity"
+                    else:
+                        desc = f"citation: {cit_type}"
                 elif has_sem:
-                    desc = "semantic link"
+                    desc = "semantic similarity"
                 else:
                     desc = None
                 if desc:

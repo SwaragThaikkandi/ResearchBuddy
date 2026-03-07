@@ -45,6 +45,7 @@ from researchbuddy.core.citation_network import (
 from researchbuddy.core.pdf_processor import reextract_title_doi
 from researchbuddy.core.fusion import snf, fuse_scores
 from researchbuddy.core.reasoner import QueryInteraction
+from researchbuddy.core.arguer import ArgumentInteraction, StyleProfile
 
 
 # ── Paper data model ───────────────────────────────────────────────────────────
@@ -108,6 +109,10 @@ class HierarchicalResearchGraph:
 
         # ── Query interactions (reasoner feedback) ────────────────────────
         self._query_interactions: list[QueryInteraction] = []
+
+        # ── Argument interactions (creative mode feedback) ─────────────────
+        self._argument_interactions: list[ArgumentInteraction] = []
+        self._style_profile: Optional[StyleProfile]            = None
 
         # ── Hyper-parameters ──────────────────────────────────────────────
         self.alpha = alpha
@@ -209,6 +214,13 @@ class HierarchicalResearchGraph:
         for u, v, d in self.G_citation.edges(data=True):
             if self.G.has_node(u) and self.G.has_node(v):
                 self.G.add_edge(u, v, **d)
+
+        # ── 5. Annotate citation edges with relationship types ─────────────
+        try:
+            from researchbuddy.core.citation_classifier import annotate_citation_types
+            annotate_citation_types(self.G_citation, self._papers)
+        except Exception as e:
+            print(f"[graph] Citation type annotation skipped: {e}")
 
         self._context_dirty = True
 
@@ -350,6 +362,32 @@ class HierarchicalResearchGraph:
                             G.nodes[pid]["weight"] = max(1.0, old_w - dampen)
 
         self._invalidate()
+
+    # ── Creative mode feedback ─────────────────────────────────────────────────
+
+    def apply_argument_feedback(self, interaction: ArgumentInteraction):
+        """
+        Record an argument interaction and update the StyleProfile.
+
+        The StyleProfile biases future argument generation toward types the
+        user rates highly (correctness + usefulness).
+        """
+        from researchbuddy.config import ARGUER_STYLE_LR
+        self._argument_interactions.append(interaction)
+        if self._style_profile is None:
+            self._style_profile = StyleProfile()
+        self._style_profile.update(
+            interaction.argument_type,
+            interaction.correctness,
+            interaction.usefulness,
+            lr=ARGUER_STYLE_LR,
+        )
+
+    def get_style_profile(self) -> StyleProfile:
+        """Return the persistent StyleProfile, creating one if absent."""
+        if self._style_profile is None:
+            self._style_profile = StyleProfile()
+        return self._style_profile
 
     def rate_paper(self, paper_id: str, rating: float):
         if paper_id not in self._papers:
@@ -684,6 +722,11 @@ class HierarchicalResearchGraph:
         # v0.4.0 — query interactions (reasoner feedback)
         if not hasattr(self, "_query_interactions"):
             self._query_interactions: list = []
+        # v0.5.0 — argument interactions + style profile (creative mode)
+        if not hasattr(self, "_argument_interactions"):
+            self._argument_interactions: list = []
+        if not hasattr(self, "_style_profile"):
+            self._style_profile = None
         # v0.2.0 used n_levels; v0.3.0 uses alpha only
         if not hasattr(self, "alpha"):
             self.alpha = FUSION_ALPHA

@@ -451,6 +451,141 @@ def query_session(graph: HierarchicalResearchGraph):
         print()
 
 
+# ── Creative Mode ("Creative Cortex") ─────────────────────────────────────────
+
+def creative_session(graph: HierarchicalResearchGraph):
+    """
+    Interactive argumentation loop — the 'Creative Cortex'.
+
+    Generates argument paragraphs synthesising the literature and learns
+    from user correctness / usefulness ratings via a StyleProfile.
+    """
+    if not graph.all_papers():
+        print_warn("No papers in your graph yet. Add PDFs (option 3) first.")
+        return
+    if len(graph.all_papers()) < 3:
+        print_warn("At least 3 papers are needed for argumentation. Add more PDFs first.")
+        return
+
+    from researchbuddy.core.arguer import Arguer, ArgumentInteraction
+
+    reasoner = Reasoner(top_k=cfg.QUERY_TOP_K)
+    arguer   = Arguer()
+
+    print_header("Creative Mode — Argumentation Engine")
+    print_info(
+        "Ask a research question; the system will generate argument paragraphs\n"
+        "that synthesise your literature using citation relationships.\n"
+        "Rate each paragraph on Correctness and Usefulness (1-10) to help the\n"
+        "engine learn which argument styles work best for your research.\n"
+        "Type 'q' to return to the menu."
+    )
+
+    while True:
+        print()
+        raw = ask("Your query", "")
+        if not raw or raw.strip().lower() in ("q", "quit", "exit"):
+            break
+
+        print_info("\nAnalysing research landscape ...")
+        result = reasoner.reason(raw.strip(), graph)
+
+        if not result.relevant_papers:
+            print_warn("No relevant papers found for this query.")
+            continue
+
+        style_profile = graph.get_style_profile()
+        paragraphs    = arguer.generate(
+            raw.strip(), result, graph, style_profile, n=cfg.ARGUER_TOP_PARAGRAPHS
+        )
+
+        if not paragraphs:
+            print_warn("Could not generate arguments (need more papers / connections).")
+            continue
+
+        rated_any = False
+        for i, para in enumerate(paragraphs, 1):
+            print()
+            if HAS_RICH:
+                console.rule(
+                    f"[bold green]Argument {i}/{len(paragraphs)}  ·  "
+                    f"{para.arg_type_label}[/]"
+                )
+                from rich.panel import Panel as _Panel
+                console.print(_Panel(para.text, border_style="green", padding=(1, 2)))
+                console.print(f"[dim]  {para.explanation}[/]")
+                if para.paper_refs:
+                    console.print(
+                        f"[dim]  Based on: {', '.join(para.paper_refs[:4])}[/]"
+                    )
+            else:
+                print(f"\n{'─'*72}")
+                print(f"  Argument {i}/{len(paragraphs)}  ·  {para.arg_type_label}")
+                print(f"{'─'*72}")
+                print(f"\n  {para.text}\n")
+                print(f"  [{para.explanation}]")
+                if para.paper_refs:
+                    print(f"  Based on: {', '.join(para.paper_refs[:4])}")
+
+            # ── Dual rating ────────────────────────────────────────────────
+            print()
+            raw_c = ask("  Correctness (1-10, 0=skip)", "0")
+            raw_u = ask("  Usefulness  (1-10, 0=skip)", "0")
+
+            try:
+                correctness = float(raw_c)
+            except ValueError:
+                correctness = 0.0
+            try:
+                usefulness = float(raw_u)
+            except ValueError:
+                usefulness = 0.0
+
+            if 1 <= correctness <= 10 and 1 <= usefulness <= 10:
+                interaction = ArgumentInteraction(
+                    argument_type = para.arg_type,
+                    argument_text = para.text,
+                    paper_ids     = para.paper_ids,
+                    query         = raw.strip(),
+                    correctness   = correctness,
+                    usefulness    = usefulness,
+                )
+                graph.apply_argument_feedback(interaction)
+                rated_any = True
+
+                combined = (correctness + usefulness) / 2
+                if combined >= 7:
+                    print_success(
+                        "  Excellent! Style profile updated — "
+                        f"{para.arg_type} arguments boosted."
+                    )
+                elif combined >= 4:
+                    print_info("  Noted. Moderate preference recorded.")
+                else:
+                    print_warn(
+                        f"  Low rating recorded — {para.arg_type} arguments "
+                        "will be deprioritised."
+                    )
+
+            elif raw_c.lower() in ("q", "quit"):
+                break
+
+        if rated_any:
+            save(graph)
+
+        # ── Show current style preferences after a session ─────────────────
+        sp = graph.get_style_profile()
+        if sp.total_interactions >= 3:
+            print()
+            print_info(
+                f"  Style profile ({sp.total_interactions} interactions): "
+                f"avg correctness={sp.avg_correctness:.1f}  "
+                f"avg usefulness={sp.avg_usefulness:.1f}"
+            )
+            top_type = max(sp.type_weights, key=sp.type_weights.get)
+            print_info(f"  Best-performing type so far: {top_type}")
+
+
 # ── Main menu ──────────────────────────────────────────────────────────────────
 
 def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
@@ -462,6 +597,7 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
         "5": "Resolve Semantic Scholar IDs for seed papers",
         "6": "Rebuild hierarchy & regenerate all graph PDFs",
         "7": "Query your research network (Reasoning Mode)",
+        "8": "Creative Mode — generate & rate argument paragraphs",
         "q": "Save & quit",
     }
     while True:
@@ -510,6 +646,8 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
                 _try_plot_all(graph)
         elif choice == "7":
             query_session(graph)
+        elif choice == "8":
+            creative_session(graph)
         else:
             print_warn("Unknown option.")
 

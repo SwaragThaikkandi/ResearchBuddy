@@ -46,6 +46,10 @@ MAX_SEARCH_RESULTS   = 30
 REQUEST_TIMEOUT      = 15
 REQUEST_DELAY        = 1.0
 
+# ── Arguer ("Creative Cortex") ────────────────────────────────────────────────
+ARGUER_STYLE_LR      = 0.20    # EMA learning rate for StyleProfile type-weight updates
+ARGUER_TOP_PARAGRAPHS= 3       # default number of argument paragraphs per session
+
 # ── Keyword extraction ─────────────────────────────────────────────────────────
 TOP_KEYWORDS         = 8
 
