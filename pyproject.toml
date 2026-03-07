@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name            = "researchbuddy"
-version         = "0.3.4"
+version         = "0.3.5"
 description     = "Hierarchical graph-based literature search assistant for researchers"
 readme          = "README.md"
 requires-python = ">=3.9"

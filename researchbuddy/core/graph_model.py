@@ -39,7 +39,9 @@ from researchbuddy.core.hierarchy import (
 from researchbuddy.core.citation_network import (
     citation_similarity_matrix, build_citation_graph,
     fetch_all_refs, fetch_all_references, extract_doi_from_text,
+    _looks_like_journal_header,
 )
+from researchbuddy.core.pdf_processor import reextract_title_doi
 from researchbuddy.core.fusion import snf, fuse_scores
 
 
@@ -278,13 +280,32 @@ class HierarchicalResearchGraph:
         """
         Fetch references for every paper that does not yet have citation data.
         Strategy (per paper):
+          0. Fix garbage titles by re-reading PDF metadata / font analysis
           1. Extract DOI from title/abstract text if not already set
           2. CrossRef by DOI  (returns cited DOIs — most reliable)
           3. CrossRef bibliographic query  (fuzzy, uses abstract text)
           4. OpenAlex by DOI / title
           5. Semantic Scholar fallback
         """
-        # Scan existing text for DOIs that weren't extracted during import
+        # ── Step 0: Fix garbage titles from two-column PDFs ──────────────
+        n_fixed = 0
+        for meta in self._papers.values():
+            if not getattr(meta, 'filepath', ''):
+                continue
+            if not _looks_like_journal_header(meta.title or ''):
+                continue
+            new_title, new_doi = reextract_title_doi(meta.filepath)
+            if new_title:
+                if verbose:
+                    print(f"  [title fix] {meta.title[:35]!r} → {new_title[:50]!r}")
+                meta.title = new_title
+                n_fixed += 1
+            if new_doi and not getattr(meta, 'doi', ''):
+                meta.doi = new_doi
+        if n_fixed and verbose:
+            print(f"[graph] Fixed {n_fixed} garbage titles via PDF metadata/fonts.")
+
+        # ── Step 1: Scan text for DOIs not extracted during import ────────
         for meta in self._papers.values():
             if not getattr(meta, "doi", ""):
                 doi = extract_doi_from_text(
