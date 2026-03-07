@@ -36,10 +36,72 @@ def _clean(text: str) -> str:
     return text.strip()
 
 
+# Patterns that indicate a line is journal/publisher metadata, not a paper title
+_TITLE_SKIP = [
+    re.compile(r'available\s+online', re.I),
+    re.compile(r'www\.\S+\.\w{2,}', re.I),
+    re.compile(r'https?://'),
+    re.compile(r'article\s+in\s+press', re.I),
+    re.compile(r'Vol\.\s*\d+|Volume\s+\d+', re.I),
+    re.compile(r'\bNo\.\s*\d+', re.I),
+    re.compile(r'\bpp\.\s*\d+', re.I),
+    re.compile(r'doi\s*[:=]\s*10\.', re.I),
+    re.compile(r'^10\.\d{4,9}/'),
+    re.compile(r'received\s+\d|accepted\s+\d', re.I),
+    re.compile(r'[©®™]'),
+    re.compile(r'copyright\s*\d{4}', re.I),
+    re.compile(r'this\s+article\s+was\s+download', re.I),
+    re.compile(r'^\d{4}[-~/]\d{3}[\dxX]'),               # ISSN
+    re.compile(r'\$\d+\.\d{2}'),                          # price
+    re.compile(r'elsevier|pergamon|springer|wiley|academic\s+press', re.I),
+    re.compile(r'contents\s+lists?\s+available', re.I),
+    re.compile(r'journal\s+homepage', re.I),
+    re.compile(r'(?:January|February|March|April|May|June|July|August|'
+               r'September|October|November|December)\s+\d{1,2},?\s*\d{4}', re.I),
+    re.compile(r'^\d+\s*$'),                              # page number
+    re.compile(r'Proc\.\s*Natl', re.I),
+]
+
+# "JournalName91(2019)1437" — journal + volume(year)pages
+_JOURNAL_HEADER_RE = re.compile(
+    r'^[A-Za-z][A-Za-z\s,&]+\d{1,4}\s*\(\d{4}\)\s*\d+'
+)
+
+
+def _is_journal_line(line: str) -> bool:
+    """Return True if line is journal/publisher metadata, not paper content."""
+    s = line.strip()
+    if not s:
+        return True
+    for pat in _TITLE_SKIP:
+        if pat.search(s):
+            return True
+    if _JOURNAL_HEADER_RE.match(s):
+        return True
+    # Line with very few alpha chars → likely codes/numbers
+    alpha = sum(c.isalpha() for c in s)
+    if len(s) < 60 and alpha < len(s) * 0.5:
+        return True
+    return False
+
+
 def _guess_title(lines: list[str]) -> str:
     for line in lines[:30]:
         line = line.strip()
-        if 20 < len(line) < 200 and not line.startswith('http') and not line.isupper():
+        if len(line) < 15 or len(line) > 250:
+            continue
+        if line.startswith('http'):
+            continue
+        if _is_journal_line(line):
+            continue
+        # Skip lines that are ALL-CAPS (section headers like "ARTICLES")
+        if line.isupper() and len(line) < 40:
+            continue
+        return line
+    # Fallback: return first line with reasonable length
+    for line in lines[:10]:
+        line = line.strip()
+        if 10 < len(line) < 250:
             return line
     return lines[0].strip() if lines else "Unknown Title"
 
