@@ -96,16 +96,29 @@ class QueryResult:
 
 # ── Reasoner ──────────────────────────────────────────────────────────────────
 
+_STOP_WORDS = frozenset({
+    "a", "an", "the", "of", "in", "and", "or", "for", "to", "with", "on",
+    "is", "are", "was", "were", "what", "how", "does", "do", "can", "could",
+    "my", "about", "me", "i", "tell", "explain", "describe", "know",
+    "between", "their", "there", "this", "that", "it", "its", "be", "been",
+    "have", "has", "had", "which", "who", "from", "by", "at", "as", "not",
+    "but", "if", "so", "than", "very", "most", "more", "also", "any",
+    "all", "each", "some", "would", "should", "will", "may", "might",
+})
+
+
 class Reasoner:
     """
     Graph-structure-aware reasoning engine.
 
-    Unlike the simple similarity search, the Reasoner:
-      * Boosts papers by PageRank centrality (not just embedding distance)
-      * Profiles clusters (density, maturity, central paper)
-      * Traces citation lineages between relevant papers
-      * Detects frontier papers (similar but underconnected)
-      * Builds temporal narratives
+    Scoring blends three signals so that different queries produce
+    genuinely different rankings:
+      1. Embedding similarity  (semantic match)
+      2. Keyword overlap       (term-level precision — biggest differentiator)
+      3. PageRank centrality   (network importance, adaptive weight)
+
+    Also applies MMR diversification so results aren't all from the
+    same niche.
     """
 
     def __init__(self, top_k: int = 10):
@@ -116,7 +129,7 @@ class Reasoner:
     def reason(self, query: str, graph: "HierarchicalResearchGraph") -> QueryResult:
         query_emb = embed(query)
 
-        papers   = self._find_relevant_papers(query_emb, graph)
+        papers   = self._find_relevant_papers(query, query_emb, graph)
         clusters = self._profile_clusters(query_emb, papers, graph)
         conns    = self._find_connections(papers, graph)
         lineages = self._trace_lineages(papers, graph)
@@ -138,14 +151,83 @@ class Reasoner:
             gap_note=gap,
         )
 
-    # ── 1. Paper retrieval (similarity + centrality) ─────────────────────
+    # ── Keyword scoring ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _keyword_score(query: str, meta: "PaperMeta") -> float:
+        """Term-overlap score between query and paper title+abstract.
+
+        Uses unigrams and bigrams so that a query for "drift diffusion"
+        strongly prefers papers containing those exact terms.
+        """
+        words = [w for w in query.lower().split() if w not in _STOP_WORDS]
+        if not words:
+            return 0.0
+
+        title_low = meta.title.lower()
+        text_low  = (title_low + " " + (meta.abstract or "").lower())
+
+        # Unigram hits
+        uni_hits = sum(1 for w in words if w in text_low)
+
+        # Bigram hits (e.g. "drift diffusion" as a phrase)
+        bigrams = [f"{words[i]} {words[i+1]}" for i in range(len(words) - 1)]
+        bi_hits = sum(1 for bg in bigrams if bg in text_low) if bigrams else 0
+
+        # Title bonus: terms in the title are a much stronger signal
+        title_hits = sum(1 for w in words if w in title_low)
+
+        n = len(words)
+        score = (uni_hits / n * 0.50           # unigram coverage
+                 + (bi_hits / max(len(bigrams), 1)) * 0.25   # bigram coverage
+                 + title_hits / n * 0.25)      # title bonus
+        return min(1.0, score)
+
+    # ── MMR diversification ───────────────────────────────────────────────
+
+    @staticmethod
+    def _mmr_rerank(
+        scored: list[tuple["PaperMeta", float, dict]],
+        k: int,
+        lam: float = 0.7,
+    ) -> list[tuple["PaperMeta", float, dict]]:
+        """Maximal Marginal Relevance: balance relevance with diversity."""
+        if len(scored) <= k:
+            return scored
+
+        selected = [scored[0]]
+        remaining = list(scored[1:])
+
+        while len(selected) < k and remaining:
+            best_idx, best_mmr = -1, -float("inf")
+            for i, (meta, score, info) in enumerate(remaining):
+                if meta.embedding is None:
+                    continue
+                # Max similarity to any already-selected paper
+                max_sim = max(
+                    float(cosine_similarity(meta.embedding, s[0].embedding))
+                    for s in selected
+                    if s[0].embedding is not None
+                )
+                mmr = lam * score - (1 - lam) * max_sim
+                if mmr > best_mmr:
+                    best_mmr = mmr
+                    best_idx = i
+            if best_idx >= 0:
+                selected.append(remaining.pop(best_idx))
+            else:
+                break
+        return selected
+
+    # ── 1. Paper retrieval (embedding + keywords + centrality + MMR) ─────
 
     def _find_relevant_papers(
         self,
+        query: str,
         query_emb: np.ndarray,
         graph: "HierarchicalResearchGraph",
     ) -> list[tuple["PaperMeta", float, dict]]:
-        # PageRank on paper-only subgraph of the combined graph
+        # PageRank on paper-only subgraph
         paper_ids_set = {m.paper_id for m in graph.all_papers()}
         sub = graph.G.subgraph(
             [n for n in graph.G.nodes if n in paper_ids_set]
@@ -155,40 +237,69 @@ class Reasoner:
         except Exception:
             pr = {}
 
+        # Adaptive centrality weight: if graph is dense, centrality is
+        # nearly uniform and shouldn't influence ranking much.
+        n_papers = len(paper_ids_set) or 1
+        avg_deg  = (sum(sub.degree(n) for n in sub.nodes) / n_papers
+                    if sub.number_of_nodes() else 0)
+        graph_density = avg_deg / max(n_papers - 1, 1)
+        # Dense graph → tiny centrality weight; sparse → up to 0.15
+        centrality_w = max(0.02, 0.15 * (1.0 - graph_density))
+
+        # Hub threshold: 80th percentile of degree
+        degrees = sorted((sub.degree(n) for n in sub.nodes), reverse=True)
+        hub_threshold = degrees[max(0, len(degrees) // 5 - 1)] if degrees else 5
+
         scored: list[tuple["PaperMeta", float, dict]] = []
         for meta in graph.all_papers():
             if meta.embedding is None:
                 continue
-            sim = float(cosine_similarity(query_emb, meta.embedding))
+
+            emb_sim = float(cosine_similarity(query_emb, meta.embedding))
+            kw_score = self._keyword_score(query, meta)
             centrality = pr.get(meta.paper_id, 0.0)
             degree = sub.degree(meta.paper_id) if sub.has_node(meta.paper_id) else 0
 
-            # Paper role in the network
-            if degree >= 5:
+            if degree >= hub_threshold:
                 role = "hub"
             elif degree == 0:
                 role = "isolated"
             else:
                 role = "connected"
 
-            scored.append((meta, sim, {
+            scored.append((meta, emb_sim, {
                 "centrality": centrality,
-                "role": role,
-                "degree": degree,
+                "kw_score":   kw_score,
+                "emb_sim":    emb_sim,
+                "role":       role,
+                "degree":     degree,
             }))
 
         if not scored:
             return []
 
-        # Normalise centrality to [0,1] and blend with similarity
-        max_c = max((info["centrality"] for _, _, info in scored), default=1.0) or 1e-9
-        for i, (meta, sim, info) in enumerate(scored):
+        # Normalise centrality to [0,1]
+        max_c = max((info["centrality"] for _, _, info in scored),
+                    default=1.0) or 1e-9
+
+        # Blend: embedding + keyword + centrality
+        # keyword weight is high because it's the main differentiator
+        emb_w = 1.0 - centrality_w  # split between emb and kw
+        kw_w  = emb_w * 0.45        # ~40% of total
+        emb_w = emb_w * 0.55        # ~50% of total
+
+        for i, (meta, _sim, info) in enumerate(scored):
             norm_c = info["centrality"] / max_c
-            blended = 0.80 * sim + 0.20 * norm_c
+            blended = (emb_w  * info["emb_sim"]
+                       + kw_w * info["kw_score"]
+                       + centrality_w * norm_c)
             scored[i] = (meta, blended, info)
 
         scored.sort(key=lambda x: x[1], reverse=True)
-        return scored[: self.top_k]
+
+        # MMR diversification on top candidates
+        pool = scored[:self.top_k * 3]  # consider 3x candidates for MMR
+        return self._mmr_rerank(pool, self.top_k)
 
     # ── 2. Cluster profiling ─────────────────────────────────────────────
 
@@ -330,6 +441,7 @@ class Reasoner:
         graph: "HierarchicalResearchGraph",
     ) -> list[ResearchLineage]:
         lineages: list[ResearchLineage] = []
+        seen_pairs: set[tuple[str, str]] = set()  # deduplicate A→B / B→A
         top_ids = [m.paper_id for m, _, _ in papers[:6]]
 
         # Try citation graph first (directed intellectual lineage)
@@ -338,15 +450,24 @@ class Reasoner:
             for pid_b in top_ids[i + 1:]:
                 if not G_cit.has_node(pid_a) or not G_cit.has_node(pid_b):
                     continue
+                pair_key = (min(pid_a, pid_b), max(pid_a, pid_b))
+                if pair_key in seen_pairs:
+                    continue
+                # Try both directions, keep the shorter path
+                best_path = None
                 for src, tgt in [(pid_a, pid_b), (pid_b, pid_a)]:
                     try:
                         path = nx.shortest_path(G_cit, src, tgt)
                         if 2 <= len(path) <= 5:
-                            lineages.append(ResearchLineage(
-                                path=path, path_type="citation_chain",
-                            ))
+                            if best_path is None or len(path) < len(best_path):
+                                best_path = path
                     except nx.NetworkXNoPath:
                         pass
+                if best_path:
+                    seen_pairs.add(pair_key)
+                    lineages.append(ResearchLineage(
+                        path=best_path, path_type="citation_chain",
+                    ))
 
         # Fall back to combined graph for semantic paths
         if not lineages:
@@ -355,11 +476,14 @@ class Reasoner:
                 for pid_b in top_ids[i + 1: 4]:
                     if not G_all.has_node(pid_a) or not G_all.has_node(pid_b):
                         continue
+                    pair_key = (min(pid_a, pid_b), max(pid_a, pid_b))
+                    if pair_key in seen_pairs:
+                        continue
                     try:
                         path = nx.shortest_path(G_all, pid_a, pid_b)
-                        # Keep only paper nodes (skip cluster nodes)
                         paper_path = [p for p in path if graph.get_paper(p)]
                         if len(paper_path) >= 2:
+                            seen_pairs.add(pair_key)
                             lineages.append(ResearchLineage(
                                 path=paper_path, path_type="semantic_path",
                             ))
