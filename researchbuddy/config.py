@@ -32,6 +32,10 @@ N_RECOMMENDATIONS    = 10
 EXPLORATION_RATIO    = 0.25    # fraction of suggestions that are exploratory
 MIN_NOVELTY_DISTANCE = 0.30    # min distance from graph for "explore" papers
 
+# ── Reasoner ("Prefrontal Cortex") ───────────────────────────────────────────
+QUERY_TOP_K          = 10      # papers shown per query response
+QUERY_FEEDBACK_WEIGHT= 0.3     # how much a rated query influences context vector
+
 # ── Search ────────────────────────────────────────────────────────────────────
 S2_SEARCH_URL        = "https://api.semanticscholar.org/graph/v1/paper/search"
 S2_REC_URL           = "https://api.semanticscholar.org/recommendations/v1/papers"

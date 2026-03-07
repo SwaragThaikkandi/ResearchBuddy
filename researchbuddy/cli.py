@@ -28,6 +28,7 @@ import researchbuddy.config as cfg
 from researchbuddy.core.graph_model   import HierarchicalResearchGraph, PaperMeta
 from researchbuddy.core.state_manager import save, load, import_pdf_folder, resolve_seed_s2_ids
 from researchbuddy.core.searcher      import find_candidates
+from researchbuddy.core.reasoner      import Reasoner, QueryResult
 
 try:
     from rich.console import Console
@@ -245,6 +246,211 @@ def _try_plot_all(graph: HierarchicalResearchGraph):
         print_warn(f"Graph PDF generation skipped: {e}")
 
 
+# ── Query / Reasoning mode ("Prefrontal Cortex") ──────────────────────────────
+
+def _short_title(graph: HierarchicalResearchGraph, pid: str, n: int = 45) -> str:
+    """Compact paper title from paper_id."""
+    p = graph.get_paper(pid)
+    if not p:
+        return pid[:12]
+    t = p.title[:n]
+    return (t + "...") if len(p.title) > n else t
+
+
+def display_query_result(result: QueryResult, graph: HierarchicalResearchGraph):
+    """Pretty-print a QueryResult to the terminal."""
+    print_header("Query Results")
+
+    # ── Relevant papers (with centrality / role) ─────────────────────────
+    if result.relevant_papers:
+        if HAS_RICH:
+            console.print("[bold]Most Relevant Papers[/]")
+        else:
+            print("  Most Relevant Papers")
+
+        for i, (meta, score, info) in enumerate(result.relevant_papers, 1):
+            pct  = f"{score * 100:.0f}%"
+            year = str(meta.year) if meta.year else "?"
+            auth = ", ".join(meta.authors[:2]) if meta.authors else "Unknown"
+            if len(meta.authors) > 2:
+                auth += " et al."
+            role_tag = ""
+            if info.get("role") == "hub":
+                role_tag = "  [HUB]"
+            elif info.get("role") == "isolated":
+                role_tag = "  [isolated]"
+            rated_tag = f"  rated {meta.user_rating:.0f}/10" if meta.user_rating else ""
+            deg = info.get("degree", 0)
+
+            if HAS_RICH:
+                console.print(f"    [{i}] [bold]{meta.title[:80]}[/]")
+                console.print(
+                    f"        [cyan]{auth}[/] ({year})  "
+                    f"relevance={pct}  {deg} connections{role_tag}{rated_tag}"
+                )
+            else:
+                print(f"    [{i}] {meta.title[:80]}")
+                print(f"        {auth} ({year})  relevance={pct}  "
+                      f"{deg} connections{role_tag}{rated_tag}")
+
+    # ── Research themes (cluster profiles) ────────────────────────────────
+    if result.cluster_profiles:
+        print()
+        if HAS_RICH:
+            console.print("[bold]Research Themes[/]")
+        else:
+            print("  Research Themes")
+
+        for cp in result.cluster_profiles[:3]:
+            pct = f"{cp.similarity * 100:.0f}%"
+            yr  = f"avg {cp.avg_year:.0f}" if cp.avg_year else "?"
+            central = (f"key: {cp.central_paper.title[:35]}..."
+                       if cp.central_paper else "")
+            if HAS_RICH:
+                console.print(
+                    f"    {cp.cluster.node_id}  "
+                    f"({cp.n_papers} papers, match={pct}, "
+                    f"{cp.maturity}, density={cp.density:.0%})"
+                )
+                if central:
+                    console.print(f"      [dim]{central}[/]")
+            else:
+                print(f"    {cp.cluster.node_id}  "
+                      f"({cp.n_papers} papers, match={pct}, "
+                      f"{cp.maturity}, density={cp.density:.0%})")
+                if central:
+                    print(f"      {central}")
+
+    # ── Research lineages (citation / semantic paths) ─────────────────────
+    if result.lineages:
+        print()
+        if HAS_RICH:
+            console.print("[bold]Research Lineages[/]")
+        else:
+            print("  Research Lineages")
+
+        for lin in result.lineages:
+            titles = [_short_title(graph, pid, 35) for pid in lin.path]
+            chain  = " -> ".join(titles)
+            label  = ("citation chain" if lin.path_type == "citation_chain"
+                      else "semantic path")
+            if HAS_RICH:
+                console.print(f"    [dim]{chain}[/]")
+                console.print(f"      ({label})")
+            else:
+                print(f"    {chain}")
+                print(f"      ({label})")
+
+    # ── Connections ───────────────────────────────────────────────────────
+    if result.connections:
+        print()
+        if HAS_RICH:
+            console.print("[bold]Connections[/]")
+        else:
+            print("  Connections")
+
+        for a, b, desc in result.connections[:8]:
+            if HAS_RICH:
+                console.print(
+                    f"    [dim]{_short_title(graph, a)}[/]  <->  "
+                    f"[dim]{_short_title(graph, b)}[/]"
+                )
+                console.print(f"      ({desc})")
+            else:
+                print(f"    {_short_title(graph, a)}  <->  "
+                      f"{_short_title(graph, b)}")
+                print(f"      ({desc})")
+
+    # ── Bridge papers ────────────────────────────────────────────────────
+    if result.bridge_papers:
+        print()
+        if HAS_RICH:
+            console.print("[bold]Bridge Papers[/] (connect multiple themes)")
+        else:
+            print("  Bridge Papers (connect multiple themes)")
+        for meta in result.bridge_papers:
+            if HAS_RICH:
+                console.print(f"    [magenta]{meta.title[:70]}[/]")
+            else:
+                print(f"    {meta.title[:70]}")
+
+    # ── Frontier papers (relevant but underconnected) ─────────────────────
+    if result.frontier_papers:
+        print()
+        if HAS_RICH:
+            console.print("[bold]Frontier[/] (relevant but underconnected)")
+        else:
+            print("  Frontier (relevant but underconnected)")
+        for meta, sim in result.frontier_papers:
+            pct = f"{sim * 100:.0f}%"
+            if HAS_RICH:
+                console.print(f"    [yellow]{meta.title[:65]}[/]  ({pct})")
+            else:
+                print(f"    {meta.title[:65]}  ({pct})")
+
+    # ── Temporal narrative ────────────────────────────────────────────────
+    if result.temporal_narrative:
+        print()
+        print_info(f"  Timeline: {result.temporal_narrative}")
+
+    # ── Coverage note ────────────────────────────────────────────────────
+    if result.gap_note:
+        print()
+        print_warn(result.gap_note)
+
+    print(f"\n{DIVIDER}")
+
+
+def query_session(graph: HierarchicalResearchGraph):
+    """Interactive reasoning loop — the 'prefrontal cortex'."""
+    if not graph.all_papers():
+        print_warn("No papers in your graph yet. Add PDFs (option 3) first.")
+        return
+
+    reasoner = Reasoner(top_k=cfg.QUERY_TOP_K)
+    print_header("Reasoning Mode")
+    print_info("Ask questions about your research collection.")
+    print_info("Type 'q' or 'quit' to return to the main menu.\n")
+
+    while True:
+        raw = ask("Your query", "")
+        if not raw or raw.strip().lower() in ("q", "quit", "exit"):
+            break
+
+        print_info("\nThinking ...\n")
+        result = reasoner.reason(raw.strip(), graph)
+        display_query_result(result, graph)
+
+        # ── Feedback ─────────────────────────────────────────────────────
+        rating_raw = ask("Rate this response (1-10, 0=skip)", "0")
+        try:
+            rating = int(rating_raw)
+        except ValueError:
+            rating = 0
+        if rating < 0 or rating > 10:
+            rating = 0
+
+        if rating > 0:
+            paper_ids = [m.paper_id for m, _, _ in result.relevant_papers]
+            graph.apply_query_feedback(
+                result.query_embedding, paper_ids, float(rating)
+            )
+            if rating >= 7:
+                print_success(
+                    "Network updated — edges strengthened between relevant "
+                    "papers. Future results will lean this way."
+                )
+            elif rating >= 4:
+                print_info("Noted. Moderate interest recorded.")
+            else:
+                print_info(
+                    "Network updated — relevance dampened for these papers."
+                )
+            save(graph)
+
+        print()
+
+
 # ── Main menu ──────────────────────────────────────────────────────────────────
 
 def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
@@ -255,6 +461,7 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
         "4": "Fetch citation data (improves fusion quality)",
         "5": "Resolve Semantic Scholar IDs for seed papers",
         "6": "Rebuild hierarchy & regenerate all graph PDFs",
+        "7": "Query your research network (Reasoning Mode)",
         "q": "Save & quit",
     }
     while True:
@@ -301,6 +508,8 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
             save(graph)
             if plot:
                 _try_plot_all(graph)
+        elif choice == "7":
+            query_session(graph)
         else:
             print_warn("Unknown option.")
 

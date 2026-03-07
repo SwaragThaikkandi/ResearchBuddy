@@ -31,6 +31,7 @@ from researchbuddy.config import (
     EXPLORATION_RATIO, MIN_NOVELTY_DISTANCE,
     FUSION_ALPHA, SNF_KNN, SNF_ITER,
     MIN_CLUSTER_SIZE, MAX_HIERARCHY_LEVELS,
+    QUERY_FEEDBACK_WEIGHT,
 )
 from researchbuddy.core.embedder import embed, cosine_similarity, mean_pool
 from researchbuddy.core.hierarchy import (
@@ -43,6 +44,7 @@ from researchbuddy.core.citation_network import (
 )
 from researchbuddy.core.pdf_processor import reextract_title_doi
 from researchbuddy.core.fusion import snf, fuse_scores
+from researchbuddy.core.reasoner import QueryInteraction
 
 
 # ── Paper data model ───────────────────────────────────────────────────────────
@@ -103,6 +105,9 @@ class HierarchicalResearchGraph:
         # ── Context vector cache ──────────────────────────────────────────
         self._context_vec: Optional[np.ndarray]   = None
         self._context_dirty: bool                 = True
+
+        # ── Query interactions (reasoner feedback) ────────────────────────
+        self._query_interactions: list[QueryInteraction] = []
 
         # ── Hyper-parameters ──────────────────────────────────────────────
         self.alpha = alpha
@@ -256,6 +261,12 @@ class HierarchicalResearchGraph:
                     vecs.append(node.centroid)
                     weights.append(aw * 0.25)
 
+        # Query-level contributions (reasoner feedback)
+        for qi in self._query_interactions:
+            if qi.rating >= 6:
+                vecs.append(qi.query_embedding)
+                weights.append((qi.rating - 5) * QUERY_FEEDBACK_WEIGHT)
+
         if not vecs:
             return None
 
@@ -264,6 +275,81 @@ class HierarchicalResearchGraph:
         return self._context_vec
 
     # ── User rating ────────────────────────────────────────────────────────────
+
+    def apply_query_feedback(
+        self,
+        query_embedding: np.ndarray,
+        paper_ids: list[str],
+        rating: float,
+    ):
+        """
+        Store a rated query interaction AND mutate the network.
+
+        High ratings (>= 7):
+          * Strengthen / create edges between shown papers in G_semantic & G
+          * Boost node weights for the top shown papers
+        Low ratings (<= 3):
+          * Slightly dampen node weights of shown papers
+
+        The context vector is also shifted via _query_interactions (see
+        context_vector()).
+        """
+        import time
+        qi = QueryInteraction(
+            query_embedding=query_embedding,
+            paper_ids=paper_ids,
+            rating=rating,
+            timestamp=time.time(),
+        )
+        self._query_interactions.append(qi)
+
+        if rating >= 7:
+            boost = (rating - 6) * 0.5     # 7→0.5, 8→1.0, 9→1.5, 10→2.0
+
+            # ── Strengthen / create edges between shown papers ────────────
+            for i, pid_a in enumerate(paper_ids):
+                for pid_b in paper_ids[i + 1:]:
+                    for G in (self.G_semantic, self.G):
+                        if G.has_edge(pid_a, pid_b):
+                            w = G[pid_a][pid_b].get("weight", 0.5)
+                            G[pid_a][pid_b]["weight"] = min(1.0, w + boost * 0.1)
+                        elif G.has_node(pid_a) and G.has_node(pid_b):
+                            # Create an interest edge if papers are at least
+                            # somewhat related
+                            ma = self._papers.get(pid_a)
+                            mb = self._papers.get(pid_b)
+                            if (ma and mb
+                                    and ma.embedding is not None
+                                    and mb.embedding is not None):
+                                sim = float(cosine_similarity(
+                                    ma.embedding, mb.embedding))
+                                if sim > 0.30:
+                                    G.add_edge(pid_a, pid_b,
+                                               weight=sim,
+                                               edge_type="interest")
+
+            # ── Boost node weights for top shown papers ───────────────────
+            for pid in paper_ids[:5]:
+                meta = self._papers.get(pid)
+                if meta and meta.user_rating is None:
+                    for G in (self.G_semantic, self.G_citation, self.G):
+                        if G.has_node(pid):
+                            old_w = G.nodes[pid].get("weight",
+                                                     DEFAULT_SEED_WEIGHT)
+                            G.nodes[pid]["weight"] = min(10.0,
+                                                         old_w + boost * 0.2)
+
+        elif rating <= 3:
+            dampen = (4 - rating) * 0.2    # 1→0.6, 2→0.4, 3→0.2
+            for pid in paper_ids[:5]:
+                if pid in self._papers:
+                    for G in (self.G_semantic, self.G_citation, self.G):
+                        if G.has_node(pid):
+                            old_w = G.nodes[pid].get("weight",
+                                                     DEFAULT_SEED_WEIGHT)
+                            G.nodes[pid]["weight"] = max(1.0, old_w - dampen)
+
+        self._invalidate()
 
     def rate_paper(self, paper_id: str, rating: float):
         if paper_id not in self._papers:
@@ -595,6 +681,9 @@ class HierarchicalResearchGraph:
             self._context_vec = None
         if not hasattr(self, "_context_dirty"):
             self._context_dirty = True
+        # v0.4.0 — query interactions (reasoner feedback)
+        if not hasattr(self, "_query_interactions"):
+            self._query_interactions: list = []
         # v0.2.0 used n_levels; v0.3.0 uses alpha only
         if not hasattr(self, "alpha"):
             self.alpha = FUSION_ALPHA
