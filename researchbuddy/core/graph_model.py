@@ -287,23 +287,33 @@ class HierarchicalResearchGraph:
           4. OpenAlex by DOI / title
           5. Semantic Scholar fallback
         """
-        # ── Step 0: Fix garbage titles from two-column PDFs ──────────────
-        n_fixed = 0
+        # ── Step 0: Re-extract titles/DOIs for papers still missing refs ──
+        # Re-read the original PDF (metadata + font-size analysis) for every
+        # paper that failed citation lookup previously. This fixes two-column
+        # journal headers, ligature damage, download-notice titles, etc.
+        missing_ids = {pid for pid in self._papers
+                       if pid not in self._refs}
+        n_title_fixed = 0
+        n_doi_fixed = 0
         for meta in self._papers.values():
-            if not getattr(meta, 'filepath', ''):
+            if meta.paper_id not in missing_ids:
                 continue
-            if not _looks_like_journal_header(meta.title or ''):
+            fp = getattr(meta, 'filepath', '')
+            if not fp:
                 continue
-            new_title, new_doi = reextract_title_doi(meta.filepath)
-            if new_title:
+            new_title, new_doi = reextract_title_doi(fp)
+            if new_title and new_title != meta.title:
                 if verbose:
-                    print(f"  [title fix] {meta.title[:35]!r} → {new_title[:50]!r}")
+                    print(f"  [title fix] {(meta.title or '')[:35]!r}"
+                          f" → {new_title[:50]!r}")
                 meta.title = new_title
-                n_fixed += 1
+                n_title_fixed += 1
             if new_doi and not getattr(meta, 'doi', ''):
                 meta.doi = new_doi
-        if n_fixed and verbose:
-            print(f"[graph] Fixed {n_fixed} garbage titles via PDF metadata/fonts.")
+                n_doi_fixed += 1
+        if verbose and (n_title_fixed or n_doi_fixed):
+            print(f"[graph] Re-extracted from PDFs:"
+                  f" {n_title_fixed} titles, {n_doi_fixed} DOIs fixed.")
 
         # ── Step 1: Scan text for DOIs not extracted during import ────────
         for meta in self._papers.values():

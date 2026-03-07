@@ -89,6 +89,13 @@ def _metadata_title(pdf) -> str:
     # Skip if it looks like a filename
     if raw.endswith(('.pdf', '.doc', '.docx', '.tex')):
         return ''
+    # Skip production IDs like "npgrj_nn_1790 1432..1438"
+    alpha = sum(c.isalpha() for c in raw)
+    if alpha < len(raw) * 0.5:
+        return ''
+    # Skip if mostly underscores/digits (internal filenames)
+    if raw.count('_') > 2:
+        return ''
     return raw[:300]
 
 
