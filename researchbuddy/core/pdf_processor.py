@@ -34,9 +34,32 @@ class ExtractedPaper:
     doi: str = ""          # DOI extracted from PDF text (e.g. 10.1234/abc)
 
 
+# ── Ligature / Unicode normalisation ─────────────────────────────────────────
+
+def _fix_ligatures(text: str) -> str:
+    """
+    Replace Unicode ligature characters with ASCII equivalents.
+    MUST run before _clean() strips all non-ASCII, otherwise the
+    characters vanish and leave broken words (e.g. 'Uni ed' for 'Unified').
+    """
+    text = text.replace('\ufb01', 'fi')     # fi ligature
+    text = text.replace('\ufb02', 'fl')     # fl ligature
+    text = text.replace('\ufb00', 'ff')     # ff ligature
+    text = text.replace('\ufb03', 'ffi')    # ffi ligature
+    text = text.replace('\ufb04', 'ffl')    # ffl ligature
+    text = text.replace('\u2013', '-')      # en-dash
+    text = text.replace('\u2014', '-')      # em-dash
+    text = text.replace('\u2018', "'")      # left single quote
+    text = text.replace('\u2019', "'")      # right single quote
+    text = text.replace('\u201c', '"')      # left double quote
+    text = text.replace('\u201d', '"')      # right double quote
+    return text
+
+
 # ── helpers ────────────────────────────────────────────────────────────────────
 
 def _clean(text: str) -> str:
+    text = _fix_ligatures(text)             # ← ligatures FIRST
     text = re.sub(r'\s+', ' ', text)
     text = re.sub(r'[^\x20-\x7E\n]', '', text)
     return text.strip()
@@ -57,7 +80,7 @@ def _metadata_title(pdf) -> str:
     """Extract title from PDF document properties (embedded metadata)."""
     meta = pdf.metadata or {}
     raw = meta.get('Title', '') or meta.get('title', '') or ''
-    raw = raw.strip()
+    raw = _fix_ligatures(raw.strip())
     if not raw or len(raw) < 10 or len(raw) > 400:
         return ''
     lower = raw.lower()
@@ -86,11 +109,18 @@ def _metadata_doi(pdf) -> str:
 
 def _title_by_font_size(page) -> str:
     """
-    Extract the paper title by finding the largest text on page 1.
+    Extract the paper title by finding the LARGEST font on page 1.
 
     In two-column papers (PNAS, Psych Review, J. Neuroscience, etc.),
-    the title spans the full page width and uses a larger font than body
-    text. This approach works regardless of column layout.
+    the title spans the full page width and uses a noticeably larger
+    font than both body text and journal-header text.
+
+    Only uses the single largest font size — avoids picking up the
+    journal name which is typically an intermediate size.
+
+    Ligature glyphs (fi, fl, ff) are often at slightly offset vertical
+    positions (±5pt); we group chars into lines using a 6pt tolerance
+    to keep them with their parent word.
     """
     try:
         chars = page.chars
@@ -108,51 +138,65 @@ def _title_by_font_size(page) -> str:
     size_counts = Counter(sizes)
     # Most common size = body text
     body_size = size_counts.most_common(1)[0][0]
+    # Single largest font size on the page
+    max_size = max(size_counts.keys())
 
-    # Title must be at least 1.25× larger than body text
-    min_title_size = body_size * 1.25
-    title_sizes = {s for s in size_counts if s >= min_title_size}
-
-    if not title_sizes:
+    # Title must be noticeably larger than body (≥1.3× body)
+    if max_size < body_size * 1.3:
         return ''
 
-    # Get chars at title font sizes in the top 45% of page (title region)
+    # Get chars at the MAX font size only, in the top 50% of page
     page_h = page.height or 800
     title_chars = [
         c for c in chars
-        if round(c.get('size', 0) * 2) / 2 in title_sizes
-        and c.get('top', page_h) < page_h * 0.45
-        and c.get('text', '').strip()
+        if round(c.get('size', 0) * 2) / 2 == max_size
+        and c.get('top', page_h) < page_h * 0.50
+        and c.get('text', '')
     ]
 
     if not title_chars:
         return ''
 
-    # Sort by vertical position then horizontal
-    title_chars.sort(key=lambda c: (round(c['top']), c.get('x0', 0)))
-
-    # Build string from individual chars
-    parts: list[str] = []
-    prev_top = -99.0
-    prev_x1 = 0.0
+    # ── Group chars into lines using 6pt vertical tolerance ──────────
+    # Ligature glyphs often have a ±5pt vertical offset from other chars
+    # on the same visual line. Grouping by proximity keeps them together.
+    title_chars.sort(key=lambda c: c.get('top', 0))
+    lines: list[list[dict]] = []
+    current_line: list[dict] = []
+    line_top = -99.0
     for c in title_chars:
         top = c.get('top', 0)
-        x0  = c.get('x0', 0)
-        txt = c.get('text', '')
-        if not txt:
-            continue
-        # New line (vertical gap > 3pt)
-        if abs(top - prev_top) > 3:
-            if parts:
-                parts.append(' ')
-        # Word gap (horizontal gap > 2pt)
-        elif x0 - prev_x1 > 2:
-            parts.append(' ')
-        parts.append(txt)
-        prev_top = top
-        prev_x1  = c.get('x1', x0 + 5)
+        if current_line and abs(top - line_top) > 6:
+            lines.append(current_line)
+            current_line = [c]
+            line_top = top
+        else:
+            current_line.append(c)
+            if not current_line[1:]:   # first char sets the line_top
+                line_top = top
+    if current_line:
+        lines.append(current_line)
 
-    title = re.sub(r'\s+', ' ', ''.join(parts)).strip()
+    # ── Build string: sort each line by x0, insert spaces at gaps ────
+    parts: list[str] = []
+    for line in lines:
+        line.sort(key=lambda c: c.get('x0', 0))
+        if parts:
+            parts.append(' ')  # space between lines
+        for i, c in enumerate(line):
+            txt = c.get('text', '')
+            if not txt:
+                continue
+            if i > 0:
+                prev_x1 = line[i - 1].get('x1', 0)
+                x0 = c.get('x0', 0)
+                if x0 - prev_x1 > 2:
+                    parts.append(' ')
+            parts.append(txt)
+
+    # Apply ligature fix + collapse whitespace
+    title = _fix_ligatures(''.join(parts))
+    title = re.sub(r'\s+', ' ', title).strip()
 
     # Validate: must be reasonable length and mostly alphabetic
     if len(title) < 15 or len(title) > 300:
@@ -249,7 +293,10 @@ def _extract_doi(text: str) -> str:
     """Return the first DOI found in text, stripped of trailing punctuation."""
     m = re.search(r'\b(10\.\d{4,9}/[^\s"<>\[\]{}|\\^`]+)', text)
     if m:
-        return m.group(1).strip(".,;:)(")
+        doi = m.group(1).strip(".,;:)(")
+        # Strip supplementary-material suffixes like ".supp", ".Supplemental"
+        doi = re.sub(r'\.supp(?:lemental)?$', '', doi, flags=re.I)
+        return doi
     return ""
 
 
@@ -301,7 +348,7 @@ def extract_from_pdf(filepath: str | Path) -> Optional[ExtractedPaper]:
             return None
 
         full_raw   = '\n'.join(pages_text)
-        full_clean = _clean(full_raw)
+        full_clean = _clean(full_raw)       # _clean now calls _fix_ligatures
         lines      = [l for l in full_clean.split('\n') if l.strip()]
 
         # Title priority: PDF metadata > font-size > line heuristic
@@ -355,7 +402,7 @@ def reextract_title_doi(filepath: str | Path) -> tuple[str, str]:
             # 4. DOI from first page text if not in metadata
             if not doi and pdf.pages:
                 text = pdf.pages[0].extract_text() or ''
-                doi = _extract_doi(text)
+                doi = _extract_doi(_fix_ligatures(text))
 
             return title, doi
     except Exception:
