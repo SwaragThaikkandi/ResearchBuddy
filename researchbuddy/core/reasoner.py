@@ -452,32 +452,57 @@ class Reasoner:
         seen_pairs: set[tuple[str, str]] = set()  # deduplicate A→B / B→A
         top_ids = [m.paper_id for m, _, _ in papers[:6]]
 
-        # Try citation graph first (directed intellectual lineage)
-        G_cit = graph.G_citation
-        for i, pid_a in enumerate(top_ids):
-            for pid_b in top_ids[i + 1:]:
-                if not G_cit.has_node(pid_a) or not G_cit.has_node(pid_b):
-                    continue
-                pair_key = (min(pid_a, pid_b), max(pid_a, pid_b))
-                if pair_key in seen_pairs:
-                    continue
-                # Try both directions, keep the shorter path
-                best_path = None
-                for src, tgt in [(pid_a, pid_b), (pid_b, pid_a)]:
-                    try:
-                        path = nx.shortest_path(G_cit, src, tgt)
-                        if 2 <= len(path) <= 5:
-                            if best_path is None or len(path) < len(best_path):
-                                best_path = path
-                    except nx.NetworkXNoPath:
-                        pass
-                if best_path:
-                    seen_pairs.add(pair_key)
-                    lineages.append(ResearchLineage(
-                        path=best_path, path_type="citation_chain",
-                    ))
+        # ── Tier 1: Causal DAG (proper acyclic influence paths) ──────
+        G_caus = graph.G_causal
+        if G_caus.number_of_edges() > 0:
+            for i, pid_a in enumerate(top_ids):
+                for pid_b in top_ids[i + 1:]:
+                    if not G_caus.has_node(pid_a) or not G_caus.has_node(pid_b):
+                        continue
+                    pair_key = (min(pid_a, pid_b), max(pid_a, pid_b))
+                    if pair_key in seen_pairs:
+                        continue
+                    best_path = None
+                    for src, tgt in [(pid_a, pid_b), (pid_b, pid_a)]:
+                        try:
+                            path = nx.shortest_path(G_caus, src, tgt)
+                            if 2 <= len(path) <= 5:
+                                if best_path is None or len(path) < len(best_path):
+                                    best_path = path
+                        except nx.NetworkXNoPath:
+                            pass
+                    if best_path:
+                        seen_pairs.add(pair_key)
+                        lineages.append(ResearchLineage(
+                            path=best_path, path_type="causal_chain",
+                        ))
 
-        # Fall back to combined graph for semantic paths
+        # ── Tier 2: Citation graph (directed but possibly cyclic) ────
+        if not lineages:
+            G_cit = graph.G_citation
+            for i, pid_a in enumerate(top_ids):
+                for pid_b in top_ids[i + 1:]:
+                    if not G_cit.has_node(pid_a) or not G_cit.has_node(pid_b):
+                        continue
+                    pair_key = (min(pid_a, pid_b), max(pid_a, pid_b))
+                    if pair_key in seen_pairs:
+                        continue
+                    best_path = None
+                    for src, tgt in [(pid_a, pid_b), (pid_b, pid_a)]:
+                        try:
+                            path = nx.shortest_path(G_cit, src, tgt)
+                            if 2 <= len(path) <= 5:
+                                if best_path is None or len(path) < len(best_path):
+                                    best_path = path
+                        except nx.NetworkXNoPath:
+                            pass
+                    if best_path:
+                        seen_pairs.add(pair_key)
+                        lineages.append(ResearchLineage(
+                            path=best_path, path_type="citation_chain",
+                        ))
+
+        # ── Tier 3: Combined graph (semantic paths as fallback) ──────
         if not lineages:
             G_all = graph.G
             for i, pid_a in enumerate(top_ids[:4]):

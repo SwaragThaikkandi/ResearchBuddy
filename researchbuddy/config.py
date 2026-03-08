@@ -50,6 +50,10 @@ REQUEST_DELAY        = 1.0
 ARGUER_STYLE_LR      = 0.20    # EMA learning rate for StyleProfile type-weight updates
 ARGUER_TOP_PARAGRAPHS= 3       # default number of argument paragraphs per session
 
+# ── Causal DAG ("Temporal Cortex") ───────────────────────────────────────────
+CAUSAL_CONFIDENCE_THRESHOLD = 0.20   # min confidence to include edge in G_causal
+CAUSAL_TRANSITIVE_REDUCE    = False  # optional: remove redundant implied edges
+
 # ── Keyword extraction ─────────────────────────────────────────────────────────
 TOP_KEYWORDS         = 8
 

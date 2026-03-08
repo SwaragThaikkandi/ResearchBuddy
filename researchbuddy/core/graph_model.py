@@ -84,10 +84,11 @@ class HierarchicalResearchGraph:
     """
 
     def __init__(self, alpha: float = FUSION_ALPHA):
-        # ── Three networks ────────────────────────────────────────────────
+        # ── Four networks ────────────────────────────────────────────────
         self.G_semantic: nx.DiGraph  = nx.DiGraph()   # NLP / HSWN
         self.G_citation: nx.DiGraph  = nx.DiGraph()   # citation relationships
         self.G: nx.DiGraph           = nx.DiGraph()   # fused (combined)
+        self.G_causal: nx.DiGraph    = nx.DiGraph()   # causal DAG (acyclic influence)
 
         # ── Paper registry ────────────────────────────────────────────────
         self._papers: dict[str, PaperMeta]       = {}
@@ -127,7 +128,7 @@ class HierarchicalResearchGraph:
             meta.embedding = embedding
         self._papers[meta.paper_id] = meta
         self._seen_titles.add(norm)
-        for G in (self.G_semantic, self.G_citation, self.G):
+        for G in (self.G_semantic, self.G_citation, self.G, self.G_causal):
             G.add_node(meta.paper_id, level=0, node_type="paper",
                        weight=meta.effective_weight)
         self._invalidate()
@@ -221,6 +222,20 @@ class HierarchicalResearchGraph:
             annotate_citation_types(self.G_citation, self._papers)
         except Exception as e:
             print(f"[graph] Citation type annotation skipped: {e}")
+
+        # ── 6. Causal DAG (acyclic influence flow) ────────────────────────
+        try:
+            from researchbuddy.core.causal import build_causal_dag
+            from researchbuddy.config import CAUSAL_CONFIDENCE_THRESHOLD
+            self.G_causal = build_causal_dag(
+                self.G, self.G_citation, self._papers,
+                min_confidence=CAUSAL_CONFIDENCE_THRESHOLD,
+            )
+            print(f"[graph] Causal DAG: {self.G_causal.number_of_edges()} edges, "
+                  f"acyclic={nx.is_directed_acyclic_graph(self.G_causal)}")
+        except Exception as e:
+            print(f"[graph] Causal DAG construction skipped: {e}")
+            self.G_causal = nx.DiGraph()
 
         self._context_dirty = True
 
@@ -344,7 +359,7 @@ class HierarchicalResearchGraph:
             for pid in paper_ids[:5]:
                 meta = self._papers.get(pid)
                 if meta and meta.user_rating is None:
-                    for G in (self.G_semantic, self.G_citation, self.G):
+                    for G in (self.G_semantic, self.G_citation, self.G, self.G_causal):
                         if G.has_node(pid):
                             old_w = G.nodes[pid].get("weight",
                                                      DEFAULT_SEED_WEIGHT)
@@ -355,7 +370,7 @@ class HierarchicalResearchGraph:
             dampen = (4 - rating) * 0.2    # 1→0.6, 2→0.4, 3→0.2
             for pid in paper_ids[:5]:
                 if pid in self._papers:
-                    for G in (self.G_semantic, self.G_citation, self.G):
+                    for G in (self.G_semantic, self.G_citation, self.G, self.G_causal):
                         if G.has_node(pid):
                             old_w = G.nodes[pid].get("weight",
                                                      DEFAULT_SEED_WEIGHT)
@@ -393,7 +408,7 @@ class HierarchicalResearchGraph:
         if paper_id not in self._papers:
             raise KeyError(paper_id)
         self._papers[paper_id].user_rating = float(rating)
-        for G in (self.G_semantic, self.G_citation, self.G):
+        for G in (self.G_semantic, self.G_citation, self.G, self.G_causal):
             if G.has_node(paper_id):
                 G.nodes[paper_id]["weight"] = float(rating)
         self._invalidate()
@@ -678,6 +693,9 @@ class HierarchicalResearchGraph:
             "semantic_edges"        : self.G_semantic.number_of_edges(),
             "citation_edges"        : self.G_citation.number_of_edges(),
             "combined_edges"        : self.G.number_of_edges(),
+            "causal_edges"          : self.G_causal.number_of_edges(),
+            "causal_is_dag"         : nx.is_directed_acyclic_graph(self.G_causal)
+                                      if self.G_causal.number_of_edges() > 0 else True,
             "citations_loaded"      : len(self._refs),
             "context_ready"         : self.context_vector() is not None,
         }
@@ -727,6 +745,9 @@ class HierarchicalResearchGraph:
             self._argument_interactions: list = []
         if not hasattr(self, "_style_profile"):
             self._style_profile = None
+        # v0.6.0 — causal DAG (acyclic influence flow)
+        if not hasattr(self, "G_causal"):
+            self.G_causal = nx.DiGraph()
         # v0.2.0 used n_levels; v0.3.0 uses alpha only
         if not hasattr(self, "alpha"):
             self.alpha = FUSION_ALPHA
@@ -761,7 +782,7 @@ class HierarchicalResearchGraph:
         for meta in getattr(old, "_papers", {}).values():
             new._papers[meta.paper_id] = meta
             new._seen_titles.add(meta.title.lower().strip())
-            for G in (new.G_semantic, new.G_citation, new.G):
+            for G in (new.G_semantic, new.G_citation, new.G, new.G_causal):
                 G.add_node(meta.paper_id, level=0, node_type="paper",
                            weight=meta.effective_weight)
         print(f"[graph] Migrated {len(new._papers)} papers from legacy format.")

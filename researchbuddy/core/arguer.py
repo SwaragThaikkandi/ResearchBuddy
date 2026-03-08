@@ -791,10 +791,26 @@ def _gen_evolution(
     theme : str,
     graph : "HierarchicalResearchGraph",
 ) -> str:
-    dated = sorted([(p, p.year) for p in papers if p.year], key=lambda x: x[1])
-    if len(dated) < 2:
-        dated = [(p, 0) for p in papers[:2]]
+    # Prefer causal DAG topological order (acyclic influence flow)
+    ordered: list[tuple["PaperMeta", int]] = []
+    G_caus = graph.G_causal
+    if G_caus.number_of_edges() > 0:
+        paper_ids = {p.paper_id for p in papers}
+        sub = G_caus.subgraph([n for n in G_caus.nodes if n in paper_ids]).copy()
+        if sub.number_of_edges() > 0:
+            import networkx as _nx
+            for pid in _nx.topological_sort(sub):
+                meta = graph.get_paper(pid)
+                if meta:
+                    ordered.append((meta, meta.year or 0))
 
+    # Fallback: sort by publication year
+    if len(ordered) < 2:
+        ordered = sorted([(p, p.year) for p in papers if p.year], key=lambda x: x[1])
+    if len(ordered) < 2:
+        ordered = [(p, 0) for p in papers[:2]]
+
+    dated = ordered
     p_old, y_old = dated[0]
     p_new, y_new = dated[-1]
     claim_old = _extract_main_claim(p_old.abstract, title=p_old.title)
@@ -1047,9 +1063,17 @@ class Arguer:
         if has_contradict:
             available.append(ARG_TENSION)
 
-        # Evolution: papers span at least 3 years
+        # Evolution: papers span at least 3 years OR causal DAG has ≥2 edges
         years = [p.year for p in papers if p.year]
-        if years and (max(years) - min(years) >= 3):
+        year_span_ok = years and (max(years) - min(years) >= 3)
+        causal_ok = False
+        if graph.G_causal.number_of_edges() >= 2:
+            paper_ids_set = {p.paper_id for p in papers}
+            causal_sub = graph.G_causal.subgraph(
+                [n for n in graph.G_causal.nodes if n in paper_ids_set]
+            )
+            causal_ok = causal_sub.number_of_edges() >= 2
+        if year_span_ok or causal_ok:
             available.append(ARG_EVOLUTION)
 
         return available
