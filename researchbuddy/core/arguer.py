@@ -244,7 +244,9 @@ def _clean_for_display(text: str) -> str:
     """Aggressively strip PDF metadata noise; return readable prose only."""
     if not text:
         return ""
-    t = text
+    # Mojibake repair first (e.g. â€™ → ')
+    from researchbuddy.core.llm import fix_mojibake
+    t = fix_mojibake(text)
     # Unicode ligatures → ASCII
     for old, new in [('\ufb01', 'fi'), ('\ufb02', 'fl'), ('\ufb00', 'ff'),
                      ('\ufb03', 'ffi'), ('\ufb04', 'ffl'),
@@ -686,7 +688,7 @@ def _extract_theme(query: str, papers: list["PaperMeta"]) -> str:
 
 # ── Paragraph generators ───────────────────────────────────────────────────────
 
-def _gen_convergence(
+def _gen_convergence_template(
     query : str,
     papers: list["PaperMeta"],
     theme : str,
@@ -738,7 +740,7 @@ def _gen_convergence(
     )
 
 
-def _gen_tension(
+def _gen_tension_template(
     query           : str,
     papers          : list["PaperMeta"],
     theme           : str,
@@ -785,7 +787,7 @@ def _gen_tension(
     )
 
 
-def _gen_evolution(
+def _gen_evolution_template(
     query : str,
     papers: list["PaperMeta"],
     theme : str,
@@ -851,7 +853,7 @@ def _gen_evolution(
     )
 
 
-def _gen_synthesis(
+def _gen_synthesis_template(
     query : str,
     papers: list["PaperMeta"],
     theme : str,
@@ -896,7 +898,7 @@ def _gen_synthesis(
     )
 
 
-def _gen_gap(
+def _gen_gap_template(
     query : str,
     papers: list["PaperMeta"],
     theme : str,
@@ -942,6 +944,254 @@ def _gen_gap(
         f"However, {gap} remains underexplored in the existing literature. "
         f"{random.choice(closings)}"
     )
+
+
+# ── LLM-powered generators (graph-constrained) ──────────────────────────────
+#
+# The LLM operates INSIDE THE CAGE of the causal graph.
+# Every prompt includes explicit GRAPH RELATIONSHIPS from G_causal and G_citation.
+# The LLM's job is to articulate graph facts, not to reason independently.
+
+_LLM_SYSTEM = (
+    "You are an academic writing assistant. You write clear, precise paragraphs "
+    "that synthesize research findings.\n"
+    "CRITICAL RULES:\n"
+    "1. The GRAPH RELATIONSHIPS section contains established facts. You MUST "
+    "follow them exactly. Do NOT contradict, reinterpret, or ignore them.\n"
+    "2. If the graph says Paper A SUPPORTS Paper B, write about agreement.\n"
+    "3. If the graph says Paper A CONTRADICTS Paper B, write about tension.\n"
+    "4. If a CAUSAL CHAIN is given, follow that exact temporal ordering.\n"
+    "5. Cite papers as 'Author (Year)'. Reference specific findings from "
+    "the abstracts provided, not just titles.\n"
+    "6. Output ONLY the paragraph text. No headers, labels, bullet points, "
+    "or markdown formatting.\n"
+    "7. Length: 4-6 sentences."
+)
+
+
+def _validate_llm_output(text: str, papers: list["PaperMeta"]) -> bool:
+    """Quality gate: reject LLM output that is too short, off-topic, or garbled."""
+    if not text or len(text) < 80:
+        return False
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    if len(sentences) < 2:
+        return False
+    # Must reference at least one paper (by year or author surname)
+    years = [str(p.year) for p in papers if p.year]
+    surnames: list[str] = []
+    for p in papers:
+        if p.authors:
+            parts = p.authors[0].split(",")[0].split()
+            if parts:
+                surnames.append(parts[-1].lower())
+    has_ref = any(y in text for y in years) or any(s in text.lower() for s in surnames if len(s) > 2)
+    if not has_ref:
+        return False
+    # Reject LLM artifacts
+    bad = ["as an ai", "i cannot", "i don't have", "```", "##", "here is",
+           "here's a", "certainly!", "sure!", "of course!"]
+    if any(m in text.lower() for m in bad):
+        return False
+    return True
+
+
+def _gen_convergence_llm(
+    query: str, papers: list["PaperMeta"], theme: str,
+    graph: "HierarchicalResearchGraph",
+) -> Optional[str]:
+    from researchbuddy.core.llm import get_llm, build_paper_context
+    client = get_llm()
+    if not client.is_available():
+        return None
+    context = build_paper_context(papers[:4], graph)
+    prompt = (
+        f"Write a single paragraph arguing that multiple research papers "
+        f"CONVERGE on a shared conclusion about '{theme}'.\n\n"
+        f"Research question: {query}\n\n"
+        f"Papers to cite:\n{context}\n"
+        f"Requirements:\n"
+        f"- Show how these papers independently support a common finding\n"
+        f"- Cite each paper as 'Author (Year)'\n"
+        f"- Reference specific findings from the abstracts, not just titles\n"
+        f"- End with a sentence about the significance of this convergence\n"
+    )
+    return client.generate(prompt, system=_LLM_SYSTEM, temperature=0.7, max_tokens=400)
+
+
+def _gen_tension_llm(
+    query: str, papers: list["PaperMeta"], theme: str,
+    graph: "HierarchicalResearchGraph",
+    contradict_pairs: list[tuple[str, str]] | None = None,
+) -> Optional[str]:
+    from researchbuddy.core.llm import get_llm, build_paper_context
+    client = get_llm()
+    if not client.is_available():
+        return None
+    context = build_paper_context(papers[:4], graph)
+    extra = ""
+    if contradict_pairs:
+        pid_set = {p.paper_id: p for p in papers}
+        pair_descs = []
+        for u, v in contradict_pairs[:2]:
+            pu = pid_set.get(u)
+            pv = pid_set.get(v)
+            if pu and pv:
+                pair_descs.append(
+                    f"  \"{pu.title[:60]}\" CONTRADICTS \"{pv.title[:60]}\""
+                )
+        if pair_descs:
+            extra = "\nKNOWN CONTRADICTIONS (from the graph):\n" + "\n".join(pair_descs) + "\n"
+    prompt = (
+        f"Write a single paragraph about the scientific TENSION or "
+        f"disagreement in research on '{theme}'.\n\n"
+        f"Research question: {query}\n\n"
+        f"Papers to cite:\n{context}{extra}\n"
+        f"Requirements:\n"
+        f"- Focus on the specific disagreements identified in GRAPH RELATIONSHIPS\n"
+        f"- Do NOT invent tensions the graph does not support\n"
+        f"- Cite each paper as 'Author (Year)'\n"
+        f"- End with a sentence about what this disagreement means for the field\n"
+    )
+    return client.generate(prompt, system=_LLM_SYSTEM, temperature=0.7, max_tokens=400)
+
+
+def _gen_evolution_llm(
+    query: str, papers: list["PaperMeta"], theme: str,
+    graph: "HierarchicalResearchGraph",
+) -> Optional[str]:
+    from researchbuddy.core.llm import get_llm, build_paper_context
+    client = get_llm()
+    if not client.is_available():
+        return None
+    context = build_paper_context(papers[:5], graph)
+    prompt = (
+        f"Write a single paragraph about how understanding of '{theme}' "
+        f"has EVOLVED over time.\n\n"
+        f"Research question: {query}\n\n"
+        f"Papers to cite:\n{context}\n"
+        f"Requirements:\n"
+        f"- Follow the CAUSAL CHAIN ordering above EXACTLY\n"
+        f"- Start with the earliest influencing paper and trace the intellectual "
+        f"progression to the most recent work\n"
+        f"- Show how each paper built upon or revised earlier ideas\n"
+        f"- Cite each paper as 'Author (Year)'\n"
+        f"- End with a sentence about the trajectory of the field\n"
+    )
+    return client.generate(prompt, system=_LLM_SYSTEM, temperature=0.7, max_tokens=400)
+
+
+def _gen_synthesis_llm(
+    query: str, papers: list["PaperMeta"], theme: str,
+    graph: "HierarchicalResearchGraph",
+) -> Optional[str]:
+    from researchbuddy.core.llm import get_llm, build_paper_context
+    client = get_llm()
+    if not client.is_available():
+        return None
+    context = build_paper_context(papers[:4], graph)
+    prompt = (
+        f"Write a single paragraph that SYNTHESIZES findings from different "
+        f"research traditions or approaches to '{theme}'.\n\n"
+        f"Research question: {query}\n\n"
+        f"Papers to cite:\n{context}\n"
+        f"Requirements:\n"
+        f"- Show how papers from different angles complement each other\n"
+        f"- If papers are in the same niche (per GRAPH RELATIONSHIPS), "
+        f"highlight shared methodology; if different niches, highlight "
+        f"cross-disciplinary insight\n"
+        f"- Cite each paper as 'Author (Year)'\n"
+        f"- End with what the synthesis reveals that no single paper shows alone\n"
+    )
+    return client.generate(prompt, system=_LLM_SYSTEM, temperature=0.7, max_tokens=400)
+
+
+def _gen_gap_llm(
+    query: str, papers: list["PaperMeta"], theme: str,
+    graph: "HierarchicalResearchGraph",
+) -> Optional[str]:
+    from researchbuddy.core.llm import get_llm, build_paper_context
+    client = get_llm()
+    if not client.is_available():
+        return None
+    context = build_paper_context(papers[:4], graph)
+    prompt = (
+        f"Write a single paragraph identifying a research GAP in the study "
+        f"of '{theme}'.\n\n"
+        f"Research question: {query}\n\n"
+        f"Papers to cite:\n{context}\n"
+        f"Requirements:\n"
+        f"- Summarize what these papers have established\n"
+        f"- Identify a specific question or area that remains unaddressed\n"
+        f"- The gap should follow logically from the existing findings\n"
+        f"- Cite each paper as 'Author (Year)'\n"
+        f"- End with a concrete suggestion for future research\n"
+    )
+    return client.generate(prompt, system=_LLM_SYSTEM, temperature=0.7, max_tokens=400)
+
+
+# ── Wrapper functions (LLM with template fallback) ──────────────────────────
+
+def _gen_convergence(
+    query: str, papers: list["PaperMeta"], theme: str,
+    graph: "HierarchicalResearchGraph",
+) -> str:
+    from researchbuddy.config import LLM_ENABLED
+    if LLM_ENABLED:
+        result = _gen_convergence_llm(query, papers, theme, graph)
+        if result and _validate_llm_output(result, papers):
+            return result
+    return _gen_convergence_template(query, papers, theme, graph)
+
+
+def _gen_tension(
+    query: str, papers: list["PaperMeta"], theme: str,
+    graph: "HierarchicalResearchGraph",
+    contradict_pairs: list[tuple[str, str]] | None = None,
+) -> str:
+    from researchbuddy.config import LLM_ENABLED
+    if LLM_ENABLED:
+        result = _gen_tension_llm(query, papers, theme, graph, contradict_pairs)
+        if result and _validate_llm_output(result, papers):
+            return result
+    if contradict_pairs is None:
+        contradict_pairs = []
+    return _gen_tension_template(query, papers, theme, graph, contradict_pairs)
+
+
+def _gen_evolution(
+    query: str, papers: list["PaperMeta"], theme: str,
+    graph: "HierarchicalResearchGraph",
+) -> str:
+    from researchbuddy.config import LLM_ENABLED
+    if LLM_ENABLED:
+        result = _gen_evolution_llm(query, papers, theme, graph)
+        if result and _validate_llm_output(result, papers):
+            return result
+    return _gen_evolution_template(query, papers, theme, graph)
+
+
+def _gen_synthesis(
+    query: str, papers: list["PaperMeta"], theme: str,
+    graph: "HierarchicalResearchGraph",
+) -> str:
+    from researchbuddy.config import LLM_ENABLED
+    if LLM_ENABLED:
+        result = _gen_synthesis_llm(query, papers, theme, graph)
+        if result and _validate_llm_output(result, papers):
+            return result
+    return _gen_synthesis_template(query, papers, theme, graph)
+
+
+def _gen_gap(
+    query: str, papers: list["PaperMeta"], theme: str,
+    graph: "HierarchicalResearchGraph",
+) -> str:
+    from researchbuddy.config import LLM_ENABLED
+    if LLM_ENABLED:
+        result = _gen_gap_llm(query, papers, theme, graph)
+        if result and _validate_llm_output(result, papers):
+            return result
+    return _gen_gap_template(query, papers, theme, graph)
 
 
 # ── Main Arguer class ──────────────────────────────────────────────────────────

@@ -9,16 +9,35 @@ import numpy as np
 from typing import Union
 
 _model = None
+_device = None
+
+
+def _resolve_device() -> str:
+    """Pick the best device for embedding: config override → CUDA → CPU."""
+    from researchbuddy.config import EMBEDDING_DEVICE
+    if EMBEDDING_DEVICE == "cuda":
+        return "cuda"
+    if EMBEDDING_DEVICE == "cpu":
+        return "cpu"
+    # "auto" — try CUDA first
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+    except ImportError:
+        pass
+    return "cpu"
 
 
 def _get_model():
-    global _model
+    global _model, _device
     if _model is None:
         from sentence_transformers import SentenceTransformer
         from researchbuddy.config import EMBEDDING_MODEL
-        print(f"[embedder] Loading model '{EMBEDDING_MODEL}' (first run only) ...")
-        _model = SentenceTransformer(EMBEDDING_MODEL)
-        print("[embedder] Model ready.")
+        _device = _resolve_device()
+        print(f"[embedder] Loading '{EMBEDDING_MODEL}' on {_device} ...")
+        _model = SentenceTransformer(EMBEDDING_MODEL, device=_device)
+        print(f"[embedder] Model ready ({_device}).")
     return _model
 
 

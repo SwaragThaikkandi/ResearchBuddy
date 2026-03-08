@@ -2,15 +2,22 @@
 searcher.py
 Fetch candidate papers from Semantic Scholar and ArXiv (both free, no key needed).
 Falls back gracefully if a source is unreachable.
+
+LLM enhancements (optional, degrade gracefully when Ollama is unavailable):
+  * HyDE — Hypothetical Document Embeddings for superior semantic matching
+  * Query expansion — LLM generates alternative search formulations
+  * LLM reranking — reranks top candidates by semantic relevance
 """
 
 from __future__ import annotations
 
+import json
 import time
 import re
 import xml.etree.ElementTree as ET
 from typing import Optional
 
+import numpy as np
 import requests
 
 from researchbuddy.config import (
@@ -170,21 +177,207 @@ def search_arxiv(query: str, limit: int = MAX_SEARCH_RESULTS) -> list[PaperMeta]
     return results
 
 
+# ── LLM-enhanced search helpers ───────────────────────────────────────────────
+
+def _generate_hyde_abstract(query: str) -> Optional[str]:
+    """
+    HyDE — Hypothetical Document Embedding.
+
+    Ask the LLM to write a short *hypothetical* abstract for an ideal paper
+    that would perfectly answer ``query``.  This abstract is then embedded
+    and used as a supplementary search signal, dramatically improving
+    semantic matching compared to embedding the raw query string.
+
+    Returns None when Ollama is unavailable or generation fails.
+    """
+    from researchbuddy.config import HYDE_ENABLED, LLM_ENABLED
+    if not HYDE_ENABLED or not LLM_ENABLED:
+        return None
+
+    try:
+        from researchbuddy.core.llm import get_llm
+        client = get_llm()
+        if not client.is_available():
+            return None
+
+        prompt = (
+            f"Write a short academic abstract (100-150 words) for a hypothetical "
+            f"research paper that would perfectly answer this research question:\n\n"
+            f"\"{query}\"\n\n"
+            f"The abstract should include typical academic language, mention "
+            f"methodology, key findings, and conclusions. Output ONLY the "
+            f"abstract text, no title or labels."
+        )
+        system = (
+            "You are an academic paper abstract generator. Write realistic, "
+            "concise scientific abstracts. Output only the abstract paragraph."
+        )
+        result = client.generate(prompt, system=system, temperature=0.5, max_tokens=256)
+        if result and len(result) > 50:
+            print(f"  [HyDE] Generated hypothetical abstract ({len(result)} chars)")
+            return result
+    except Exception as e:
+        print(f"  [HyDE] Failed: {e}")
+    return None
+
+
+def _expand_query(query: str, keywords: list[str]) -> list[str]:
+    """
+    LLM query expansion — generate alternative search formulations.
+
+    Given the user's research intent and existing keywords, generate 3
+    complementary search queries that cover different facets of the topic.
+    Returns an empty list when LLM is unavailable.
+    """
+    from researchbuddy.config import LLM_QUERY_EXPANSION, LLM_ENABLED
+    if not LLM_QUERY_EXPANSION or not LLM_ENABLED:
+        return []
+
+    try:
+        from researchbuddy.core.llm import get_llm
+        client = get_llm()
+        if not client.is_available():
+            return []
+
+        kw_str = ", ".join(keywords[:6]) if keywords else "(none)"
+        prompt = (
+            f"Given this research question: \"{query}\"\n"
+            f"And these existing keywords: {kw_str}\n\n"
+            f"Generate exactly 3 alternative academic search queries that would "
+            f"find relevant papers. Each query should be 3-8 words and cover a "
+            f"different aspect or use different terminology.\n\n"
+            f"Output as a JSON array of 3 strings, e.g.:\n"
+            f'[\"query one\", \"query two\", \"query three\"]'
+        )
+        result = client.generate_json(
+            prompt,
+            system="You generate academic search queries. Output valid JSON only.",
+            temperature=0.4,
+            max_tokens=128,
+        )
+        if isinstance(result, list) and len(result) >= 1:
+            expanded = [q.strip() for q in result if isinstance(q, str) and len(q.strip()) >= 5]
+            if expanded:
+                print(f"  [LLM expand] +{len(expanded)} queries: "
+                      f"{', '.join(q[:40] for q in expanded[:3])}")
+                return expanded[:3]
+    except Exception as e:
+        print(f"  [LLM expand] Failed: {e}")
+    return []
+
+
+def _llm_rerank(query: str, candidates: list[PaperMeta], top_n: int = 15) -> list[PaperMeta]:
+    """
+    LLM reranking — rerank the top candidates by semantic relevance.
+
+    Sends titles and abstract snippets of top candidates to the LLM
+    and asks it to rank them by relevance to the query. Returns reordered
+    candidates (or original order on failure).
+    """
+    from researchbuddy.config import LLM_RERANK_ENABLED, LLM_ENABLED
+    if not LLM_RERANK_ENABLED or not LLM_ENABLED:
+        return candidates
+
+    if len(candidates) <= 3:
+        return candidates
+
+    try:
+        from researchbuddy.core.llm import get_llm, fix_mojibake
+        client = get_llm()
+        if not client.is_available():
+            return candidates
+
+        # Take top candidates for reranking
+        to_rerank = candidates[:top_n]
+        rest = candidates[top_n:]
+
+        # Build paper descriptions for LLM
+        papers_desc = []
+        for i, p in enumerate(to_rerank):
+            title = fix_mojibake(p.title or "Untitled")[:100]
+            abstract = fix_mojibake(p.abstract or "")[:150]
+            papers_desc.append(f"{i}: \"{title}\" — {abstract}")
+
+        prompt = (
+            f"Research question: \"{query}\"\n\n"
+            f"Rank these papers by relevance to the research question. "
+            f"Return a JSON array of paper indices (0-based) from most to "
+            f"least relevant.\n\n"
+            + "\n".join(papers_desc)
+            + f"\n\nOutput ONLY a JSON array of integers, e.g. [3, 0, 5, 1, ...]"
+        )
+
+        result = client.generate_json(
+            prompt,
+            system="You are a research paper relevance ranker. Output valid JSON only.",
+            temperature=0.2,
+            max_tokens=128,
+        )
+        if isinstance(result, list) and len(result) >= 3:
+            # Validate indices
+            valid_indices = [int(i) for i in result
+                            if isinstance(i, (int, float)) and 0 <= int(i) < len(to_rerank)]
+            # Remove duplicates while preserving order
+            seen = set()
+            unique_indices = []
+            for idx in valid_indices:
+                if idx not in seen:
+                    seen.add(idx)
+                    unique_indices.append(idx)
+
+            if len(unique_indices) >= 3:
+                # Add any missing indices at the end
+                for i in range(len(to_rerank)):
+                    if i not in seen:
+                        unique_indices.append(i)
+
+                reranked = [to_rerank[i] for i in unique_indices] + rest
+                print(f"  [LLM rerank] Reranked {len(unique_indices)} candidates")
+                return reranked
+
+    except Exception as e:
+        print(f"  [LLM rerank] Failed: {e}")
+    return candidates
+
+
 # ── High-level orchestrator ────────────────────────────────────────────────────
 
-def find_candidates(graph: ResearchGraph, extra_keywords: list[str] | None = None) -> list[PaperMeta]:
+def find_candidates(
+    graph: ResearchGraph,
+    extra_keywords: list[str] | None = None,
+    query: str | None = None,
+) -> tuple[list[PaperMeta], Optional[np.ndarray]]:
     """
     Run all search strategies and return deduplicated candidate papers.
     Order: S2 recommendations → S2 text search → ArXiv text search.
+
+    When ``query`` (research intent) is provided, LLM enhancements kick in:
+      * HyDE: generate a hypothetical abstract, embed it for better matching
+      * Query expansion: LLM generates alternative search formulations
+      * LLM reranking: reranks top candidates by relevance
+
+    Returns (candidates, hyde_embedding) where hyde_embedding is None when
+    LLM is unavailable or no query is given.
     """
     all_candidates: list[PaperMeta] = []
     seen_ids: set[str] = set()
+    hyde_embedding: Optional[np.ndarray] = None
 
     def add(papers: list[PaperMeta]):
         for p in papers:
             if p.paper_id not in seen_ids:
                 seen_ids.add(p.paper_id)
                 all_candidates.append(p)
+
+    # ── HyDE: generate hypothetical abstract ─────────────────────────────
+    if query:
+        hyde_abstract = _generate_hyde_abstract(query)
+        if hyde_abstract:
+            try:
+                from researchbuddy.core.embedder import embed
+                hyde_embedding = embed(hyde_abstract)
+            except Exception:
+                hyde_embedding = None
 
     # S2 Recommendations from highly-rated / seed papers
     pos_ids = [m.s2_id for m in graph.all_papers() if m.s2_id and m.effective_weight >= 6][:10]
@@ -214,16 +407,25 @@ def find_candidates(graph: ResearchGraph, extra_keywords: list[str] | None = Non
     for m in top_rated:
         queries.append(m.title)
 
-    for query in queries[:3]:
-        print(f"  [search] S2 search: '{query[:60]}' ...")
-        add(search_semantic_scholar(query, limit=15))
+    # ── LLM query expansion ──────────────────────────────────────────────
+    if query:
+        expanded = _expand_query(query, keywords)
+        queries = expanded + queries   # LLM expansions go first
 
-    for query in queries[:2]:
-        print(f"  [search] ArXiv search: '{query[:60]}' ...")
-        add(search_arxiv(query, limit=15))
+    for q in queries[:5]:
+        print(f"  [search] S2 search: '{q[:60]}' ...")
+        add(search_semantic_scholar(q, limit=15))
+
+    for q in queries[:3]:
+        print(f"  [search] ArXiv search: '{q[:60]}' ...")
+        add(search_arxiv(q, limit=15))
+
+    # ── LLM reranking ────────────────────────────────────────────────────
+    if query and all_candidates:
+        all_candidates = _llm_rerank(query, all_candidates)
 
     print(f"  [search] Total candidates fetched: {len(all_candidates)}")
-    return all_candidates
+    return all_candidates, hyde_embedding
 
 
 def resolve_s2_id(title: str) -> str:

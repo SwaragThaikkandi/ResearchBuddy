@@ -208,20 +208,32 @@ def search_session(graph: HierarchicalResearchGraph, plot: bool = True):
         print_warn("No context vector yet. Add seed PDFs (option 3) or rate some papers first.")
         return
 
+    # Ask for research intent (powers HyDE + query expansion + reranking)
+    print_info("\nDescribe what you're looking for (research intent), or Enter to skip:")
+    query_raw = ask("Research intent", "")
+    query = query_raw.strip() if query_raw.strip() else None
+
     print_info("\nOptional: extra search keywords (comma-separated), or Enter to skip:")
     raw   = ask("Keywords", "")
     extra = [kw.strip() for kw in raw.split(",") if kw.strip()] if raw.strip() else []
 
     print()
-    print_info("Searching ...  (may take 20-40 s)\n")
-    candidates = find_candidates(graph, extra_keywords=extra)
+    llm_note = " with LLM enhancements" if query and cfg.LLM_ENABLED else ""
+    print_info(f"Searching{llm_note} ...  (may take 20-40 s)\n")
+    candidates, hyde_embedding = find_candidates(
+        graph, extra_keywords=extra, query=query
+    )
     if not candidates:
         print_warn("No results returned. Check your internet connection.")
         return
 
-    print_info("Ranking candidates (fused semantic + citation scores) ...")
-    results = graph.rank_candidates(candidates, n=cfg.N_RECOMMENDATIONS,
-                                    exploration_ratio=cfg.EXPLORATION_RATIO)
+    score_note = " + HyDE" if hyde_embedding is not None else ""
+    print_info(f"Ranking candidates (fused semantic + citation{score_note} scores) ...")
+    results = graph.rank_candidates(
+        candidates, n=cfg.N_RECOMMENDATIONS,
+        exploration_ratio=cfg.EXPLORATION_RATIO,
+        hyde_embedding=hyde_embedding,
+    )
     display_results(results)
 
     if results:
@@ -586,6 +598,77 @@ def creative_session(graph: HierarchicalResearchGraph):
             print_info(f"  Best-performing type so far: {top_type}")
 
 
+# ── LLM Status ────────────────────────────────────────────────────────────────
+
+def _show_llm_status_banner():
+    """Print a one-line LLM status at startup."""
+    if not cfg.LLM_ENABLED:
+        print_info("  LLM: disabled (--no-llm)")
+        return
+    try:
+        from researchbuddy.core.llm import get_llm
+        client = get_llm()
+        st = client.status()
+        if st.available:
+            gpu_str = f" on {st.gpu_name}" if st.gpu_name else ""
+            vram_str = f" ({st.gpu_vram_mb} MB VRAM)" if st.gpu_vram_mb else ""
+            print_success(f"  LLM: {st.model_name}{gpu_str}{vram_str} -- ready")
+        else:
+            print_warn(f"  LLM: {st.error}")
+            print_info("  (ResearchBuddy works without LLM — using template fallback)")
+    except Exception as e:
+        print_warn(f"  LLM: check failed ({e})")
+
+
+def show_llm_status():
+    """Detailed LLM status display (menu option 9)."""
+    print_header("LLM Status & Setup")
+
+    if not cfg.LLM_ENABLED:
+        print_warn("LLM is disabled. Remove --no-llm flag to enable.")
+        return
+
+    try:
+        from researchbuddy.core.llm import get_llm, detect_gpu
+        client = get_llm()
+        st = client.status()
+
+        # GPU info
+        gpu = detect_gpu()
+        if gpu.get("available"):
+            print_success(f"  GPU: {gpu['name']}  ({gpu['vram_mb']} MB VRAM)")
+        else:
+            print_info("  GPU: No CUDA GPU detected (using CPU)")
+
+        # Ollama status
+        if st.available:
+            print_success(f"  Ollama: connected  (model: {st.model_name})")
+        else:
+            print_warn(f"  Ollama: {st.error}")
+
+        # Feature toggles
+        print()
+        print_info("  Feature flags:")
+        print_info(f"    LLM argumentation : {'ON' if cfg.LLM_ENABLED else 'OFF'}")
+        print_info(f"    HyDE search       : {'ON' if cfg.HYDE_ENABLED else 'OFF'}")
+        print_info(f"    Query expansion   : {'ON' if cfg.LLM_QUERY_EXPANSION else 'OFF'}")
+        print_info(f"    LLM reranking     : {'ON' if cfg.LLM_RERANK_ENABLED else 'OFF'}")
+
+        if not st.available:
+            print()
+            print_info("  Setup instructions:")
+            print_info("    1. Install Ollama: https://ollama.ai")
+            print_info("    2. Start server:   ollama serve")
+            print_info(f"    3. Pull model:     ollama pull {cfg.LLM_MODEL}")
+            print()
+            print_info("  Recommended models by GPU VRAM:")
+            print_info("    4 GB  (RTX 2050/3050):  ollama pull phi3.5")
+            print_info("    8 GB  (RTX 3050/3060):  ollama pull mistral")
+            print_info("   16 GB+ (RTX 3090/4090):  ollama pull llama3.1")
+    except Exception as e:
+        print_warn(f"  Error checking LLM status: {e}")
+
+
 # ── Main menu ──────────────────────────────────────────────────────────────────
 
 def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
@@ -598,6 +681,7 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
         "6": "Rebuild hierarchy & regenerate all graph PDFs",
         "7": "Query your research network (Reasoning Mode)",
         "8": "Creative Mode — generate & rate argument paragraphs",
+        "9": "LLM status & setup",
         "q": "Save & quit",
     }
     while True:
@@ -648,6 +732,8 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
             query_session(graph)
         elif choice == "8":
             creative_session(graph)
+        elif choice == "9":
+            show_llm_status()
         else:
             print_warn("Unknown option.")
 
@@ -678,6 +764,14 @@ def _build_parser() -> argparse.ArgumentParser:
                    help=f"Papers shown per search session. Default: {cfg.N_RECOMMENDATIONS}")
     g.add_argument("--no-plot", action="store_true",
                    help="Disable PDF graph generation after each session")
+
+    # ── LLM options ──────────────────────────────────────────────────────
+    llm_g = p.add_argument_group("LLM options (local Ollama)")
+    llm_g.add_argument("--llm-model", type=str, default=None,
+                       metavar="NAME",
+                       help=f"Ollama model name. Default: {cfg.LLM_MODEL}")
+    llm_g.add_argument("--no-llm", action="store_true",
+                       help="Disable all LLM features (pure graph-based mode)")
     return p
 
 
@@ -692,6 +786,13 @@ def main():
     if args.similarity_threshold is not None: cfg.SIMILARITY_THRESHOLD = args.similarity_threshold
     if args.n_recommendations    is not None: cfg.N_RECOMMENDATIONS    = args.n_recommendations
     if args.no_plot:                           cfg.SAVE_GRAPH_PDF       = False
+    if args.no_llm:
+        cfg.LLM_ENABLED        = False
+        cfg.HYDE_ENABLED       = False
+        cfg.LLM_QUERY_EXPANSION= False
+        cfg.LLM_RERANK_ENABLED = False
+    if args.llm_model is not None:
+        cfg.LLM_MODEL = args.llm_model
     plot = not args.no_plot
 
     if HAS_RICH:
@@ -704,6 +805,9 @@ def main():
         print("=" * 60)
         print("  ResearchBuddy - Hierarchical literature search assistant")
         print("=" * 60)
+
+    # ── LLM status at startup ────────────────────────────────────────────
+    _show_llm_status_banner()
 
     if args.reset and cfg.STATE_FILE.exists():
         cfg.STATE_FILE.unlink()

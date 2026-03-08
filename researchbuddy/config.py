@@ -54,6 +54,20 @@ ARGUER_TOP_PARAGRAPHS= 3       # default number of argument paragraphs per sessi
 CAUSAL_CONFIDENCE_THRESHOLD = 0.20   # min confidence to include edge in G_causal
 CAUSAL_TRANSITIVE_REDUCE    = False  # optional: remove redundant implied edges
 
+# ── Local LLM (Ollama) ───────────────────────────────────────────────────────
+LLM_OLLAMA_URL       = "http://localhost:11434"
+LLM_MODEL            = "phi3.5"          # Phi-3.5-mini (~2.5GB Q4) for 4GB VRAM
+LLM_TEMPERATURE      = 0.7              # creative tasks (argumentation)
+LLM_TEMPERATURE_LOW  = 0.3              # structured tasks (JSON, reranking)
+LLM_MAX_TOKENS       = 512              # max tokens per generation
+LLM_ENABLED          = True             # master switch (--no-llm to disable)
+HYDE_ENABLED          = True             # HyDE for search
+LLM_QUERY_EXPANSION  = True             # LLM query expansion for search
+LLM_RERANK_ENABLED   = True             # LLM reranking of search results
+
+# ── Embedding device ─────────────────────────────────────────────────────────
+EMBEDDING_DEVICE     = "auto"           # "auto" | "cuda" | "cpu"
+
 # ── Keyword extraction ─────────────────────────────────────────────────────────
 TOP_KEYWORDS         = 8
 

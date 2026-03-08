@@ -600,7 +600,18 @@ class HierarchicalResearchGraph:
         candidates: list[PaperMeta],
         n: int = 10,
         exploration_ratio: float = EXPLORATION_RATIO,
+        hyde_embedding: Optional[np.ndarray] = None,
     ) -> list[tuple[PaperMeta, float, str]]:
+        """
+        Rank candidates by fused (semantic + citation) relevance, with
+        optional HyDE embedding blending.
+
+        When ``hyde_embedding`` is provided (from the LLM-generated hypothetical
+        abstract), each candidate's score is blended:
+            final = graph_score * 0.6 + hyde_sim * 0.4
+        This lets the LLM's understanding of the research intent supplement
+        the graph-based scoring, while keeping the graph as the primary signal.
+        """
         new_cands = [
             c for c in candidates
             if c.paper_id not in self._papers
@@ -614,6 +625,13 @@ class HierarchicalResearchGraph:
             if c.embedding is None:
                 self.embed_abstract(c)
             rel   = self.score_candidate(c)
+
+            # Blend HyDE similarity when available
+            if hyde_embedding is not None and c.embedding is not None:
+                hyde_sim = float(cosine_similarity(hyde_embedding, c.embedding))
+                hyde_sim = max(0.0, hyde_sim)  # clamp negatives
+                rel = rel * 0.6 + hyde_sim * 0.4
+
             novel = self.novelty_score(c)
             scored.append((c, rel, novel))
 
