@@ -607,6 +607,31 @@ def compute_edge_confidence(
         multiplier = 1.0
     return min(1.0, base_weight * multiplier)
 
+def _normalise_doi(doi: str) -> str:
+    d = (doi or "").strip().lower()
+    if not d:
+        return ""
+    d = re.sub(r'^https?://(dx\.)?doi\.org/', '', d)
+    return d.strip()
+
+
+def _guess_ref_namespace(source: str, ref_id: str) -> str:
+    src = (source or "").strip().lower()
+    rid = (ref_id or "").strip().lower()
+    if not rid:
+        return ""
+    if src.startswith("crossref"):
+        return "doi"
+    if src.startswith("openalex"):
+        return "openalex"
+    if src in {"s2", "semantic_scholar"}:
+        return "s2"
+    if rid.startswith("10.") or "doi.org/" in rid:
+        return "doi"
+    if re.match(r'^(?:https?://openalex\.org/)?w\d+$', rid):
+        return "openalex"
+    return "s2"
+
 
 def fetch_all_refs(
     papers,
@@ -721,63 +746,176 @@ def build_citation_graph(
     paper_ids: list[str],
     s2_ids: list[str],
     refs: dict[str, set[str]],  # keyed by paper_id
-    ref_sources: dict[str, list] | None = None,  # paper_id → list[RefResult]
+    ref_sources: dict[str, list] | None = None,  # paper_id -> list[RefResult]
+    paper_metas: dict[str, object] | None = None,
 ) -> nx.DiGraph:
     """
-    Build a directed citation graph with edge confidence scores.
+    Build a directed citation graph with confidence scores.
 
-    Two types of edges:
-    1. Bibliographic coupling (bib_coupling): undirected strength between any
-       two papers that share external references. Always populated when refs exist.
-    2. Direct citation (citation): A → B when A cites B directly (only when
-       both papers are in the corpus AND identified by the same ID namespace).
+    Two edge families are represented:
+    1. citation: A -> B when A directly cites B (preferred for causal orientation)
+    2. bib_coupling: symmetric overlap signal when two papers share references
 
-    When ``ref_sources`` is provided, edge_confidence reflects how many
-    independent data sources corroborate each paper's reference list.
+    Direct citation edges are constructed first and kept even when a
+    bibliographic-coupling relation also exists between the same pair.
     """
     G = nx.DiGraph()
     G.add_nodes_from(paper_ids)
 
-    # Pre-compute source counts for confidence scoring
+    # Pre-compute source counts for confidence scoring.
     source_counts: dict[str, int] = {}
     if ref_sources:
         for pid, results in ref_sources.items():
-            source_counts[pid] = len(results)
+            source_counts[pid] = len(results or [])
 
-    # ── Bibliographic coupling edges ──────────────────────────────────────────
+    # Build internal ID maps (S2 and DOI are usually available).
+    s2_to_internal: dict[str, str] = {}
+    doi_to_internal: dict[str, str] = {}
+    openalex_to_internal: dict[str, str] = {}
+
+    for pid, s2 in zip(paper_ids, s2_ids):
+        s2_norm = (s2 or "").strip()
+        if s2_norm and s2_norm not in s2_to_internal:
+            s2_to_internal[s2_norm] = pid
+
+    if paper_metas:
+        for pid in paper_ids:
+            meta = paper_metas.get(pid)
+            if meta is None:
+                continue
+
+            doi_norm = _normalise_doi(getattr(meta, "doi", "") or "")
+            if doi_norm and doi_norm not in doi_to_internal:
+                doi_to_internal[doi_norm] = pid
+
+            s2_norm = (getattr(meta, "s2_id", "") or "").strip()
+            if s2_norm and s2_norm not in s2_to_internal:
+                s2_to_internal[s2_norm] = pid
+
+            oa_raw = (getattr(meta, "openalex_id", "") or "")
+            if not oa_raw:
+                url = (getattr(meta, "url", "") or "")
+                m = re.search(r'openalex\.org/(W\d+)', url, flags=re.I)
+                if m:
+                    oa_raw = m.group(1)
+            oa_norm = _normalise_oa_id(oa_raw)
+            if oa_norm and oa_norm not in openalex_to_internal:
+                openalex_to_internal[oa_norm] = pid
+
+    def _map_ref_to_internal(ref_id: str, source_hint: str = "") -> Optional[str]:
+        rid = (ref_id or "").strip()
+        if not rid:
+            return None
+
+        ns = _guess_ref_namespace(source_hint, rid)
+        if ns == "doi":
+            return doi_to_internal.get(_normalise_doi(rid))
+        if ns == "openalex":
+            return openalex_to_internal.get(_normalise_oa_id(rid))
+        return s2_to_internal.get(rid)
+
+    # Direct citations: preserve evidence source(s) per directed pair.
+    direct_evidence: dict[tuple[str, str], set[str]] = {}
+
+    for pid in paper_ids:
+        used_source_rows = False
+
+        if ref_sources and pid in ref_sources and ref_sources.get(pid):
+            used_source_rows = True
+            for rr in ref_sources.get(pid, []):
+                if isinstance(rr, dict):
+                    source_label = (rr.get("source", "") or "").strip()
+                    ref_ids = rr.get("ref_ids", set()) or set()
+                else:
+                    source_label = (getattr(rr, "source", "") or "").strip()
+                    ref_ids = getattr(rr, "ref_ids", set()) or set()
+
+                for rid in ref_ids:
+                    target = _map_ref_to_internal(str(rid), source_label)
+                    if target and target != pid:
+                        key = (pid, target)
+                        direct_evidence.setdefault(key, set()).add(source_label or "source")
+
+        # Fallback for older states that only have merged refs.
+        if not used_source_rows:
+            for rid in refs.get(pid, set()):
+                rid_s = str(rid)
+                target = _map_ref_to_internal(rid_s)
+                if target and target != pid:
+                    ns = _guess_ref_namespace("", rid_s) or "unknown"
+                    key = (pid, target)
+                    direct_evidence.setdefault(key, set()).add(f"merged_{ns}")
+
+    for (src, tgt), evidence in direct_evidence.items():
+        n_src = len(evidence)
+        n_src_a = source_counts.get(src, 1)
+        n_src_b = source_counts.get(tgt, 1)
+        base_conf = compute_edge_confidence(n_src_a, n_src_b, 0.85)
+        conf = min(0.99, base_conf + 0.03 * max(0, n_src - 1))
+
+        G.add_edge(
+            src,
+            tgt,
+            weight=1.0,
+            etype="citation",
+            edge_confidence=round(conf, 3),
+            citation_source_count=n_src,
+            citation_sources=sorted(evidence),
+        )
+
+    # Bibliographic coupling edges are secondary and do not overwrite direct citations.
     n = len(paper_ids)
     for i in range(n):
-        refs_i = refs.get(paper_ids[i], set())
+        pid_i = paper_ids[i]
+        refs_i = refs.get(pid_i, set())
         if not refs_i:
             continue
+
         for j in range(i + 1, n):
-            refs_j = refs.get(paper_ids[j], set())
+            pid_j = paper_ids[j]
+            refs_j = refs.get(pid_j, set())
             if not refs_j:
                 continue
-            overlap = len(refs_i & refs_j)
-            if overlap:
-                w = overlap / np.sqrt(len(refs_i) * len(refs_j))
-                # Compute cross-validation confidence
-                n_src_i = source_counts.get(paper_ids[i], 1)
-                n_src_j = source_counts.get(paper_ids[j], 1)
-                conf = compute_edge_confidence(n_src_i, n_src_j, round(w, 4))
-                G.add_edge(paper_ids[i], paper_ids[j],
-                           weight=round(w, 4), etype="bib_coupling",
-                           shared_refs=overlap, edge_confidence=round(conf, 3))
-                G.add_edge(paper_ids[j], paper_ids[i],
-                           weight=round(w, 4), etype="bib_coupling",
-                           shared_refs=overlap, edge_confidence=round(conf, 3))
 
-    # ── Direct citation edges (S2 namespace only) ─────────────────────────────
-    s2_to_internal = {s2: pid for pid, s2 in zip(paper_ids, s2_ids) if s2}
-    for pid, s2 in zip(paper_ids, s2_ids):
-        if not s2:
-            continue
-        for cited_s2 in refs.get(pid, set()):
-            target = s2_to_internal.get(cited_s2)
-            if target and target != pid:
-                # Only add if not already a stronger bib_coupling edge
-                if not G.has_edge(pid, target):
-                    G.add_edge(pid, target, weight=1.0, etype="citation")
+            overlap = len(refs_i & refs_j)
+            if not overlap:
+                continue
+
+            w = overlap / np.sqrt(len(refs_i) * len(refs_j))
+            n_src_i = source_counts.get(pid_i, 1)
+            n_src_j = source_counts.get(pid_j, 1)
+            conf = compute_edge_confidence(n_src_i, n_src_j, round(w, 4))
+
+            has_direct_ij = (pid_i, pid_j) in direct_evidence
+            has_direct_ji = (pid_j, pid_i) in direct_evidence
+
+            # Attach coupling metadata to direct edges when present.
+            if has_direct_ij and G.has_edge(pid_i, pid_j):
+                G[pid_i][pid_j]["bib_coupling_weight"] = round(w, 4)
+                G[pid_i][pid_j]["shared_refs"] = overlap
+            if has_direct_ji and G.has_edge(pid_j, pid_i):
+                G[pid_j][pid_i]["bib_coupling_weight"] = round(w, 4)
+                G[pid_j][pid_i]["shared_refs"] = overlap
+
+            # Do not add symmetric coupling edges when direct citation exists.
+            if has_direct_ij or has_direct_ji:
+                continue
+
+            G.add_edge(
+                pid_i,
+                pid_j,
+                weight=round(w, 4),
+                etype="bib_coupling",
+                shared_refs=overlap,
+                edge_confidence=round(conf, 3),
+            )
+            G.add_edge(
+                pid_j,
+                pid_i,
+                weight=round(w, 4),
+                etype="bib_coupling",
+                shared_refs=overlap,
+                edge_confidence=round(conf, 3),
+            )
 
     return G

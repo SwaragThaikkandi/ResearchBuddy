@@ -206,7 +206,11 @@ class HierarchicalResearchGraph:
         # ── 2. Citation graph ─────────────────────────────────────────────
         s2_ids = [self._papers[pid].s2_id for pid in ids]
         self.G_citation = build_citation_graph(
-            ids, s2_ids, self._refs, ref_sources=self._ref_sources
+            ids,
+            s2_ids,
+            self._refs,
+            ref_sources=self._ref_sources,
+            paper_metas=self._papers,
         )
         # Ensure all paper nodes exist
         for pid in ids:
