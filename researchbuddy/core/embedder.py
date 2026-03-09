@@ -6,10 +6,59 @@ Loaded once per process; all modules share the same instance.
 
 from __future__ import annotations
 import numpy as np
+import sys
+import types
 from typing import Union
 
 _model = None
 _device = None
+
+
+def _guard_torchvision():
+    """
+    Prevent a broken torchvision install from crashing sentence-transformers.
+
+    sentence_transformers → transformers → torchvision.transforms (for vision
+    models we never use).  If torch and torchvision versions are mismatched
+    the import raises ``RuntimeError: operator torchvision::nms does not exist``.
+
+    Fix: if torchvision fails to import, inject a minimal stub so the
+    downstream ``from torchvision.transforms import InterpolationMode``
+    succeeds harmlessly.  Text embeddings are unaffected.
+    """
+    if "torchvision" in sys.modules:
+        return                              # already loaded (or already stubbed)
+    try:
+        import torchvision                  # noqa: F401 — test if it loads
+    except (RuntimeError, ImportError, OSError):
+        # ── Build a minimal stub ────────────────────────────────────────
+        tv = types.ModuleType("torchvision")
+        tv.__path__ = []                    # mark as package
+
+        # torchvision.transforms + InterpolationMode (used by transformers)
+        transforms = types.ModuleType("torchvision.transforms")
+        transforms.InterpolationMode = type(
+            "InterpolationMode", (),
+            {"BILINEAR": 2, "NEAREST": 0, "BICUBIC": 3,
+             "LANCZOS": 1, "BOX": 4, "HAMMING": 5},
+        )()
+        tv.transforms = transforms
+
+        # torchvision.transforms.functional (imported by some transformers code)
+        functional = types.ModuleType("torchvision.transforms.functional")
+        tv.transforms.functional = functional
+
+        # Register stubs so Python's import system finds them
+        sys.modules["torchvision"] = tv
+        sys.modules["torchvision.transforms"] = transforms
+        sys.modules["torchvision.transforms.functional"] = functional
+        sys.modules["torchvision._meta_registrations"] = types.ModuleType(
+            "torchvision._meta_registrations"
+        )
+
+        print("[embedder] Warning: torchvision is broken or missing — "
+              "stubbed out (not needed for text embeddings).")
+        print("[embedder] To fix permanently: pip install --upgrade torch torchvision")
 
 
 def _resolve_device() -> str:
@@ -32,6 +81,7 @@ def _resolve_device() -> str:
 def _get_model():
     global _model, _device
     if _model is None:
+        _guard_torchvision()                # ← prevent torchvision crash
         from sentence_transformers import SentenceTransformer
         from researchbuddy.config import EMBEDDING_MODEL
         _device = _resolve_device()
