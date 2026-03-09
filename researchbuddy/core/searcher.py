@@ -41,6 +41,33 @@ _MAX_HTTP_RETRIES = 4
 _BACKOFF_BASE_SECONDS = max(float(REQUEST_DELAY), 0.5)
 _BACKOFF_MAX_SECONDS = 20.0
 _BACKOFF_JITTER_SECONDS = 0.25
+_S2_COOLDOWN_SECONDS = float(os.getenv("S2_RATE_LIMIT_COOLDOWN_SECONDS", "90"))
+_s2_backoff_until = 0.0
+
+
+def _is_s2_url(url: str) -> bool:
+    return "api.semanticscholar.org" in url
+
+
+def _s2_cooldown_remaining() -> float:
+    return max(0.0, _s2_backoff_until - time.time())
+
+
+def _activate_s2_cooldown(response: Optional[requests.Response] = None):
+    global _s2_backoff_until
+    delay = _S2_COOLDOWN_SECONDS
+    if response is not None:
+        retry_after = response.headers.get("Retry-After", "").strip()
+        if retry_after:
+            try:
+                delay = max(delay, float(retry_after))
+            except ValueError:
+                pass
+    _s2_backoff_until = max(_s2_backoff_until, time.time() + delay)
+    print(
+        f"  [searcher] S2 cooldown active for {delay:.0f}s after rate-limit. "
+        "Set SEMANTIC_SCHOLAR_API_KEY to improve limits."
+    )
 
 
 def _retry_delay_seconds(response: Optional[requests.Response], attempt: int) -> float:
@@ -58,6 +85,12 @@ def _retry_delay_seconds(response: Optional[requests.Response], attempt: int) ->
 # â”€â”€ Internal helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _get(url: str, params: dict) -> Optional[dict | str]:
+    if _is_s2_url(url):
+        cooldown = _s2_cooldown_remaining()
+        if cooldown > 0:
+            print(f"  [searcher] S2 cooldown active ({cooldown:.0f}s), skipping request.")
+            return None
+
     response: Optional[requests.Response] = None
     for attempt in range(_MAX_HTTP_RETRIES + 1):
         try:
@@ -84,6 +117,8 @@ def _get(url: str, params: dict) -> Optional[dict | str]:
                 )
                 time.sleep(delay)
                 continue
+            if response is not None and response.status_code == 429 and _is_s2_url(url):
+                _activate_s2_cooldown(response)
             print(f"  [searcher] Request failed: {e}")
             return None
         except Exception as e:
@@ -92,6 +127,12 @@ def _get(url: str, params: dict) -> Optional[dict | str]:
     return None
 
 def _post(url: str, payload: dict) -> Optional[dict]:
+    if _is_s2_url(url):
+        cooldown = _s2_cooldown_remaining()
+        if cooldown > 0:
+            print(f"  [searcher] S2 cooldown active ({cooldown:.0f}s), skipping POST request.")
+            return None
+
     response: Optional[requests.Response] = None
     for attempt in range(_MAX_HTTP_RETRIES + 1):
         try:
@@ -117,6 +158,8 @@ def _post(url: str, payload: dict) -> Optional[dict]:
                 )
                 time.sleep(delay)
                 continue
+            if response is not None and response.status_code == 429 and _is_s2_url(url):
+                _activate_s2_cooldown(response)
             print(f"  [searcher] POST failed: {e}")
             return None
         except Exception as e:
