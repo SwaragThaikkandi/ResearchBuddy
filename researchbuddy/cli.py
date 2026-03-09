@@ -216,6 +216,18 @@ def show_stats(graph: HierarchicalResearchGraph):
     if n_anom:
         print_warn(f"  Edge anomalies: {n_anom} (use option 10 to audit)")
 
+    health = stats.get("reliability_health", "good")
+    mean_conf = stats.get("mean_edge_confidence", 1.0)
+    low_conf_ratio = stats.get("low_conf_edge_ratio", 0.0)
+    drift = stats.get("confidence_drift", None)
+    drift_txt = f"{drift:+.3f}" if isinstance(drift, (int, float)) else "n/a"
+    if health == "risk":
+        print_warn(f"  Reliability: RISK (mean_conf={mean_conf:.2f}, low_conf={low_conf_ratio:.1%}, drift={drift_txt})")
+    elif health == "watch":
+        print_warn(f"  Reliability: WATCH (mean_conf={mean_conf:.2f}, low_conf={low_conf_ratio:.1%}, drift={drift_txt})")
+    else:
+        print_success(f"  Reliability: GOOD (mean_conf={mean_conf:.2f}, low_conf={low_conf_ratio:.1%}, drift={drift_txt})")
+
     print_info(f"\n  Active parameters:")
     print_info(f"    alpha (semantic weight) = {graph.alpha}")
     print_info(f"    hierarchy levels        = auto-detected ({stats.get('hierarchy_levels', 0)})")
@@ -681,6 +693,66 @@ def audit_edges(graph: HierarchicalResearchGraph):
     print()
 
 
+def quality_report_session(graph: HierarchicalResearchGraph):
+    """Show model-value and reliability diagnostics in one place."""
+    print_header("Quality & Reliability Report")
+
+    rel = graph.reliability_report()
+    health = rel.get("health", "good").upper()
+    print_info(
+        f"  Reliability: {health}  "
+        f"(mean_conf={rel.get('mean_edge_confidence', 1.0):.2f}, "
+        f"low_conf={rel.get('low_conf_ratio', 0.0):.1%}, "
+        f"anomalies={rel.get('anomalies', 0)})"
+    )
+    drift = rel.get("confidence_drift", None)
+    if isinstance(drift, (int, float)):
+        print_info(f"  Confidence drift (vs recent): {drift:+.3f}")
+    warns = rel.get("warnings", []) or []
+    if warns:
+        for w in warns:
+            print_warn(f"  - {w}")
+
+    print()
+    q = graph.quality_report()
+    if not q.get("ready"):
+        print_warn(f"  Evaluation not ready: {q.get('note', 'Not enough data.')}")
+        print_info(
+            f"  Rated={q.get('rated', 0)}, "
+            f"positives={q.get('positives', 0)}, negatives={q.get('negatives', 0)}"
+        )
+        print_info("  Tip: rate more papers across both relevant and irrelevant results.")
+        print()
+        return
+
+    k = q.get("k", 0)
+    b = q.get("baseline", {})
+    g = q.get("graph", {})
+    d = q.get("delta", {})
+
+    print_info(
+        f"  Rated set: {q.get('rated', 0)} "
+        f"(pos={q.get('positives', 0)}, neg={q.get('negatives', 0)})"
+    )
+    print_info(f"  Metrics at k={k} (baseline semantic vs graph):")
+    print_info(
+        f"    AUC                 : {b.get('auc')} -> {g.get('auc')} "
+        f"(delta={d.get('auc')})"
+    )
+    print_info(
+        f"    Precision@{k:<2d}       : {b.get('precision_at_k')} -> {g.get('precision_at_k')} "
+        f"(delta={d.get('precision_at_k')})"
+    )
+    print_info(
+        f"    NDCG@{k:<2d}            : {b.get('ndcg_at_k')} -> {g.get('ndcg_at_k')} "
+        f"(delta={d.get('ndcg_at_k')})"
+    )
+    print_info(
+        f"    Rating correlation  : {b.get('rating_corr')} -> {g.get('rating_corr')} "
+        f"(delta={d.get('rating_corr')})"
+    )
+    print()
+
 # â”€â”€ LLM Status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _show_llm_status_banner():
@@ -772,6 +844,7 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
         "8": "Creative Mode â€” generate & rate argument paragraphs",
         "9": "LLM status & setup",
         "10": "Audit graph edges (low-confidence & anomalies)",
+        "11": "Quality & reliability report",
         "q": "Save & quit",
     }
     while True:
@@ -826,6 +899,8 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
             show_llm_status()
         elif choice == "10":
             audit_edges(graph)
+        elif choice == "11":
+            quality_report_session(graph)
         else:
             print_warn("Unknown option.")
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 import numpy as np
 import networkx as nx
 from collections import defaultdict
@@ -103,7 +104,7 @@ class HierarchicalResearchGraph:
         self._refs: dict[str, set[str]]           = {}   # s2_id → set of cited s2_ids
         self._ref_sources: dict[str, list]        = {}   # paper_id → list[RefResult]
         self._edge_anomalies: list[tuple]         = []   # (src, tgt, reason, penalty)
-
+        self._reliability_history: list[dict]      = []   # time-series snapshots for drift checks
         # ── Fused adjacency cache ─────────────────────────────────────────
         self._fused_W: Optional[np.ndarray]       = None
         self._fused_ids: list[str]                = []
@@ -246,6 +247,7 @@ class HierarchicalResearchGraph:
             self.G_causal = nx.DiGraph()
             self._edge_anomalies = []
 
+        self._record_reliability_snapshot()
         self._context_dirty = True
 
     def _build_fused_matrix(self, ids: list[str], embs: list[np.ndarray], s2_ids: list[str]):
@@ -602,14 +604,31 @@ class HierarchicalResearchGraph:
         fused   = sum(s * w for s, w in zip(score_parts, weight_parts)) / total_w
         return float(np.clip(fused, 0.0, 1.0))
 
+    @staticmethod
+    def _source_support_factor(n_sources: int) -> float:
+        """Conservative support factor from independent citation sources."""
+        if n_sources >= 3:
+            return 1.0
+        if n_sources == 2:
+            return 0.80
+        return 0.55
+
     def _citation_score(self, meta: PaperMeta) -> float:
         """
         Bibliographic coupling between a candidate and all corpus papers.
         Uses paper_id-keyed refs (OpenAlex IDs or S2 IDs).
+
+        Reliability guard:
+        Citation contribution is down-weighted when either paper has
+        weak cross-source support for its reference list.
         """
         refs_c = self._refs.get(meta.paper_id, set())
         if not refs_c:
             return 0.0
+
+        src_c = len(self._ref_sources.get(meta.paper_id, []))
+        support_c = self._source_support_factor(src_c if src_c > 0 else 1)
+
         scores = []
         for m in self._papers.values():
             if m.effective_weight == 0:
@@ -620,7 +639,10 @@ class HierarchicalResearchGraph:
             overlap = len(refs_c & refs_m)
             if overlap:
                 coupling = overlap / np.sqrt(len(refs_c) * len(refs_m))
-                scores.append(coupling * m.effective_weight / 10.0)
+                src_m = len(self._ref_sources.get(m.paper_id, []))
+                support_m = self._source_support_factor(src_m if src_m > 0 else 1)
+                support = min(support_c, support_m)
+                scores.append(coupling * m.effective_weight / 10.0 * support)
         return float(np.mean(scores)) if scores else 0.0
 
     def _snf_score(self, meta: PaperMeta) -> float:
@@ -763,8 +785,223 @@ class HierarchicalResearchGraph:
             stop = {"a","an","the","of","in","and","or","for","to","with","on"}
             return sorted(words - stop)[:n]
 
+    def _edge_confidences(self) -> list[float]:
+        confs: list[float] = []
+        for _, _, data in self.G_citation.edges(data=True):
+            conf = data.get("edge_confidence", data.get("cit_confidence", 1.0))
+            try:
+                confs.append(float(np.clip(float(conf), 0.0, 1.0)))
+            except Exception:
+                continue
+        return confs
+
+    def reliability_snapshot(self) -> dict:
+        confs = self._edge_confidences()
+        n_edges = len(confs)
+        low_conf_threshold = 0.50
+        low_conf_count = sum(1 for c in confs if c < low_conf_threshold)
+        mean_conf = float(np.mean(confs)) if confs else 1.0
+
+        refs_with_sources = len(self._ref_sources)
+        refs_multi_source = sum(1 for v in self._ref_sources.values() if len(v) >= 2)
+        xval_ratio = float(refs_multi_source / refs_with_sources) if refs_with_sources else 0.0
+
+        anomaly_count = len(getattr(self, "_edge_anomalies", []))
+        anomaly_ratio = float(anomaly_count / n_edges) if n_edges else 0.0
+
+        return {
+            "mean_edge_confidence": round(mean_conf, 4),
+            "low_conf_edges": int(low_conf_count),
+            "low_conf_ratio": round(float(low_conf_count / n_edges), 4) if n_edges else 0.0,
+            "citation_edges_with_conf": int(n_edges),
+            "anomalies": int(anomaly_count),
+            "anomaly_ratio": round(anomaly_ratio, 4),
+            "refs_with_sources": int(refs_with_sources),
+            "refs_multi_source": int(refs_multi_source),
+            "cross_validated_ratio": round(xval_ratio, 4),
+        }
+
+    def _record_reliability_snapshot(self):
+        snapshot = self.reliability_snapshot()
+        snapshot["timestamp"] = float(time.time())
+        self._reliability_history.append(snapshot)
+        self._reliability_history = self._reliability_history[-120:]
+
+    def reliability_report(self, window: int = 8) -> dict:
+        current = self.reliability_snapshot()
+        history = list(getattr(self, "_reliability_history", []))
+        recent = history[-max(1, int(window)):]
+
+        prev_mean = float(np.mean([x.get("mean_edge_confidence", 1.0) for x in recent])) if recent else None
+        conf_drift = (current["mean_edge_confidence"] - prev_mean) if prev_mean is not None else None
+
+        warnings: list[str] = []
+        if current["low_conf_ratio"] > 0.35:
+            warnings.append("high low-confidence edge ratio")
+        if conf_drift is not None and conf_drift < -0.08:
+            warnings.append("edge confidence dropped vs recent history")
+        if current["anomaly_ratio"] > 0.08 and current["anomalies"] >= 3:
+            warnings.append("structural anomaly pressure rising")
+        if current["refs_with_sources"] >= 10 and current["cross_validated_ratio"] < 0.35:
+            warnings.append("weak citation cross-validation coverage")
+
+        health = "good"
+        if len(warnings) == 1:
+            health = "watch"
+        elif len(warnings) >= 2:
+            health = "risk"
+
+        current["confidence_drift"] = round(conf_drift, 4) if conf_drift is not None else None
+        current["health"] = health
+        current["warnings"] = warnings
+        return current
+
+    @staticmethod
+    def _pairwise_auc(pos_scores: list[float], neg_scores: list[float]) -> Optional[float]:
+        if not pos_scores or not neg_scores:
+            return None
+        wins = 0.0
+        total = 0
+        for ps in pos_scores:
+            for ns in neg_scores:
+                total += 1
+                if ps > ns:
+                    wins += 1.0
+                elif ps == ns:
+                    wins += 0.5
+        return float(wins / total) if total else None
+
+    @staticmethod
+    def _precision_at_k(sorted_ids: list[str], positives: set[str], k: int) -> Optional[float]:
+        if k <= 0 or not sorted_ids:
+            return None
+        top = sorted_ids[: min(k, len(sorted_ids))]
+        return float(sum(1 for pid in top if pid in positives) / len(top)) if top else None
+
+    @staticmethod
+    def _ndcg_at_k(sorted_ids: list[str], rel: dict[str, float], k: int) -> Optional[float]:
+        if k <= 0 or not sorted_ids:
+            return None
+        top = sorted_ids[: min(k, len(sorted_ids))]
+        if not top:
+            return None
+
+        def _dcg(ids: list[str]) -> float:
+            s = 0.0
+            for i, pid in enumerate(ids, start=1):
+                gain = max(0.0, float(rel.get(pid, 0.0)))
+                s += gain / np.log2(i + 1)
+            return s
+
+        dcg = _dcg(top)
+        ideal = sorted(rel.keys(), key=lambda pid: (rel.get(pid, 0.0), pid), reverse=True)[: len(top)]
+        idcg = _dcg(ideal)
+        return float(dcg / idcg) if idcg > 0 else None
+
+    def quality_report(self) -> dict:
+        """
+        Internal quality check: how well model scores align with user ratings.
+
+        This is not a benchmark on held-out external data; it is a preference-
+        alignment diagnostic on the user's own rated set.
+        """
+        rated = [m for m in self.rated_papers() if m.embedding is not None and m.user_rating is not None]
+        positives = [m for m in rated if (m.user_rating or 0.0) >= 7.0]
+        negatives = [m for m in rated if (m.user_rating or 0.0) <= 3.0]
+
+        if len(rated) < 6 or len(positives) < 2 or len(negatives) < 2:
+            return {
+                "ready": False,
+                "rated": len(rated),
+                "positives": len(positives),
+                "negatives": len(negatives),
+                "note": "Need at least 6 rated papers with >=2 positives and >=2 negatives.",
+            }
+
+        pos_embs = [m.embedding for m in positives if m.embedding is not None]
+        if not pos_embs:
+            return {
+                "ready": False,
+                "rated": len(rated),
+                "positives": len(positives),
+                "negatives": len(negatives),
+                "note": "Positive papers are missing embeddings.",
+            }
+
+        baseline_scores: dict[str, float] = {}
+        graph_scores: dict[str, float] = {}
+        ratings: dict[str, float] = {}
+
+        for m in rated:
+            others = [p.embedding for p in positives if p.paper_id != m.paper_id and p.embedding is not None]
+            ctx = mean_pool(others if others else pos_embs)
+            sem = float(cosine_similarity(ctx, m.embedding))
+            sem = float(np.clip((sem + 1.0) / 2.0, 0.0, 1.0))
+            baseline_scores[m.paper_id] = sem
+            graph_scores[m.paper_id] = float(self.score_candidate(m))
+            ratings[m.paper_id] = float(m.user_rating or 0.0)
+
+        pos_ids = {m.paper_id for m in positives}
+        neg_ids = {m.paper_id for m in negatives}
+
+        b_pos = [baseline_scores[pid] for pid in pos_ids if pid in baseline_scores]
+        b_neg = [baseline_scores[pid] for pid in neg_ids if pid in baseline_scores]
+        g_pos = [graph_scores[pid] for pid in pos_ids if pid in graph_scores]
+        g_neg = [graph_scores[pid] for pid in neg_ids if pid in graph_scores]
+
+        k = max(1, min(10, len(pos_ids)))
+        b_sorted = sorted(baseline_scores.keys(), key=lambda pid: (-baseline_scores[pid], pid))
+        g_sorted = sorted(graph_scores.keys(), key=lambda pid: (-graph_scores[pid], pid))
+
+        b_auc = self._pairwise_auc(b_pos, b_neg)
+        g_auc = self._pairwise_auc(g_pos, g_neg)
+        b_p_at_k = self._precision_at_k(b_sorted, pos_ids, k)
+        g_p_at_k = self._precision_at_k(g_sorted, pos_ids, k)
+        b_ndcg = self._ndcg_at_k(b_sorted, ratings, k)
+        g_ndcg = self._ndcg_at_k(g_sorted, ratings, k)
+
+        rating_vals = np.array([ratings[pid] for pid in ratings], dtype=float)
+        b_vals = np.array([baseline_scores[pid] for pid in ratings], dtype=float)
+        g_vals = np.array([graph_scores[pid] for pid in ratings], dtype=float)
+
+        b_corr = None
+        if len(rating_vals) >= 2 and np.std(rating_vals) > 1e-9 and np.std(b_vals) > 1e-9:
+            b_corr = float(np.corrcoef(b_vals, rating_vals)[0, 1])
+
+        g_corr = None
+        if len(rating_vals) >= 2 and np.std(rating_vals) > 1e-9 and np.std(g_vals) > 1e-9:
+            g_corr = float(np.corrcoef(g_vals, rating_vals)[0, 1])
+
+        return {
+            "ready": True,
+            "rated": len(rated),
+            "positives": len(positives),
+            "negatives": len(negatives),
+            "k": int(k),
+            "baseline": {
+                "auc": round(b_auc, 4) if b_auc is not None else None,
+                "precision_at_k": round(b_p_at_k, 4) if b_p_at_k is not None else None,
+                "ndcg_at_k": round(b_ndcg, 4) if b_ndcg is not None else None,
+                "rating_corr": round(b_corr, 4) if b_corr is not None else None,
+            },
+            "graph": {
+                "auc": round(g_auc, 4) if g_auc is not None else None,
+                "precision_at_k": round(g_p_at_k, 4) if g_p_at_k is not None else None,
+                "ndcg_at_k": round(g_ndcg, 4) if g_ndcg is not None else None,
+                "rating_corr": round(g_corr, 4) if g_corr is not None else None,
+            },
+            "delta": {
+                "auc": round((g_auc - b_auc), 4) if (g_auc is not None and b_auc is not None) else None,
+                "precision_at_k": round((g_p_at_k - b_p_at_k), 4)
+                if (g_p_at_k is not None and b_p_at_k is not None) else None,
+                "ndcg_at_k": round((g_ndcg - b_ndcg), 4) if (g_ndcg is not None and b_ndcg is not None) else None,
+                "rating_corr": round((g_corr - b_corr), 4) if (g_corr is not None and b_corr is not None) else None,
+            },
+        }
+
     def stats(self) -> dict:
         nd = n_levels_detected(self._clusters)
+        reliability = self.reliability_report()
         return {
             "total_papers"          : len(self._papers),
             "seed_papers"           : len(self.seed_papers()),
@@ -788,6 +1025,10 @@ class HierarchicalResearchGraph:
                                          if getattr(m, "is_peer_reviewed", None) is False),
             "edge_anomalies"        : len(getattr(self, "_edge_anomalies", [])),
             "context_ready"         : self.context_vector() is not None,
+            "mean_edge_confidence"  : reliability.get("mean_edge_confidence", 1.0),
+            "low_conf_edge_ratio"   : reliability.get("low_conf_ratio", 0.0),
+            "confidence_drift"      : reliability.get("confidence_drift", None),
+            "reliability_health"    : reliability.get("health", "good"),
         }
 
     def _invalidate(self):
@@ -843,6 +1084,8 @@ class HierarchicalResearchGraph:
             self._ref_sources: dict = {}
         if not hasattr(self, "_edge_anomalies"):
             self._edge_anomalies: list = []
+        if not hasattr(self, "_reliability_history"):
+            self._reliability_history: list = []
         for meta in self._papers.values():
             if not hasattr(meta, "venue"):
                 meta.venue = ""
