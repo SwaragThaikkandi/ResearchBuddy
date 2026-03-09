@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
-ResearchBuddy CLI — interactive literature search session.
+ResearchBuddy CLI â€” interactive literature search session.
 
 Usage (after pip install):
     researchbuddy                         # load saved graph and start session
@@ -44,7 +44,7 @@ except ImportError:
 DIVIDER = "-" * 72
 
 
-# ── Output helpers ─────────────────────────────────────────────────────────────
+# â”€â”€ Output helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def print_header(text: str):
     if HAS_RICH:
@@ -80,7 +80,7 @@ def ask(prompt: str, default: str = "") -> str:
         return default
 
 
-# ── Paper display ──────────────────────────────────────────────────────────────
+# â”€â”€ Paper display â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def display_paper(idx: int, meta: PaperMeta, score: float, label: str):
     score_pct = f"{score * 100:.0f}%"
@@ -128,7 +128,7 @@ def display_results(results: list[tuple[PaperMeta, float, str]]):
     print(f"\n{DIVIDER}")
 
 
-# ── Rating workflow ────────────────────────────────────────────────────────────
+# â”€â”€ Rating workflow â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def rating_session(graph: HierarchicalResearchGraph, results: list[tuple[PaperMeta, float, str]]):
     if not results:
@@ -169,14 +169,14 @@ def rating_session(graph: HierarchicalResearchGraph, results: list[tuple[PaperMe
         elif rating >= 4:
             print_info(f"      Moderate relevance (weight={rating}).")
         else:
-            print_warn(f"      Low relevance — will be used as negative example.")
+            print_warn(f"      Low relevance â€” will be used as negative example.")
 
     if rated_any:
         print_info("\n[graph] Rebuilding hierarchy with new ratings ...")
         graph.rebuild_hierarchy()
 
 
-# ── Stats ──────────────────────────────────────────────────────────────────────
+# â”€â”€ Stats â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def show_stats(graph: HierarchicalResearchGraph):
     stats = graph.stats()
@@ -223,7 +223,7 @@ def show_stats(graph: HierarchicalResearchGraph):
     print_info(f"    similarity threshold    = {cfg.SIMILARITY_THRESHOLD}")
 
 
-# ── Search session ─────────────────────────────────────────────────────────────
+# â”€â”€ Search session â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def search_session(graph: HierarchicalResearchGraph, plot: bool = True):
     if graph.context_vector() is None:
@@ -280,7 +280,7 @@ def _try_plot_all(graph: HierarchicalResearchGraph):
         print_warn(f"Graph PDF generation skipped: {e}")
 
 
-# ── Query / Reasoning mode ("Prefrontal Cortex") ──────────────────────────────
+# â”€â”€ Query / Reasoning mode ("Prefrontal Cortex") â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _short_title(graph: HierarchicalResearchGraph, pid: str, n: int = 45) -> str:
     """Compact paper title from paper_id."""
@@ -295,7 +295,7 @@ def display_query_result(result: QueryResult, graph: HierarchicalResearchGraph):
     """Pretty-print a QueryResult to the terminal."""
     print_header("Query Results")
 
-    # ── Relevant papers (with centrality / role) ─────────────────────────
+    # â”€â”€ Relevant papers (with centrality / role) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if result.relevant_papers:
         if HAS_RICH:
             console.print("[bold]Most Relevant Papers[/]")
@@ -327,7 +327,7 @@ def display_query_result(result: QueryResult, graph: HierarchicalResearchGraph):
                 print(f"        {auth} ({year})  relevance={pct}  "
                       f"{deg} connections{role_tag}{rated_tag}")
 
-    # ── Research themes (cluster profiles) ────────────────────────────────
+    # â”€â”€ Research themes (cluster profiles) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if result.cluster_profiles:
         print()
         if HAS_RICH:
@@ -355,7 +355,7 @@ def display_query_result(result: QueryResult, graph: HierarchicalResearchGraph):
                 if central:
                     print(f"      {central}")
 
-    # ── Research lineages (citation / semantic paths) ─────────────────────
+    # â”€â”€ Research lineages (citation / semantic paths) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if result.lineages:
         print()
         if HAS_RICH:
@@ -375,7 +375,7 @@ def display_query_result(result: QueryResult, graph: HierarchicalResearchGraph):
                 print(f"    {chain}")
                 print(f"      ({label})")
 
-    # ── Connections ───────────────────────────────────────────────────────
+    # â”€â”€ Connections â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if result.connections:
         print()
         if HAS_RICH:
@@ -395,7 +395,7 @@ def display_query_result(result: QueryResult, graph: HierarchicalResearchGraph):
                       f"{_short_title(graph, b)}")
                 print(f"      ({desc})")
 
-    # ── Bridge papers ────────────────────────────────────────────────────
+    # â”€â”€ Bridge papers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if result.bridge_papers:
         print()
         if HAS_RICH:
@@ -408,7 +408,7 @@ def display_query_result(result: QueryResult, graph: HierarchicalResearchGraph):
             else:
                 print(f"    {meta.title[:70]}")
 
-    # ── Frontier papers (relevant but underconnected) ─────────────────────
+    # â”€â”€ Frontier papers (relevant but underconnected) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if result.frontier_papers:
         print()
         if HAS_RICH:
@@ -422,12 +422,12 @@ def display_query_result(result: QueryResult, graph: HierarchicalResearchGraph):
             else:
                 print(f"    {meta.title[:65]}  ({pct})")
 
-    # ── Temporal narrative ────────────────────────────────────────────────
+    # â”€â”€ Temporal narrative â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if result.temporal_narrative:
         print()
         print_info(f"  Timeline: {result.temporal_narrative}")
 
-    # ── Coverage note ────────────────────────────────────────────────────
+    # â”€â”€ Coverage note â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if result.gap_note:
         print()
         print_warn(result.gap_note)
@@ -436,7 +436,7 @@ def display_query_result(result: QueryResult, graph: HierarchicalResearchGraph):
 
 
 def query_session(graph: HierarchicalResearchGraph):
-    """Interactive reasoning loop — the 'prefrontal cortex'."""
+    """Interactive reasoning loop â€” the 'prefrontal cortex'."""
     if not graph.all_papers():
         print_warn("No papers in your graph yet. Add PDFs (option 3) first.")
         return
@@ -455,7 +455,7 @@ def query_session(graph: HierarchicalResearchGraph):
         result = reasoner.reason(raw.strip(), graph)
         display_query_result(result, graph)
 
-        # ── Feedback ─────────────────────────────────────────────────────
+        # â”€â”€ Feedback â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         rating_raw = ask("Rate this response (1-10, 0=skip)", "0")
         try:
             rating = int(rating_raw)
@@ -471,25 +471,25 @@ def query_session(graph: HierarchicalResearchGraph):
             )
             if rating >= 7:
                 print_success(
-                    "Network updated — edges strengthened between relevant "
+                    "Network updated â€” edges strengthened between relevant "
                     "papers. Future results will lean this way."
                 )
             elif rating >= 4:
                 print_info("Noted. Moderate interest recorded.")
             else:
                 print_info(
-                    "Network updated — relevance dampened for these papers."
+                    "Network updated â€” relevance dampened for these papers."
                 )
             save(graph)
 
         print()
 
 
-# ── Creative Mode ("Creative Cortex") ─────────────────────────────────────────
+# â”€â”€ Creative Mode ("Creative Cortex") â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def creative_session(graph: HierarchicalResearchGraph):
     """
-    Interactive argumentation loop — the 'Creative Cortex'.
+    Interactive argumentation loop â€” the 'Creative Cortex'.
 
     Generates argument paragraphs synthesising the literature and learns
     from user correctness / usefulness ratings via a StyleProfile.
@@ -506,7 +506,7 @@ def creative_session(graph: HierarchicalResearchGraph):
     reasoner = Reasoner(top_k=cfg.QUERY_TOP_K)
     arguer   = Arguer()
 
-    print_header("Creative Mode — Argumentation Engine")
+    print_header("Creative Mode â€” Argumentation Engine")
     print_info(
         "Ask a research question; the system will generate argument paragraphs\n"
         "that synthesise your literature using citation relationships.\n"
@@ -542,7 +542,7 @@ def creative_session(graph: HierarchicalResearchGraph):
             print()
             if HAS_RICH:
                 console.rule(
-                    f"[bold green]Argument {i}/{len(paragraphs)}  ·  "
+                    f"[bold green]Argument {i}/{len(paragraphs)}  Â·  "
                     f"{para.arg_type_label}[/]"
                 )
                 from rich.panel import Panel as _Panel
@@ -553,15 +553,15 @@ def creative_session(graph: HierarchicalResearchGraph):
                         f"[dim]  Based on: {', '.join(para.paper_refs[:4])}[/]"
                     )
             else:
-                print(f"\n{'─'*72}")
-                print(f"  Argument {i}/{len(paragraphs)}  ·  {para.arg_type_label}")
-                print(f"{'─'*72}")
+                print(f"\n{'â”€'*72}")
+                print(f"  Argument {i}/{len(paragraphs)}  Â·  {para.arg_type_label}")
+                print(f"{'â”€'*72}")
                 print(f"\n  {para.text}\n")
                 print(f"  [{para.explanation}]")
                 if para.paper_refs:
                     print(f"  Based on: {', '.join(para.paper_refs[:4])}")
 
-            # ── Dual rating ────────────────────────────────────────────────
+            # â”€â”€ Dual rating â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             print()
             raw_c = ask("  Correctness (1-10, 0=skip)", "0")
             raw_u = ask("  Usefulness  (1-10, 0=skip)", "0")
@@ -590,14 +590,14 @@ def creative_session(graph: HierarchicalResearchGraph):
                 combined = (correctness + usefulness) / 2
                 if combined >= 7:
                     print_success(
-                        "  Excellent! Style profile updated — "
+                        "  Excellent! Style profile updated â€” "
                         f"{para.arg_type} arguments boosted."
                     )
                 elif combined >= 4:
                     print_info("  Noted. Moderate preference recorded.")
                 else:
                     print_warn(
-                        f"  Low rating recorded — {para.arg_type} arguments "
+                        f"  Low rating recorded â€” {para.arg_type} arguments "
                         "will be deprioritised."
                     )
 
@@ -607,7 +607,7 @@ def creative_session(graph: HierarchicalResearchGraph):
         if rated_any:
             save(graph)
 
-        # ── Show current style preferences after a session ─────────────────
+        # â”€â”€ Show current style preferences after a session â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         sp = graph.get_style_profile()
         if sp.total_interactions >= 3:
             print()
@@ -620,13 +620,13 @@ def creative_session(graph: HierarchicalResearchGraph):
             print_info(f"  Best-performing type so far: {top_type}")
 
 
-# ── Edge Audit ─────────────────────────────────────────────────────────────────
+# â”€â”€ Edge Audit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def audit_edges(graph: HierarchicalResearchGraph):
     """Show low-confidence edges and structural anomalies for user review."""
-    print_header("Edge Audit — Graph Reliability")
+    print_header("Edge Audit â€” Graph Reliability")
 
-    # ── 1. Low-confidence citation edges ─────────────────────────────
+    # â”€â”€ 1. Low-confidence citation edges â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     low_conf_edges = []
     for u, v, d in graph.G_citation.edges(data=True):
         conf = d.get("edge_confidence", 1.0)
@@ -645,7 +645,7 @@ def audit_edges(graph: HierarchicalResearchGraph):
     else:
         print_success("  No low-confidence edges found.")
 
-    # ── 2. Temporal anomalies ────────────────────────────────────────
+    # â”€â”€ 2. Temporal anomalies â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     anomalies = getattr(graph, "_edge_anomalies", [])
     if anomalies:
         print()
@@ -662,7 +662,7 @@ def audit_edges(graph: HierarchicalResearchGraph):
     else:
         print_success("  No structural anomalies detected.")
 
-    # ── 3. Publication breakdown ─────────────────────────────────────
+    # â”€â”€ 3. Publication breakdown â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     n_pr = sum(1 for m in graph.all_papers()
                if getattr(m, "is_peer_reviewed", None) is True)
     n_pp = sum(1 for m in graph.all_papers()
@@ -672,7 +672,7 @@ def audit_edges(graph: HierarchicalResearchGraph):
     print_info(f"  Publication status: {n_pr} peer-reviewed, "
                f"{n_pp} preprints, {n_uk} unknown")
 
-    # ── 4. Cross-validation coverage ─────────────────────────────────
+    # â”€â”€ 4. Cross-validation coverage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     n_xval = sum(1 for v in graph._ref_sources.values() if len(v) >= 2)
     n_total = len(graph._ref_sources)
     if n_total:
@@ -681,7 +681,7 @@ def audit_edges(graph: HierarchicalResearchGraph):
     print()
 
 
-# ── LLM Status ────────────────────────────────────────────────────────────────
+# â”€â”€ LLM Status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _show_llm_status_banner():
     """Print a one-line LLM status at startup."""
@@ -698,7 +698,7 @@ def _show_llm_status_banner():
             print_success(f"  LLM: {st.model_name}{gpu_str}{vram_str} -- ready")
         else:
             print_warn(f"  LLM: {st.error}")
-            print_info("  (ResearchBuddy works without LLM — using template fallback)")
+            print_info("  (ResearchBuddy works without LLM â€” using template fallback)")
     except Exception as e:
         print_warn(f"  LLM: check failed ({e})")
 
@@ -721,7 +721,11 @@ def show_llm_status():
         if gpu.get("available"):
             print_success(f"  GPU: {gpu['name']}  ({gpu['vram_mb']} MB VRAM)")
         else:
-            print_info("  GPU: No CUDA GPU detected (using CPU)")
+            gpu_err = gpu.get("error")
+            if gpu_err:
+                print_info(f"  GPU: {gpu_err} (using CPU)")
+            else:
+                print_info("  GPU: No CUDA GPU detected (using CPU)")
 
         # Ollama status
         if st.available:
@@ -752,7 +756,7 @@ def show_llm_status():
         print_warn(f"  Error checking LLM status: {e}")
 
 
-# ── Main menu ──────────────────────────────────────────────────────────────────
+# â”€â”€ Main menu â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
     options = {
@@ -763,7 +767,7 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
         "5": "Resolve Semantic Scholar IDs for seed papers",
         "6": "Rebuild hierarchy & regenerate all graph PDFs",
         "7": "Query your research network (Reasoning Mode)",
-        "8": "Creative Mode — generate & rate argument paragraphs",
+        "8": "Creative Mode â€” generate & rate argument paragraphs",
         "9": "LLM status & setup",
         "10": "Audit graph edges (low-confidence & anomalies)",
         "q": "Save & quit",
@@ -824,17 +828,17 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
             print_warn("Unknown option.")
 
 
-# ── CLI argument parser ────────────────────────────────────────────────────────
+# â”€â”€ CLI argument parser â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="ResearchBuddy – hierarchical graph-based literature search assistant",
+        description="ResearchBuddy â€“ hierarchical graph-based literature search assistant",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--pdf",    metavar="FOLDER", help="Import PDFs from folder on startup")
     p.add_argument("--reset",  action="store_true", help="Clear saved state and start fresh")
 
-    # ── Tunable parameters ──────────────────────────────────────────────────
+    # â”€â”€ Tunable parameters â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     g = p.add_argument_group("model parameters (override config.py defaults)")
     g.add_argument("--alpha", type=float, default=None,
                    metavar="FLOAT",
@@ -851,7 +855,7 @@ def _build_parser() -> argparse.ArgumentParser:
     g.add_argument("--no-plot", action="store_true",
                    help="Disable PDF graph generation after each session")
 
-    # ── LLM options ──────────────────────────────────────────────────────
+    # â”€â”€ LLM options â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     llm_g = p.add_argument_group("LLM options (local Ollama)")
     llm_g.add_argument("--llm-model", type=str, default=None,
                        metavar="NAME",
@@ -861,7 +865,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
+# â”€â”€ Entry point â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def main():
     args = _build_parser().parse_args()
@@ -892,7 +896,7 @@ def main():
         print("  ResearchBuddy - Hierarchical literature search assistant")
         print("=" * 60)
 
-    # ── LLM status at startup ────────────────────────────────────────────
+    # â”€â”€ LLM status at startup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     _show_llm_status_banner()
 
     if args.reset and cfg.STATE_FILE.exists():

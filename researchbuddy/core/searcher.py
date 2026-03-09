@@ -1,17 +1,19 @@
-"""
+﻿"""
 searcher.py
 Fetch candidate papers from Semantic Scholar and ArXiv (both free, no key needed).
 Falls back gracefully if a source is unreachable.
 
 LLM enhancements (optional, degrade gracefully when Ollama is unavailable):
-  * HyDE — Hypothetical Document Embeddings for superior semantic matching
-  * Query expansion — LLM generates alternative search formulations
-  * LLM reranking — reranks top candidates by semantic relevance
+  * HyDE â€” Hypothetical Document Embeddings for superior semantic matching
+  * Query expansion â€” LLM generates alternative search formulations
+  * LLM reranking â€” reranks top candidates by semantic relevance
 """
 
 from __future__ import annotations
 
 import json
+import os
+import random
 import time
 import re
 import xml.etree.ElementTree as ET
@@ -29,31 +31,98 @@ from researchbuddy.core.graph_model import PaperMeta, ResearchGraph
 
 
 _HEADERS = {"User-Agent": "ResearchBuddy/0.1 (local research assistant)"}
+_S2_API_KEY = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "").strip()
+if _S2_API_KEY:
+    _HEADERS["x-api-key"] = _S2_API_KEY
+
 S2_FIELDS = "paperId,title,abstract,authors,year,externalIds,url,publicationVenue"
+_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+_MAX_HTTP_RETRIES = 4
+_BACKOFF_BASE_SECONDS = max(float(REQUEST_DELAY), 0.5)
+_BACKOFF_MAX_SECONDS = 20.0
+_BACKOFF_JITTER_SECONDS = 0.25
 
 
-# ── Internal helpers ────────────────────────────────────────────────────────────
+def _retry_delay_seconds(response: Optional[requests.Response], attempt: int) -> float:
+    if response is not None:
+        retry_after = response.headers.get("Retry-After", "").strip()
+        if retry_after:
+            try:
+                return max(0.0, float(retry_after))
+            except ValueError:
+                pass
+    delay = min(_BACKOFF_MAX_SECONDS, _BACKOFF_BASE_SECONDS * (2 ** attempt))
+    return delay + random.uniform(0.0, _BACKOFF_JITTER_SECONDS)
+
+
+# â”€â”€ Internal helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _get(url: str, params: dict) -> Optional[dict | str]:
-    try:
-        r = requests.get(url, params=params, headers=_HEADERS, timeout=REQUEST_TIMEOUT)
-        r.raise_for_status()
-        ct = r.headers.get("Content-Type", "")
-        return r.json() if "json" in ct else r.text
-    except Exception as e:
-        print(f"  [searcher] Request failed: {e}")
-        return None
+    response: Optional[requests.Response] = None
+    for attempt in range(_MAX_HTTP_RETRIES + 1):
+        try:
+            response = requests.get(url, params=params, headers=_HEADERS, timeout=REQUEST_TIMEOUT)
 
+            if response.status_code in _RETRYABLE_STATUS_CODES and attempt < _MAX_HTTP_RETRIES:
+                delay = _retry_delay_seconds(response, attempt)
+                print(
+                    f"  [searcher] GET retry {attempt + 1}/{_MAX_HTTP_RETRIES} "
+                    f"(status={response.status_code}) in {delay:.1f}s"
+                )
+                time.sleep(delay)
+                continue
+
+            response.raise_for_status()
+            ct = response.headers.get("Content-Type", "")
+            return response.json() if "json" in ct else response.text
+        except requests.RequestException as e:
+            if attempt < _MAX_HTTP_RETRIES:
+                delay = _retry_delay_seconds(response, attempt)
+                print(
+                    f"  [searcher] GET error (attempt {attempt + 1}/{_MAX_HTTP_RETRIES}): {e}; "
+                    f"retrying in {delay:.1f}s"
+                )
+                time.sleep(delay)
+                continue
+            print(f"  [searcher] Request failed: {e}")
+            return None
+        except Exception as e:
+            print(f"  [searcher] Request failed: {e}")
+            return None
+    return None
 
 def _post(url: str, payload: dict) -> Optional[dict]:
-    try:
-        r = requests.post(url, json=payload, headers=_HEADERS, timeout=REQUEST_TIMEOUT)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        print(f"  [searcher] POST failed: {e}")
-        return None
+    response: Optional[requests.Response] = None
+    for attempt in range(_MAX_HTTP_RETRIES + 1):
+        try:
+            response = requests.post(url, json=payload, headers=_HEADERS, timeout=REQUEST_TIMEOUT)
 
+            if response.status_code in _RETRYABLE_STATUS_CODES and attempt < _MAX_HTTP_RETRIES:
+                delay = _retry_delay_seconds(response, attempt)
+                print(
+                    f"  [searcher] POST retry {attempt + 1}/{_MAX_HTTP_RETRIES} "
+                    f"(status={response.status_code}) in {delay:.1f}s"
+                )
+                time.sleep(delay)
+                continue
+
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            if attempt < _MAX_HTTP_RETRIES:
+                delay = _retry_delay_seconds(response, attempt)
+                print(
+                    f"  [searcher] POST error (attempt {attempt + 1}/{_MAX_HTTP_RETRIES}): {e}; "
+                    f"retrying in {delay:.1f}s"
+                )
+                time.sleep(delay)
+                continue
+            print(f"  [searcher] POST failed: {e}")
+            return None
+        except Exception as e:
+            print(f"  [searcher] POST failed: {e}")
+            return None
+    return None
 
 def _s2_to_meta(item: dict) -> Optional[PaperMeta]:
     title = item.get("title", "").strip()
@@ -68,7 +137,7 @@ def _s2_to_meta(item: dict) -> Optional[PaperMeta]:
     arxiv_id = ext_ids.get("ArXiv", "")
     url      = item.get("url") or (f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else "")
 
-    # ── Publication venue / peer-review status ──────────────────────
+    # â”€â”€ Publication venue / peer-review status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     venue_info = item.get("publicationVenue") or {}
     venue_name = venue_info.get("name", "")
     venue_type = venue_info.get("type", "")   # "Journal", "Conference", "Book", etc.
@@ -96,7 +165,7 @@ def _s2_to_meta(item: dict) -> Optional[PaperMeta]:
     )
 
 
-# ── Semantic Scholar ───────────────────────────────────────────────────────────
+# â”€â”€ Semantic Scholar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def search_semantic_scholar(query: str, limit: int = MAX_SEARCH_RESULTS) -> list[PaperMeta]:
     data = _get(S2_SEARCH_URL, {"query": query, "limit": min(limit, 100), "fields": S2_FIELDS})
@@ -135,7 +204,7 @@ def get_s2_recommendations(
     return results
 
 
-# ── ArXiv ─────────────────────────────────────────────────────────────────────
+# â”€â”€ ArXiv â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def search_arxiv(query: str, limit: int = MAX_SEARCH_RESULTS) -> list[PaperMeta]:
     xml_text = _get(ARXIV_SEARCH_URL, {
@@ -193,11 +262,11 @@ def search_arxiv(query: str, limit: int = MAX_SEARCH_RESULTS) -> list[PaperMeta]
     return results
 
 
-# ── LLM-enhanced search helpers ───────────────────────────────────────────────
+# â”€â”€ LLM-enhanced search helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _generate_hyde_abstract(query: str) -> Optional[str]:
     """
-    HyDE — Hypothetical Document Embedding.
+    HyDE â€” Hypothetical Document Embedding.
 
     Ask the LLM to write a short *hypothetical* abstract for an ideal paper
     that would perfectly answer ``query``.  This abstract is then embedded
@@ -239,7 +308,7 @@ def _generate_hyde_abstract(query: str) -> Optional[str]:
 
 def _expand_query(query: str, keywords: list[str]) -> list[str]:
     """
-    LLM query expansion — generate alternative search formulations.
+    LLM query expansion â€” generate alternative search formulations.
 
     Given the user's research intent and existing keywords, generate 3
     complementary search queries that cover different facets of the topic.
@@ -284,7 +353,7 @@ def _expand_query(query: str, keywords: list[str]) -> list[str]:
 
 def _llm_rerank(query: str, candidates: list[PaperMeta], top_n: int = 15) -> list[PaperMeta]:
     """
-    LLM reranking — rerank the top candidates by semantic relevance.
+    LLM reranking â€” rerank the top candidates by semantic relevance.
 
     Sends titles and abstract snippets of top candidates to the LLM
     and asks it to rank them by relevance to the query. Returns reordered
@@ -312,7 +381,7 @@ def _llm_rerank(query: str, candidates: list[PaperMeta], top_n: int = 15) -> lis
         for i, p in enumerate(to_rerank):
             title = fix_mojibake(p.title or "Untitled")[:100]
             abstract = fix_mojibake(p.abstract or "")[:150]
-            papers_desc.append(f"{i}: \"{title}\" — {abstract}")
+            papers_desc.append(f"{i}: \"{title}\" â€” {abstract}")
 
         prompt = (
             f"Research question: \"{query}\"\n\n"
@@ -356,7 +425,7 @@ def _llm_rerank(query: str, candidates: list[PaperMeta], top_n: int = 15) -> lis
     return candidates
 
 
-# ── High-level orchestrator ────────────────────────────────────────────────────
+# â”€â”€ High-level orchestrator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def find_candidates(
     graph: ResearchGraph,
@@ -365,7 +434,7 @@ def find_candidates(
 ) -> tuple[list[PaperMeta], Optional[np.ndarray]]:
     """
     Run all search strategies and return deduplicated candidate papers.
-    Order: S2 recommendations → S2 text search → ArXiv text search.
+    Order: S2 recommendations â†’ S2 text search â†’ ArXiv text search.
 
     When ``query`` (research intent) is provided, LLM enhancements kick in:
       * HyDE: generate a hypothetical abstract, embed it for better matching
@@ -385,7 +454,7 @@ def find_candidates(
                 seen_ids.add(p.paper_id)
                 all_candidates.append(p)
 
-    # ── HyDE: generate hypothetical abstract ─────────────────────────────
+    # â”€â”€ HyDE: generate hypothetical abstract â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if query:
         hyde_abstract = _generate_hyde_abstract(query)
         if hyde_abstract:
@@ -423,12 +492,13 @@ def find_candidates(
     for m in top_rated:
         queries.append(m.title)
 
-    # ── LLM query expansion ──────────────────────────────────────────────
+    # â”€â”€ LLM query expansion â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if query:
         expanded = _expand_query(query, keywords)
         queries = expanded + queries   # LLM expansions go first
 
-    for q in queries[:S2_SEARCH_QUERIES]:
+    s2_query_cap = S2_SEARCH_QUERIES if _S2_API_KEY else min(S2_SEARCH_QUERIES, 3)
+    for q in queries[:s2_query_cap]:
         print(f"  [search] S2 search: '{q[:60]}' ...")
         add(search_semantic_scholar(q, limit=S2_SEARCH_LIMIT))
 
@@ -436,11 +506,11 @@ def find_candidates(
         print(f"  [search] ArXiv search: '{q[:60]}' ...")
         add(search_arxiv(q, limit=ARXIV_SEARCH_LIMIT))
 
-    # ── LLM reranking ────────────────────────────────────────────────────
+    # â”€â”€ LLM reranking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if query and all_candidates:
         all_candidates = _llm_rerank(query, all_candidates)
 
-    # ── Soft prioritization: peer-reviewed before preprints ──────────
+    # â”€â”€ Soft prioritization: peer-reviewed before preprints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     all_candidates.sort(
         key=lambda p: (getattr(p, "is_peer_reviewed", None) is not False),
         reverse=True,

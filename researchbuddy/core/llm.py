@@ -1,4 +1,4 @@
-"""
+﻿"""
 llm.py  --  Local LLM interface ("The Voice").
 
 Central module for all LLM interactions.  Every other module (arguer, searcher)
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from researchbuddy.core.graph_model import HierarchicalResearchGraph, PaperMeta
 
 
-# ── Status dataclass ──────────────────────────────────────────────────────────
+# â”€â”€ Status dataclass â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @dataclass
 class LLMStatus:
@@ -43,7 +43,7 @@ class LLMStatus:
     error: Optional[str]      = None
 
 
-# ── Mojibake repair ──────────────────────────────────────────────────────────
+# â”€â”€ Mojibake repair â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 _MOJIBAKE_MAP = {
     "\u00e2\u20ac\u2122": "\u2019",     # right single quote  (')
@@ -82,22 +82,52 @@ def fix_mojibake(text: str) -> str:
     return t
 
 
-# ── GPU detection ────────────────────────────────────────────────────────────
+# â”€â”€ GPU detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def detect_gpu() -> dict:
-    """Report GPU name and VRAM (or ``available=False`` if no CUDA)."""
+    """Report GPU name and VRAM (or ``available=False`` with diagnostics)."""
     try:
         import torch
         if torch.cuda.is_available():
             name = torch.cuda.get_device_name(0)
-            vram = torch.cuda.get_device_properties(0).total_mem // (1024 ** 2)
+            props = torch.cuda.get_device_properties(0)
+            # PyTorch versions expose either `total_memory` or `total_mem`.
+            total_bytes = getattr(props, "total_memory", None)
+            if total_bytes is None:
+                total_bytes = getattr(props, "total_mem", None)
+            vram = (int(total_bytes) // (1024 ** 2)) if total_bytes else None
             return {"available": True, "name": name, "vram_mb": vram}
+
+        cuda_build = getattr(torch.version, "cuda", None)
+        if not cuda_build:
+            return {
+                "available": False,
+                "name": None,
+                "vram_mb": None,
+                "error": "PyTorch is CPU-only (no CUDA build)",
+            }
+        return {
+            "available": False,
+            "name": None,
+            "vram_mb": None,
+            "error": f"CUDA unavailable at runtime (torch CUDA build: {cuda_build})",
+        }
     except ImportError:
-        pass
-    return {"available": False, "name": None, "vram_mb": None}
+        return {
+            "available": False,
+            "name": None,
+            "vram_mb": None,
+            "error": "PyTorch is not installed",
+        }
+    except Exception as e:
+        return {
+            "available": False,
+            "name": None,
+            "vram_mb": None,
+            "error": f"CUDA probe failed ({e})",
+        }
 
-
-# ── Paper context builder (THE CAGE) ────────────────────────────────────────
+# â”€â”€ Paper context builder (THE CAGE) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def build_paper_context(
     papers: list["PaperMeta"],
@@ -119,7 +149,7 @@ def build_paper_context(
     lines: list[str] = []
     pid_to_idx: dict[str, int] = {}
 
-    # ── Paper descriptions ────────────────────────────────────────────
+    # â”€â”€ Paper descriptions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     for i, p in enumerate(papers, 1):
         pid_to_idx[p.paper_id] = i
         title = fix_mojibake(p.title or "Untitled")
@@ -147,7 +177,7 @@ def build_paper_context(
             lines.append(f"  Abstract: {snippet}")
         lines.append("")
 
-    # ── Graph relationships ───────────────────────────────────────────
+    # â”€â”€ Graph relationships â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     relations: list[str] = []
 
     for i, pa in enumerate(papers):
@@ -205,7 +235,7 @@ def build_paper_context(
         lines.extend(relations)
         lines.append("")
 
-    # ── Causal chain (topological sort) ───────────────────────────────
+    # â”€â”€ Causal chain (topological sort) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     paper_ids = {p.paper_id for p in papers}
     sub = graph.G_causal.subgraph(
         [n for n in graph.G_causal.nodes if n in paper_ids]
@@ -226,7 +256,7 @@ def build_paper_context(
     return "\n".join(lines)
 
 
-# ── Ollama client ────────────────────────────────────────────────────────────
+# â”€â”€ Ollama client â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class OllamaClient:
     """
@@ -240,7 +270,7 @@ class OllamaClient:
         self._model = model
         self._status: Optional[LLMStatus] = None
 
-    # ── Health check ─────────────────────────────────────────────────
+    # â”€â”€ Health check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _check_health(self) -> LLMStatus:
         gpu = detect_gpu()
@@ -292,7 +322,7 @@ class OllamaClient:
     def is_available(self) -> bool:
         return self.status().available
 
-    # ── Text generation ──────────────────────────────────────────────
+    # â”€â”€ Text generation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def generate(
         self,
@@ -341,7 +371,7 @@ class OllamaClient:
                     time.sleep(1)
         return None
 
-    # ── JSON generation ──────────────────────────────────────────────
+    # â”€â”€ JSON generation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def generate_json(
         self,
@@ -384,7 +414,7 @@ class OllamaClient:
         return None
 
 
-# ── Singleton accessor ───────────────────────────────────────────────────────
+# â”€â”€ Singleton accessor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 _client: Optional[OllamaClient] = None
 
