@@ -64,6 +64,8 @@ class PaperMeta:
     s2_id: str                      = ""
     arxiv_id: str                   = ""
     embedding: Optional[np.ndarray] = field(default=None, repr=False)
+    venue: str                      = ""
+    is_peer_reviewed: Optional[bool]= None   # None=unknown, True=journal/conf, False=preprint
     user_rating: Optional[float]    = None
     times_shown: int                = 0
     last_shown: float               = 0.0
@@ -99,6 +101,8 @@ class HierarchicalResearchGraph:
 
         # ── Citation data ─────────────────────────────────────────────────
         self._refs: dict[str, set[str]]           = {}   # s2_id → set of cited s2_ids
+        self._ref_sources: dict[str, list]        = {}   # paper_id → list[RefResult]
+        self._edge_anomalies: list[tuple]         = []   # (src, tgt, reason, penalty)
 
         # ── Fused adjacency cache ─────────────────────────────────────────
         self._fused_W: Optional[np.ndarray]       = None
@@ -126,6 +130,7 @@ class HierarchicalResearchGraph:
             return False
         if embedding is not None:
             meta.embedding = embedding
+        self._infer_peer_review_status(meta)
         self._papers[meta.paper_id] = meta
         self._seen_titles.add(norm)
         for G in (self.G_semantic, self.G_citation, self.G, self.G_causal):
@@ -198,7 +203,9 @@ class HierarchicalResearchGraph:
 
         # ── 2. Citation graph ─────────────────────────────────────────────
         s2_ids = [self._papers[pid].s2_id for pid in ids]
-        self.G_citation = build_citation_graph(ids, s2_ids, self._refs)
+        self.G_citation = build_citation_graph(
+            ids, s2_ids, self._refs, ref_sources=self._ref_sources
+        )
         # Ensure all paper nodes exist
         for pid in ids:
             if not self.G_citation.has_node(pid):
@@ -227,7 +234,7 @@ class HierarchicalResearchGraph:
         try:
             from researchbuddy.core.causal import build_causal_dag
             from researchbuddy.config import CAUSAL_CONFIDENCE_THRESHOLD
-            self.G_causal = build_causal_dag(
+            self.G_causal, self._edge_anomalies = build_causal_dag(
                 self.G, self.G_citation, self._papers,
                 min_confidence=CAUSAL_CONFIDENCE_THRESHOLD,
             )
@@ -236,6 +243,7 @@ class HierarchicalResearchGraph:
         except Exception as e:
             print(f"[graph] Causal DAG construction skipped: {e}")
             self.G_causal = nx.DiGraph()
+            self._edge_anomalies = []
 
         self._context_dirty = True
 
@@ -471,8 +479,59 @@ class HierarchicalResearchGraph:
             return
         if verbose:
             print(f"[graph] Fetching citations for {len(need)} papers ...")
-        self._refs = fetch_all_refs(need, existing=self._refs, verbose=verbose)
+        self._refs = fetch_all_refs(
+            need, existing=self._refs, verbose=verbose,
+            ref_sources_out=self._ref_sources,
+        )
         self._invalidate()
+
+    # ── Publication quality ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _infer_peer_review_status(meta: PaperMeta) -> None:
+        """
+        Best-effort inference of peer-review status from available metadata.
+        Only sets is_peer_reviewed if it can be reasonably inferred.
+        """
+        if meta.is_peer_reviewed is not None:
+            return   # already set
+
+        venue = (getattr(meta, "venue", "") or "").lower()
+
+        # ArXiv-only → preprint
+        if getattr(meta, "arxiv_id", "") and not getattr(meta, "doi", ""):
+            meta.is_peer_reviewed = False
+            if not meta.venue:
+                meta.venue = "arXiv"
+            return
+
+        # Venue contains "arxiv" or "preprint"
+        if "arxiv" in venue or "preprint" in venue:
+            meta.is_peer_reviewed = False
+            return
+
+        # Has DOI and not ArXiv → likely peer-reviewed
+        if getattr(meta, "doi", "") and not getattr(meta, "arxiv_id", ""):
+            meta.is_peer_reviewed = True
+            return
+
+        # Otherwise → unknown
+        # meta.is_peer_reviewed remains None
+
+    def _pub_quality_score(self, meta: PaperMeta) -> float:
+        """
+        Publication quality bonus — nudge, not dominate.
+
+        Peer-reviewed: 1.0
+        Unknown:       0.5  (neutral)
+        Preprint:      0.3  (mild penalty — preprints can still be excellent)
+        """
+        pr = getattr(meta, "is_peer_reviewed", None)
+        if pr is True:
+            return 1.0
+        elif pr is False:
+            return 0.3
+        return 0.5
 
     # ── Comprehensive multi-level scoring ──────────────────────────────────────
 
@@ -529,6 +588,11 @@ class HierarchicalResearchGraph:
         if snf_score > 0:
             score_parts.append(snf_score)
             weight_parts.append(1.5)
+
+        # ── 6. Publication quality (peer-review bonus) ────────────────────
+        pub_q = self._pub_quality_score(meta)
+        score_parts.append(pub_q)
+        weight_parts.append(0.5)   # light weight — nudge, not dominate
 
         if not score_parts:
             return 0.0
@@ -715,6 +779,13 @@ class HierarchicalResearchGraph:
             "causal_is_dag"         : nx.is_directed_acyclic_graph(self.G_causal)
                                       if self.G_causal.number_of_edges() > 0 else True,
             "citations_loaded"      : len(self._refs),
+            "multi_source_refs"     : sum(1 for v in self._ref_sources.values()
+                                         if len(v) >= 2),
+            "peer_reviewed"         : sum(1 for m in self._papers.values()
+                                         if getattr(m, "is_peer_reviewed", None) is True),
+            "preprints"             : sum(1 for m in self._papers.values()
+                                         if getattr(m, "is_peer_reviewed", None) is False),
+            "edge_anomalies"        : len(getattr(self, "_edge_anomalies", [])),
             "context_ready"         : self.context_vector() is not None,
         }
 
@@ -766,6 +837,16 @@ class HierarchicalResearchGraph:
         # v0.6.0 — causal DAG (acyclic influence flow)
         if not hasattr(self, "G_causal"):
             self.G_causal = nx.DiGraph()
+        # v0.8.0 — citation cross-validation + publication quality
+        if not hasattr(self, "_ref_sources"):
+            self._ref_sources: dict = {}
+        if not hasattr(self, "_edge_anomalies"):
+            self._edge_anomalies: list = []
+        for meta in self._papers.values():
+            if not hasattr(meta, "venue"):
+                meta.venue = ""
+            if not hasattr(meta, "is_peer_reviewed"):
+                meta.is_peer_reviewed = None
         # v0.2.0 used n_levels; v0.3.0 uses alpha only
         if not hasattr(self, "alpha"):
             self.alpha = FUSION_ALPHA

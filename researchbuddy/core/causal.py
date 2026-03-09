@@ -152,6 +152,75 @@ def break_cycles(G: nx.DiGraph) -> int:
     return n_reversed
 
 
+# ── Metadata quality ─────────────────────────────────────────────────────────
+
+def metadata_quality(paper: "PaperMeta") -> float:
+    """
+    Score 0.0–1.0 for how complete the paper's metadata is.
+
+    Purely mechanical — no LLM involved.
+    """
+    score = 0.0
+    if getattr(paper, "doi", ""):
+        score += 0.25
+    if getattr(paper, "s2_id", ""):
+        score += 0.20
+    if paper.year and 1900 <= paper.year <= 2030:
+        score += 0.15
+    if (getattr(paper, "abstract", "") or "") and len(paper.abstract) > 50:
+        score += 0.20
+    if getattr(paper, "authors", None) and len(paper.authors) > 0:
+        score += 0.10
+    if (paper.title or "") and len(paper.title) > 10:
+        score += 0.10
+    return score
+
+
+# ── Temporal anomaly detection ──────────────────────────────────────────────
+
+def flag_temporal_anomalies(
+    G: nx.DiGraph,
+    papers: dict[str, "PaperMeta"],
+) -> list[tuple[str, str, str, float]]:
+    """
+    Scan for structurally anomalous edges — purely mechanical checks.
+
+    Returns list of (source, target, reason, penalty_factor):
+      - "future_citation": citing paper is OLDER than cited paper
+      - "same_year_citation": citation edge between papers from same year
+      - "low_metadata": edge involves a paper with very poor metadata
+
+    penalty_factor is applied as a multiplier to edge_confidence / causal_confidence.
+    """
+    anomalies: list[tuple[str, str, str, float]] = []
+
+    for u, v, data in G.edges(data=True):
+        etype = data.get("etype", "")
+        year_u = resolve_year(papers[u]) if u in papers else None
+        year_v = resolve_year(papers[v]) if v in papers else None
+
+        # ── Future citation: older paper cites newer paper ───────────
+        if etype == "citation":
+            if year_u is not None and year_v is not None:
+                # u cites v (u → v edge with etype="citation")
+                # If u is OLDER than v, u citing v means u (older) references
+                # v (newer) — that's a future citation anomaly
+                if year_u < year_v:
+                    anomalies.append((u, v, "future_citation", 0.3))
+                elif year_u == year_v:
+                    anomalies.append((u, v, "same_year_citation", 0.8))
+
+        # ── Low metadata quality ─────────────────────────────────────
+        for pid in (u, v):
+            if pid in papers:
+                mq = metadata_quality(papers[pid])
+                if mq < 0.3:
+                    anomalies.append((u, v, "low_metadata", 0.8))
+                    break  # don't double-count the same edge
+
+    return anomalies
+
+
 # ── Main DAG builder ─────────────────────────────────────────────────────────
 
 def build_causal_dag(
@@ -230,4 +299,15 @@ def build_causal_dag(
         "build_causal_dag failed: result still has cycles"
     )
 
-    return dag
+    # ── 5. Flag temporal anomalies & apply penalties ─────────────
+    anomalies = flag_temporal_anomalies(dag, papers)
+    for src, tgt, reason, penalty in anomalies:
+        if dag.has_edge(src, tgt):
+            old_conf = dag[src][tgt].get("causal_confidence", 0.5)
+            dag[src][tgt]["causal_confidence"] = round(old_conf * penalty, 3)
+            dag[src][tgt]["anomaly"] = reason
+    if anomalies:
+        print(f"[causal] Flagged {len(anomalies)} anomalies "
+              f"(run 'Audit graph edges' for details)")
+
+    return dag, anomalies

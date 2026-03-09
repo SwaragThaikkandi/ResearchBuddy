@@ -23,12 +23,13 @@ import requests
 from researchbuddy.config import (
     S2_SEARCH_URL, S2_REC_URL,
     ARXIV_SEARCH_URL, MAX_SEARCH_RESULTS, REQUEST_TIMEOUT, REQUEST_DELAY,
+    S2_SEARCH_QUERIES, S2_SEARCH_LIMIT, ARXIV_SEARCH_QUERIES, ARXIV_SEARCH_LIMIT,
 )
 from researchbuddy.core.graph_model import PaperMeta, ResearchGraph
 
 
 _HEADERS = {"User-Agent": "ResearchBuddy/0.1 (local research assistant)"}
-S2_FIELDS = "paperId,title,abstract,authors,year,externalIds,url"
+S2_FIELDS = "paperId,title,abstract,authors,year,externalIds,url,publicationVenue"
 
 
 # ── Internal helpers ────────────────────────────────────────────────────────────
@@ -67,6 +68,17 @@ def _s2_to_meta(item: dict) -> Optional[PaperMeta]:
     arxiv_id = ext_ids.get("ArXiv", "")
     url      = item.get("url") or (f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else "")
 
+    # ── Publication venue / peer-review status ──────────────────────
+    venue_info = item.get("publicationVenue") or {}
+    venue_name = venue_info.get("name", "")
+    venue_type = venue_info.get("type", "")   # "Journal", "Conference", "Book", etc.
+    if venue_type in ("Journal", "Conference", "Book"):
+        is_peer_reviewed = True
+    elif arxiv_id and not venue_name:
+        is_peer_reviewed = False
+    else:
+        is_peer_reviewed = None   # unknown
+
     paper_id = ResearchGraph.make_id(title, doi=doi, s2_id=s2_id)
     return PaperMeta(
         paper_id = paper_id,
@@ -78,6 +90,8 @@ def _s2_to_meta(item: dict) -> Optional[PaperMeta]:
         doi      = doi,
         s2_id    = s2_id,
         arxiv_id = arxiv_id,
+        venue    = venue_name[:200],
+        is_peer_reviewed = is_peer_reviewed,
         source   = "discovered",
     )
 
@@ -170,6 +184,8 @@ def search_arxiv(query: str, limit: int = MAX_SEARCH_RESULTS) -> list[PaperMeta]
             year     = year,
             url      = url,
             arxiv_id = arxiv_id,
+            venue    = "arXiv",
+            is_peer_reviewed = False,
             source   = "discovered",
         ))
 
@@ -412,17 +428,23 @@ def find_candidates(
         expanded = _expand_query(query, keywords)
         queries = expanded + queries   # LLM expansions go first
 
-    for q in queries[:5]:
+    for q in queries[:S2_SEARCH_QUERIES]:
         print(f"  [search] S2 search: '{q[:60]}' ...")
-        add(search_semantic_scholar(q, limit=15))
+        add(search_semantic_scholar(q, limit=S2_SEARCH_LIMIT))
 
-    for q in queries[:3]:
+    for q in queries[:ARXIV_SEARCH_QUERIES]:
         print(f"  [search] ArXiv search: '{q[:60]}' ...")
-        add(search_arxiv(q, limit=15))
+        add(search_arxiv(q, limit=ARXIV_SEARCH_LIMIT))
 
     # ── LLM reranking ────────────────────────────────────────────────────
     if query and all_candidates:
         all_candidates = _llm_rerank(query, all_candidates)
+
+    # ── Soft prioritization: peer-reviewed before preprints ──────────
+    all_candidates.sort(
+        key=lambda p: (getattr(p, "is_peer_reviewed", None) is not False),
+        reverse=True,
+    )
 
     print(f"  [search] Total candidates fetched: {len(all_candidates)}")
     return all_candidates, hyde_embedding

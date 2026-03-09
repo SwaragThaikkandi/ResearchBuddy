@@ -25,6 +25,7 @@ import re
 import time
 import numpy as np
 import networkx as nx
+from dataclasses import dataclass, field
 from typing import Optional
 
 import requests
@@ -42,6 +43,15 @@ _CROSSREF_URL = "https://api.crossref.org/works"
 
 # Minimum DOI length to avoid matching truncated DOIs
 _MIN_DOI_LEN = 12
+
+
+# ── Cross-validation data model ──────────────────────────────────────────────
+
+@dataclass
+class RefResult:
+    """Citation references found by a single data source."""
+    source: str          # "crossref_doi", "crossref_query", "openalex_doi", etc.
+    ref_ids: set = field(default_factory=set)   # set of reference IDs found
 
 
 # ── DOI utilities ──────────────────────────────────────────────────────────────
@@ -474,14 +484,142 @@ def fetch_refs_for_paper(
     return "none", set()
 
 
+def fetch_refs_all_sources(
+    paper_id: str,
+    doi: str = "",
+    title: str = "",
+    abstract: str = "",
+    s2_id: str = "",
+    verbose: bool = True,
+) -> list[RefResult]:
+    """
+    Try ALL available reference sources for a single paper.
+    Unlike fetch_refs_for_paper(), does NOT stop at first success —
+    queries every source to enable cross-validation.
+
+    Returns a list of RefResult objects (one per source that found refs).
+    """
+    results: list[RefResult] = []
+    combined_text = f"{title} {abstract}".strip()
+
+    # Extract DOI from text if not provided
+    if not doi and combined_text:
+        doi = extract_doi_from_text(combined_text)
+
+    # ── CrossRef by DOI ──────────────────────────────────────────────
+    if doi:
+        try:
+            refs = _crossref_by_doi(doi)
+            if refs:
+                results.append(RefResult("crossref_doi", set(refs)))
+                if verbose:
+                    print(f"  [xval] CrossRef/DOI   {len(refs):>4} refs")
+        except Exception:
+            pass
+        time.sleep(0.15)
+
+    # ── CrossRef by query ────────────────────────────────────────────
+    queries = _prepare_queries(title, abstract)
+    if queries:
+        try:
+            found_doi, refs = _crossref_by_query(queries)
+            if refs:
+                results.append(RefResult("crossref_query", set(refs)))
+                if verbose:
+                    print(f"  [xval] CrossRef/query {len(refs):>4} refs")
+                # If we found a DOI via query and didn't have one, use it
+                if found_doi and not doi:
+                    doi = found_doi
+        except Exception:
+            pass
+        time.sleep(0.15)
+
+    # ── OpenAlex by DOI ──────────────────────────────────────────────
+    if doi:
+        try:
+            refs = _openalex_by_doi(doi)
+            if refs:
+                results.append(RefResult("openalex_doi", set(refs)))
+                if verbose:
+                    print(f"  [xval] OpenAlex/DOI  {len(refs):>4} refs")
+        except Exception:
+            pass
+        time.sleep(0.15)
+
+    # ── OpenAlex by title ────────────────────────────────────────────
+    title_candidates = []
+    if title and len(title) > 20:
+        cleaned_t = _smart_clean_query(title)
+        if cleaned_t and len(cleaned_t) > 15:
+            title_candidates.append(cleaned_t)
+    if abstract:
+        extracted_t = _try_extract_title(abstract)
+        if extracted_t and len(extracted_t) > 15:
+            title_candidates.append(extracted_t)
+    for tc in title_candidates[:1]:   # just try best candidate
+        try:
+            refs = _openalex_by_title(tc)
+            if refs:
+                results.append(RefResult("openalex_title", set(refs)))
+                if verbose:
+                    print(f"  [xval] OpenAlex/title {len(refs):>4} refs")
+                break
+        except Exception:
+            pass
+        time.sleep(0.15)
+
+    # ── Semantic Scholar ─────────────────────────────────────────────
+    if s2_id:
+        try:
+            refs = _s2_refs(s2_id)
+            if refs:
+                results.append(RefResult("s2", set(refs)))
+                if verbose:
+                    print(f"  [xval] S2            {len(refs):>4} refs")
+        except Exception:
+            pass
+
+    return results
+
+
+def compute_edge_confidence(
+    n_sources_a: int,
+    n_sources_b: int,
+    base_weight: float,
+) -> float:
+    """
+    Compute confidence for a bibliographic coupling edge.
+
+    Higher confidence when multiple independent sources found refs
+    for BOTH papers involved in the edge.
+
+    Multiplier:
+      min(sources) == 1: 1.0  (baseline)
+      min(sources) == 2: 1.3  (two sources agree)
+      min(sources) >= 3: 1.5  (three+ sources agree)
+    """
+    min_sources = min(n_sources_a, n_sources_b)
+    if min_sources >= 3:
+        multiplier = 1.5
+    elif min_sources >= 2:
+        multiplier = 1.3
+    else:
+        multiplier = 1.0
+    return min(1.0, base_weight * multiplier)
+
+
 def fetch_all_refs(
     papers,
     existing: dict[str, set[str]] | None = None,
     verbose: bool = True,
+    ref_sources_out: dict | None = None,
 ) -> dict[str, set[str]]:
     """
     Fetch references for every paper in `papers` that is not already in `existing`.
     Keyed by internal paper_id.
+
+    When ``ref_sources_out`` dict is provided, per-paper multi-source results
+    are stored there (paper_id → list[RefResult]) for cross-validation.
     """
     refs = dict(existing) if existing else {}
     need = [m for m in papers if m.paper_id not in refs]
@@ -490,10 +628,10 @@ def fetch_all_refs(
 
     if verbose:
         print(f"[citation] Fetching references for {len(need)} papers "
-              f"(CrossRef → OpenAlex → S2) ...")
+              f"(cross-validating: CrossRef + OpenAlex + S2) ...")
 
     for meta in need:
-        source, ref_set = fetch_refs_for_paper(
+        all_results = fetch_refs_all_sources(
             paper_id = meta.paper_id,
             doi      = getattr(meta, "doi", "") or "",
             title    = meta.title or "",
@@ -501,13 +639,23 @@ def fetch_all_refs(
             s2_id    = getattr(meta, "s2_id", "") or "",
             verbose  = verbose,
         )
-        if ref_set:
-            refs[meta.paper_id] = ref_set
+        # Merge: union of all ref_ids across sources
+        merged = set()
+        for rr in all_results:
+            merged |= rr.ref_ids
+        if merged:
+            refs[meta.paper_id] = merged
+        # Store per-source results for confidence scoring
+        if ref_sources_out is not None and all_results:
+            ref_sources_out[meta.paper_id] = all_results
         time.sleep(REQUEST_DELAY)
 
     n_ok = sum(1 for pid in [m.paper_id for m in need] if pid in refs)
+    n_multi = (sum(1 for v in ref_sources_out.values() if len(v) >= 2)
+               if ref_sources_out else 0)
     if verbose:
-        print(f"[citation] Got references for {n_ok}/{len(need)} papers.")
+        print(f"[citation] Got references for {n_ok}/{len(need)} papers"
+              f" ({n_multi} cross-validated by 2+ sources).")
     return refs
 
 
@@ -573,18 +721,28 @@ def build_citation_graph(
     paper_ids: list[str],
     s2_ids: list[str],
     refs: dict[str, set[str]],  # keyed by paper_id
+    ref_sources: dict[str, list] | None = None,  # paper_id → list[RefResult]
 ) -> nx.DiGraph:
     """
-    Build a directed citation graph.
+    Build a directed citation graph with edge confidence scores.
 
     Two types of edges:
     1. Bibliographic coupling (bib_coupling): undirected strength between any
        two papers that share external references. Always populated when refs exist.
     2. Direct citation (citation): A → B when A cites B directly (only when
        both papers are in the corpus AND identified by the same ID namespace).
+
+    When ``ref_sources`` is provided, edge_confidence reflects how many
+    independent data sources corroborate each paper's reference list.
     """
     G = nx.DiGraph()
     G.add_nodes_from(paper_ids)
+
+    # Pre-compute source counts for confidence scoring
+    source_counts: dict[str, int] = {}
+    if ref_sources:
+        for pid, results in ref_sources.items():
+            source_counts[pid] = len(results)
 
     # ── Bibliographic coupling edges ──────────────────────────────────────────
     n = len(paper_ids)
@@ -599,12 +757,16 @@ def build_citation_graph(
             overlap = len(refs_i & refs_j)
             if overlap:
                 w = overlap / np.sqrt(len(refs_i) * len(refs_j))
+                # Compute cross-validation confidence
+                n_src_i = source_counts.get(paper_ids[i], 1)
+                n_src_j = source_counts.get(paper_ids[j], 1)
+                conf = compute_edge_confidence(n_src_i, n_src_j, round(w, 4))
                 G.add_edge(paper_ids[i], paper_ids[j],
                            weight=round(w, 4), etype="bib_coupling",
-                           shared_refs=overlap)
+                           shared_refs=overlap, edge_confidence=round(conf, 3))
                 G.add_edge(paper_ids[j], paper_ids[i],
                            weight=round(w, 4), etype="bib_coupling",
-                           shared_refs=overlap)
+                           shared_refs=overlap, edge_confidence=round(conf, 3))
 
     # ── Direct citation edges (S2 namespace only) ─────────────────────────────
     s2_to_internal = {s2: pid for pid, s2 in zip(paper_ids, s2_ids) if s2}

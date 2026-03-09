@@ -88,6 +88,13 @@ def display_paper(idx: int, meta: PaperMeta, score: float, label: str):
     auth      = ", ".join(meta.authors[:2]) if meta.authors else "Unknown"
     if len(meta.authors) > 2:
         auth += " et al."
+    # Peer-review indicator
+    pr = getattr(meta, "is_peer_reviewed", None)
+    pr_tag = ""
+    if pr is True:
+        pr_tag = " [PR]"
+    elif pr is False:
+        pr_tag = " [preprint]"
     snippet = textwrap.fill(
         meta.abstract[:300] + ("..." if len(meta.abstract) > 300 else ""),
         width=68, initial_indent="    ", subsequent_indent="    "
@@ -98,14 +105,14 @@ def display_paper(idx: int, meta: PaperMeta, score: float, label: str):
         else:
             title_str = f"[bold]{meta.title[:90]}[/]"
         console.print(f"\n  [{idx}] {title_str}")
-        console.print(f"      [cyan]{auth}[/]  ({year})  match={score_pct}")
+        console.print(f"      [cyan]{auth}[/]  ({year}{pr_tag})  match={score_pct}")
         console.print(f"[dim]{snippet}[/]")
         if meta.url:
             console.print(f"      [blue underline]{meta.url}[/]")
     else:
         tag = " [EXPLORE]" if label == "explore" else ""
         print(f"\n  [{idx}] {meta.title[:90]}{tag}")
-        print(f"      {auth}  ({year})  match={score_pct}")
+        print(f"      {auth}  ({year}{pr_tag})  match={score_pct}")
         print(snippet)
         if meta.url:
             print(f"      {meta.url}")
@@ -193,6 +200,21 @@ def show_stats(graph: HierarchicalResearchGraph):
         print_info("\n  Top-rated papers:")
         for m in rated[:5]:
             print(f"    [{m.user_rating:.0f}/10] {m.title[:70]}")
+
+    # Edge confidence + publication breakdown
+    n_pr = stats.get("peer_reviewed", 0)
+    n_pp = stats.get("preprints", 0)
+    n_uk = stats["total_papers"] - n_pr - n_pp
+    if n_pr or n_pp:
+        print_info(f"\n  Publication status: {n_pr} peer-reviewed, {n_pp} preprints, {n_uk} unknown")
+
+    n_xval = stats.get("multi_source_refs", 0)
+    if n_xval:
+        print_info(f"  Cross-validated citations: {n_xval} papers verified by 2+ sources")
+
+    n_anom = stats.get("edge_anomalies", 0)
+    if n_anom:
+        print_warn(f"  Edge anomalies: {n_anom} (use option 10 to audit)")
 
     print_info(f"\n  Active parameters:")
     print_info(f"    alpha (semantic weight) = {graph.alpha}")
@@ -598,6 +620,67 @@ def creative_session(graph: HierarchicalResearchGraph):
             print_info(f"  Best-performing type so far: {top_type}")
 
 
+# ── Edge Audit ─────────────────────────────────────────────────────────────────
+
+def audit_edges(graph: HierarchicalResearchGraph):
+    """Show low-confidence edges and structural anomalies for user review."""
+    print_header("Edge Audit — Graph Reliability")
+
+    # ── 1. Low-confidence citation edges ─────────────────────────────
+    low_conf_edges = []
+    for u, v, d in graph.G_citation.edges(data=True):
+        conf = d.get("edge_confidence", 1.0)
+        if conf < 0.5:
+            low_conf_edges.append((u, v, conf, d.get("etype", "?")))
+
+    if low_conf_edges:
+        print_warn(f"\n  Low-confidence edges ({len(low_conf_edges)}):")
+        for u, v, conf, etype in sorted(low_conf_edges, key=lambda x: x[2])[:15]:
+            p_u = graph.get_paper(u)
+            p_v = graph.get_paper(v)
+            t_u = (p_u.title[:35] + "...") if p_u else u[:12]
+            t_v = (p_v.title[:35] + "...") if p_v else v[:12]
+            print(f"    {t_u}  -->  {t_v}")
+            print(f"      confidence={conf:.2f}  type={etype}")
+    else:
+        print_success("  No low-confidence edges found.")
+
+    # ── 2. Temporal anomalies ────────────────────────────────────────
+    anomalies = getattr(graph, "_edge_anomalies", [])
+    if anomalies:
+        print()
+        print_warn(f"  Structural anomalies ({len(anomalies)}):")
+        for src, tgt, reason, penalty in anomalies[:15]:
+            p_s = graph.get_paper(src)
+            p_t = graph.get_paper(tgt)
+            y_s = p_s.year if p_s else "?"
+            y_t = p_t.year if p_t else "?"
+            t_s = (p_s.title[:30] + "...") if p_s else src[:12]
+            t_t = (p_t.title[:30] + "...") if p_t else tgt[:12]
+            print(f"    {t_s} ({y_s}) --> {t_t} ({y_t})")
+            print(f"      reason={reason}  penalty={penalty:.2f}")
+    else:
+        print_success("  No structural anomalies detected.")
+
+    # ── 3. Publication breakdown ─────────────────────────────────────
+    n_pr = sum(1 for m in graph.all_papers()
+               if getattr(m, "is_peer_reviewed", None) is True)
+    n_pp = sum(1 for m in graph.all_papers()
+               if getattr(m, "is_peer_reviewed", None) is False)
+    n_uk = len(graph.all_papers()) - n_pr - n_pp
+    print()
+    print_info(f"  Publication status: {n_pr} peer-reviewed, "
+               f"{n_pp} preprints, {n_uk} unknown")
+
+    # ── 4. Cross-validation coverage ─────────────────────────────────
+    n_xval = sum(1 for v in graph._ref_sources.values() if len(v) >= 2)
+    n_total = len(graph._ref_sources)
+    if n_total:
+        print_info(f"  Citation cross-validation: {n_xval}/{n_total} papers "
+                   f"verified by 2+ independent sources")
+    print()
+
+
 # ── LLM Status ────────────────────────────────────────────────────────────────
 
 def _show_llm_status_banner():
@@ -682,6 +765,7 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
         "7": "Query your research network (Reasoning Mode)",
         "8": "Creative Mode — generate & rate argument paragraphs",
         "9": "LLM status & setup",
+        "10": "Audit graph edges (low-confidence & anomalies)",
         "q": "Save & quit",
     }
     while True:
@@ -734,6 +818,8 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
             creative_session(graph)
         elif choice == "9":
             show_llm_status()
+        elif choice == "10":
+            audit_edges(graph)
         else:
             print_warn("Unknown option.")
 

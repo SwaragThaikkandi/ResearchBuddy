@@ -46,6 +46,12 @@ MAX_SEARCH_RESULTS   = 30
 REQUEST_TIMEOUT      = 15
 REQUEST_DELAY        = 1.0
 
+# ── Search allocation (peer-reviewed bias) ────────────────────────────────
+S2_SEARCH_QUERIES    = 6       # number of S2 text-search queries
+S2_SEARCH_LIMIT      = 20      # results per S2 query
+ARXIV_SEARCH_QUERIES = 2       # number of ArXiv queries
+ARXIV_SEARCH_LIMIT   = 10      # results per ArXiv query
+
 # ── Arguer ("Creative Cortex") ────────────────────────────────────────────────
 ARGUER_STYLE_LR      = 0.20    # EMA learning rate for StyleProfile type-weight updates
 ARGUER_TOP_PARAGRAPHS= 3       # default number of argument paragraphs per session
