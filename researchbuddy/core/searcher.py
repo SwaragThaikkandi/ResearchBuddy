@@ -12,12 +12,14 @@ LLM enhancements (optional, degrade gracefully when Ollama is unavailable):
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import random
 import time
 import re
+from pathlib import Path
 import xml.etree.ElementTree as ET
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import requests
@@ -79,8 +81,69 @@ def _retry_delay_seconds(response: Optional[requests.Response], attempt: int) ->
             except ValueError:
                 pass
     delay = min(_BACKOFF_MAX_SECONDS, _BACKOFF_BASE_SECONDS * (2 ** attempt))
+    try:
+        from researchbuddy.config import DETERMINISTIC_MODE
+    except Exception:
+        DETERMINISTIC_MODE = False
+    if DETERMINISTIC_MODE:
+        return delay
     return delay + random.uniform(0.0, _BACKOFF_JITTER_SECONDS)
 
+
+def _cache_file(namespace: str, payload: dict) -> Optional[Path]:
+    """Return cache file path for a deterministic payload hash."""
+    try:
+        from researchbuddy.config import (
+            SEARCH_CACHE_DIR,
+            SEARCH_CACHE_ENABLED,
+            SEARCH_CACHE_VERSION,
+        )
+    except Exception:
+        return None
+
+    if not SEARCH_CACHE_ENABLED:
+        return None
+
+    try:
+        cache_dir = Path(SEARCH_CACHE_DIR)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        raw_key = json.dumps(
+            {
+                "version": SEARCH_CACHE_VERSION,
+                "namespace": namespace,
+                "payload": payload,
+            },
+            sort_keys=True,
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+        return cache_dir / f"{namespace}_{digest}.json"
+    except Exception:
+        return None
+
+
+def _cache_load(namespace: str, payload: dict) -> Optional[Any]:
+    path = _cache_file(namespace, payload)
+    if path is None or not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _cache_save(namespace: str, payload: dict, value: Any):
+    path = _cache_file(namespace, payload)
+    if path is None:
+        return
+    try:
+        path.write_text(
+            json.dumps(value, ensure_ascii=True, sort_keys=False),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
 # â”€â”€ Internal helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -309,18 +372,28 @@ def search_arxiv(query: str, limit: int = MAX_SEARCH_RESULTS) -> list[PaperMeta]
 
 def _generate_hyde_abstract(query: str) -> Optional[str]:
     """
-    HyDE â€” Hypothetical Document Embedding.
+    HyDE - Hypothetical Document Embedding.
 
-    Ask the LLM to write a short *hypothetical* abstract for an ideal paper
-    that would perfectly answer ``query``.  This abstract is then embedded
-    and used as a supplementary search signal, dramatically improving
-    semantic matching compared to embedding the raw query string.
+    Ask the LLM to write a short hypothetical abstract for an ideal paper
+    that would perfectly answer ``query``. This abstract is then embedded
+    and used as a supplementary search signal.
 
     Returns None when Ollama is unavailable or generation fails.
     """
-    from researchbuddy.config import HYDE_ENABLED, LLM_ENABLED
+    from researchbuddy.config import (
+        DETERMINISTIC_MODE,
+        HYDE_ENABLED,
+        LLM_ENABLED,
+        LLM_MODEL,
+    )
     if not HYDE_ENABLED or not LLM_ENABLED:
         return None
+
+    cache_payload = {"query": query.strip(), "model": LLM_MODEL}
+    cached = _cache_load("hyde", cache_payload)
+    if isinstance(cached, str) and len(cached) > 50:
+        print(f"  [HyDE] Cache hit ({len(cached)} chars)")
+        return cached
 
     try:
         from researchbuddy.core.llm import get_llm
@@ -340,8 +413,10 @@ def _generate_hyde_abstract(query: str) -> Optional[str]:
             "You are an academic paper abstract generator. Write realistic, "
             "concise scientific abstracts. Output only the abstract paragraph."
         )
-        result = client.generate(prompt, system=system, temperature=0.5, max_tokens=256)
+        temperature = 0.0 if DETERMINISTIC_MODE else 0.5
+        result = client.generate(prompt, system=system, temperature=temperature, max_tokens=256)
         if result and len(result) > 50:
+            _cache_save("hyde", cache_payload, result)
             print(f"  [HyDE] Generated hypothetical abstract ({len(result)} chars)")
             return result
     except Exception as e:
@@ -351,15 +426,35 @@ def _generate_hyde_abstract(query: str) -> Optional[str]:
 
 def _expand_query(query: str, keywords: list[str]) -> list[str]:
     """
-    LLM query expansion â€” generate alternative search formulations.
+    LLM query expansion - generate alternative search formulations.
 
     Given the user's research intent and existing keywords, generate 3
     complementary search queries that cover different facets of the topic.
     Returns an empty list when LLM is unavailable.
     """
-    from researchbuddy.config import LLM_QUERY_EXPANSION, LLM_ENABLED
+    from researchbuddy.config import (
+        DETERMINISTIC_MODE,
+        LLM_ENABLED,
+        LLM_MODEL,
+        LLM_QUERY_EXPANSION,
+    )
     if not LLM_QUERY_EXPANSION or not LLM_ENABLED:
         return []
+
+    cache_payload = {
+        "query": query.strip(),
+        "keywords": [k.strip().lower() for k in keywords if k and k.strip()],
+        "model": LLM_MODEL,
+    }
+    cached = _cache_load("expand_query", cache_payload)
+    if isinstance(cached, list):
+        expanded = [
+            q.strip() for q in cached
+            if isinstance(q, str) and len(q.strip()) >= 5
+        ]
+        if expanded:
+            print(f"  [LLM expand] Cache hit (+{len(expanded)} queries)")
+            return expanded[:3]
 
     try:
         from researchbuddy.core.llm import get_llm
@@ -375,17 +470,24 @@ def _expand_query(query: str, keywords: list[str]) -> list[str]:
             f"find relevant papers. Each query should be 3-8 words and cover a "
             f"different aspect or use different terminology.\n\n"
             f"Output as a JSON array of 3 strings, e.g.:\n"
-            f'[\"query one\", \"query two\", \"query three\"]'
+            f'["query one", "query two", "query three"]'
         )
+        temperature = 0.0 if DETERMINISTIC_MODE else 0.4
         result = client.generate_json(
             prompt,
             system="You generate academic search queries. Output valid JSON only.",
-            temperature=0.4,
+            temperature=temperature,
             max_tokens=128,
         )
         if isinstance(result, list) and len(result) >= 1:
-            expanded = [q.strip() for q in result if isinstance(q, str) and len(q.strip()) >= 5]
+            expanded = [
+                q.strip() for q in result
+                if isinstance(q, str) and len(q.strip()) >= 5
+            ]
+            # De-duplicate while preserving order.
+            expanded = list(dict.fromkeys(expanded))
             if expanded:
+                _cache_save("expand_query", cache_payload, expanded[:3])
                 print(f"  [LLM expand] +{len(expanded)} queries: "
                       f"{', '.join(q[:40] for q in expanded[:3])}")
                 return expanded[:3]
@@ -396,13 +498,18 @@ def _expand_query(query: str, keywords: list[str]) -> list[str]:
 
 def _llm_rerank(query: str, candidates: list[PaperMeta], top_n: int = 15) -> list[PaperMeta]:
     """
-    LLM reranking â€” rerank the top candidates by semantic relevance.
+    LLM reranking - rerank the top candidates by semantic relevance.
 
     Sends titles and abstract snippets of top candidates to the LLM
     and asks it to rank them by relevance to the query. Returns reordered
     candidates (or original order on failure).
     """
-    from researchbuddy.config import LLM_RERANK_ENABLED, LLM_ENABLED
+    from researchbuddy.config import (
+        DETERMINISTIC_MODE,
+        LLM_ENABLED,
+        LLM_MODEL,
+        LLM_RERANK_ENABLED,
+    )
     if not LLM_RERANK_ENABLED or not LLM_ENABLED:
         return candidates
 
@@ -419,12 +526,45 @@ def _llm_rerank(query: str, candidates: list[PaperMeta], top_n: int = 15) -> lis
         to_rerank = candidates[:top_n]
         rest = candidates[top_n:]
 
+        def _normalize_indices(raw_indices: list[Any]) -> list[int]:
+            valid = [
+                int(i)
+                for i in raw_indices
+                if isinstance(i, (int, float)) and 0 <= int(i) < len(to_rerank)
+            ]
+            seen: set[int] = set()
+            ordered: list[int] = []
+            for idx in valid:
+                if idx not in seen:
+                    seen.add(idx)
+                    ordered.append(idx)
+            if len(ordered) < 3:
+                return []
+            for i in range(len(to_rerank)):
+                if i not in seen:
+                    ordered.append(i)
+            return ordered
+
+        cache_payload = {
+            "query": query.strip(),
+            "top_n": int(top_n),
+            "candidate_ids": [p.paper_id for p in to_rerank],
+            "model": LLM_MODEL,
+        }
+        cached = _cache_load("rerank", cache_payload)
+        if isinstance(cached, list):
+            ordered = _normalize_indices(cached)
+            if ordered:
+                reranked = [to_rerank[i] for i in ordered] + rest
+                print(f"  [LLM rerank] Cache hit ({len(ordered)} candidates)")
+                return reranked
+
         # Build paper descriptions for LLM
         papers_desc = []
         for i, p in enumerate(to_rerank):
             title = fix_mojibake(p.title or "Untitled")[:100]
             abstract = fix_mojibake(p.abstract or "")[:150]
-            papers_desc.append(f"{i}: \"{title}\" â€” {abstract}")
+            papers_desc.append(f"{i}: \"{title}\" - {abstract}")
 
         prompt = (
             f"Research question: \"{query}\"\n\n"
@@ -435,32 +575,19 @@ def _llm_rerank(query: str, candidates: list[PaperMeta], top_n: int = 15) -> lis
             + f"\n\nOutput ONLY a JSON array of integers, e.g. [3, 0, 5, 1, ...]"
         )
 
+        temperature = 0.0 if DETERMINISTIC_MODE else 0.2
         result = client.generate_json(
             prompt,
             system="You are a research paper relevance ranker. Output valid JSON only.",
-            temperature=0.2,
+            temperature=temperature,
             max_tokens=128,
         )
         if isinstance(result, list) and len(result) >= 3:
-            # Validate indices
-            valid_indices = [int(i) for i in result
-                            if isinstance(i, (int, float)) and 0 <= int(i) < len(to_rerank)]
-            # Remove duplicates while preserving order
-            seen = set()
-            unique_indices = []
-            for idx in valid_indices:
-                if idx not in seen:
-                    seen.add(idx)
-                    unique_indices.append(idx)
-
-            if len(unique_indices) >= 3:
-                # Add any missing indices at the end
-                for i in range(len(to_rerank)):
-                    if i not in seen:
-                        unique_indices.append(i)
-
-                reranked = [to_rerank[i] for i in unique_indices] + rest
-                print(f"  [LLM rerank] Reranked {len(unique_indices)} candidates")
+            ordered = _normalize_indices(result)
+            if ordered:
+                _cache_save("rerank", cache_payload, ordered)
+                reranked = [to_rerank[i] for i in ordered] + rest
+                print(f"  [LLM rerank] Reranked {len(ordered)} candidates")
                 return reranked
 
     except Exception as e:
@@ -490,6 +617,7 @@ def find_candidates(
     all_candidates: list[PaperMeta] = []
     seen_ids: set[str] = set()
     hyde_embedding: Optional[np.ndarray] = None
+    from researchbuddy.config import DETERMINISTIC_MODE
 
     def add(papers: list[PaperMeta]):
         for p in papers:
@@ -530,7 +658,7 @@ def find_candidates(
 
     top_rated = sorted(
         [m for m in graph.rated_papers() if m.user_rating and m.user_rating >= 7],
-        key=lambda m: m.user_rating, reverse=True
+        key=lambda m: (-(m.user_rating or 0), m.paper_id),
     )[:2]
     for m in top_rated:
         queries.append(m.title)
@@ -539,6 +667,9 @@ def find_candidates(
     if query:
         expanded = _expand_query(query, keywords)
         queries = expanded + queries   # LLM expansions go first
+
+    queries = [q.strip() for q in queries if q and q.strip()]
+    queries = list(dict.fromkeys(queries))
 
     s2_query_cap = S2_SEARCH_QUERIES if _S2_API_KEY else min(S2_SEARCH_QUERIES, 3)
     for q in queries[:s2_query_cap]:
@@ -554,10 +685,19 @@ def find_candidates(
         all_candidates = _llm_rerank(query, all_candidates)
 
     # â”€â”€ Soft prioritization: peer-reviewed before preprints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    all_candidates.sort(
-        key=lambda p: (getattr(p, "is_peer_reviewed", None) is not False),
-        reverse=True,
-    )
+    if DETERMINISTIC_MODE:
+        all_candidates.sort(
+            key=lambda p: (
+                0 if getattr(p, "is_peer_reviewed", None) is not False else 1,
+                (p.title or "").lower(),
+                p.paper_id,
+            )
+        )
+    else:
+        all_candidates.sort(
+            key=lambda p: (getattr(p, "is_peer_reviewed", None) is not False),
+            reverse=True,
+        )
 
     print(f"  [search] Total candidates fetched: {len(all_candidates)}")
     return all_candidates, hyde_embedding

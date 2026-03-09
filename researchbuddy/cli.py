@@ -740,6 +740,8 @@ def show_llm_status():
         print_info(f"    HyDE search       : {'ON' if cfg.HYDE_ENABLED else 'OFF'}")
         print_info(f"    Query expansion   : {'ON' if cfg.LLM_QUERY_EXPANSION else 'OFF'}")
         print_info(f"    LLM reranking     : {'ON' if cfg.LLM_RERANK_ENABLED else 'OFF'}")
+        print_info(f"    Deterministic     : {'ON' if getattr(cfg, 'DETERMINISTIC_MODE', False) else 'OFF'}")
+        print_info(f"    Search cache      : {'ON' if getattr(cfg, 'SEARCH_CACHE_ENABLED', False) else 'OFF'}")
 
         if not st.available:
             print()

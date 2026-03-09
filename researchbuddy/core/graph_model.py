@@ -157,19 +157,20 @@ class HierarchicalResearchGraph:
 
     # ── Hierarchy rebuild ──────────────────────────────────────────────────────
 
-    def rebuild_hierarchy(self):
+    def rebuild_hierarchy(self, ensure_citations: bool = False):
         """
         Rebuild all three networks from scratch using current papers.
         The number of hierarchy levels is determined automatically by the data.
-        Auto-fetches missing citation data before rebuilding.
-        """
-        # Auto-fetch citations for papers that don't have them yet
-        n_missing = sum(1 for m in self._papers.values()
-                        if m.paper_id not in self._refs)
-        if n_missing > 0:
-            print(f"[graph] Auto-fetching citations for {n_missing} papers ...")
-            self.fetch_citations(verbose=True)
 
+        Citation fetching is optional. When ``ensure_citations`` is True,
+        missing citation data is fetched online before rebuilding.
+        """
+        if ensure_citations:
+            n_missing = sum(1 for m in self._papers.values()
+                            if m.paper_id not in self._refs)
+            if n_missing > 0:
+                print(f"[graph] Auto-fetching citations for {n_missing} papers ...")
+                self.fetch_citations(verbose=True)
         papers_with_emb = [m for m in self._papers.values() if m.embedding is not None]
         if len(papers_with_emb) < 3:
             return
@@ -702,10 +703,10 @@ class HierarchicalResearchGraph:
         n_explore  = max(1, int(n * exploration_ratio))
         n_relevant = n - n_explore
 
-        by_rel   = sorted(scored, key=lambda x: x[1], reverse=True)
+        by_rel = sorted(scored, key=lambda x: (-x[1], x[0].paper_id))
         by_novel = sorted(
             [s for s in scored if s[1] > 0.12 and s[2] >= MIN_NOVELTY_DISTANCE],
-            key=lambda x: x[2], reverse=True,
+            key=lambda x: (-x[2], x[0].paper_id),
         )
 
         results: list[tuple[PaperMeta, float, str]] = []
@@ -760,7 +761,7 @@ class HierarchicalResearchGraph:
             for m in seed[:5]:
                 words.update(m.title.split())
             stop = {"a","an","the","of","in","and","or","for","to","with","on"}
-            return list(words - stop)[:n]
+            return sorted(words - stop)[:n]
 
     def stats(self) -> dict:
         nd = n_levels_detected(self._clusters)

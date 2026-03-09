@@ -4,6 +4,8 @@ from pathlib import Path
 DATA_DIR   = Path.home() / ".researchbuddy"
 STATE_FILE = DATA_DIR / "research_graph.pkl"
 TEMP_DIR   = DATA_DIR / "temp_papers"
+HISTORY_DIR = DATA_DIR / "history"
+STATE_HISTORY_KEEP = 200    # max timestamped state snapshots retained
 
 # ── PDF output paths (one per network) ────────────────────────────────────────
 SEMANTIC_PDF  = DATA_DIR / "network_semantic.pdf"   # NLP / HSWN
@@ -52,6 +54,11 @@ S2_SEARCH_LIMIT      = 20      # results per S2 query
 ARXIV_SEARCH_QUERIES = 2       # number of ArXiv queries
 ARXIV_SEARCH_LIMIT   = 10      # results per ArXiv query
 
+# Reproducibility / reliability
+DETERMINISTIC_MODE   = True    # stable query expansion/rerank + deterministic tie-breaks
+SEARCH_CACHE_ENABLED = True    # cache LLM search helpers (query expansion + reranking)
+SEARCH_CACHE_DIR     = DATA_DIR / "cache"
+SEARCH_CACHE_VERSION = 1       # bump to invalidate old cache entries
 # ── Arguer ("Creative Cortex") ────────────────────────────────────────────────
 ARGUER_STYLE_LR      = 0.20    # EMA learning rate for StyleProfile type-weight updates
 ARGUER_TOP_PARAGRAPHS= 3       # default number of argument paragraphs per session
