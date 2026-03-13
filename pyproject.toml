@@ -35,8 +35,14 @@ dependencies = [
     "scipy>=1.9.0",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+]
+
 [project.scripts]
 researchbuddy = "researchbuddy.cli:main"
+researchbuddy-evolution = "researchbuddy.evolution:main"
 
 [project.urls]
 Homepage   = "https://github.com/SwaragThaikkandi/ResearchBuddy"

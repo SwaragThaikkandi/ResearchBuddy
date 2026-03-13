@@ -17,10 +17,14 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 
+import logging
+
 try:
     import pdfplumber
 except ImportError:
     pdfplumber = None  # type: ignore
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -380,7 +384,7 @@ def extract_from_pdf(filepath: str | Path) -> Optional[ExtractedPaper]:
             doi       = doi,
         )
     except Exception as e:
-        print(f"[pdf_processor] Could not read {filepath.name}: {e}")
+        logger.warning("Could not read %s: %s", filepath.name, e)
         return None
 
 
@@ -422,14 +426,14 @@ def extract_from_folder(folder: str | Path) -> list[ExtractedPaper]:
     papers = []
     pdf_files = list(folder.glob("*.pdf"))
     if not pdf_files:
-        print(f"[pdf_processor] No PDF files found in {folder}")
+        logger.info("No PDF files found in %s", folder)
         return papers
 
     for pdf in pdf_files:
         result = extract_from_pdf(pdf)
         if result:
             papers.append(result)
-            print(f"  + {pdf.name}  [{len(result.chunks)} chunks]")
+            logger.info("  + %s  [%d chunks]", pdf.name, len(result.chunks))
         else:
-            print(f"  x {pdf.name}  (could not read)")
+            logger.warning("  x %s  (could not read)", pdf.name)
     return papers

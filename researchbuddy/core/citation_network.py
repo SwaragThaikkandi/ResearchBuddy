@@ -28,6 +28,7 @@ import networkx as nx
 from dataclasses import dataclass, field
 from typing import Optional
 
+import logging
 import requests
 
 from researchbuddy.config import (
@@ -38,6 +39,8 @@ _HEADERS = {
     "User-Agent": "ResearchBuddy/0.3 (research assistant; "
                   "https://github.com/SwaragThaikkandi/ResearchBuddy)"
 }
+
+logger = logging.getLogger(__name__)
 
 _CROSSREF_URL = "https://api.crossref.org/works"
 
@@ -428,7 +431,7 @@ def fetch_refs_for_paper(
         refs = _crossref_by_doi(doi)
         if refs:
             if verbose:
-                print(f"  [citation] CrossRef/DOI  {len(refs):>4} refs  doi={doi[:50]}")
+                logger.info(f"  [citation] CrossRef/DOI  {len(refs):>4} refs  doi={doi[:50]}")
             return "crossref_doi", set(refs)
 
     # Step 3: CrossRef bibliographic query (multiple cleaned query candidates)
@@ -437,8 +440,8 @@ def fetch_refs_for_paper(
         found_doi, refs = _crossref_by_query(queries)
         if refs:
             if verbose:
-                print(f"  [citation] CrossRef/query {len(refs):>4} refs  "
-                      f"found_doi={found_doi[:40]}")
+                logger.info(f"  [citation] CrossRef/query {len(refs):>4} refs  "
+                            f"found_doi={found_doi[:40]}")
             return "crossref_query", set(refs)
 
     # Step 4: OpenAlex by DOI
@@ -446,7 +449,7 @@ def fetch_refs_for_paper(
         refs = _openalex_by_doi(doi)
         if refs:
             if verbose:
-                print(f"  [citation] OpenAlex/DOI  {len(refs):>4} refs  doi={doi[:50]}")
+                logger.info(f"  [citation] OpenAlex/DOI  {len(refs):>4} refs  doi={doi[:50]}")
             return "openalex_doi", set(refs)
 
     # Step 5: OpenAlex by title (try cleaned/extracted title too)
@@ -466,8 +469,8 @@ def fetch_refs_for_paper(
         refs = _openalex_by_title(tc)
         if refs:
             if verbose:
-                print(f"  [citation] OpenAlex/title {len(refs):>4} refs  "
-                      f"title={tc[:50]}")
+                logger.info(f"  [citation] OpenAlex/title {len(refs):>4} refs  "
+                            f"title={tc[:50]}")
             return "openalex_title", set(refs)
 
     # Step 6: Semantic Scholar
@@ -475,12 +478,12 @@ def fetch_refs_for_paper(
         refs = _s2_refs(s2_id)
         if refs:
             if verbose:
-                print(f"  [citation] S2           {len(refs):>4} refs  s2={s2_id}")
+                logger.info(f"  [citation] S2           {len(refs):>4} refs  s2={s2_id}")
             return "s2", set(refs)
 
     if verbose:
         label = doi or title[:40] or s2_id or paper_id
-        print(f"  [citation] Not found: {label[:60]}")
+        logger.debug(f"  [citation] Not found: {label[:60]}")
     return "none", set()
 
 
@@ -513,7 +516,7 @@ def fetch_refs_all_sources(
             if refs:
                 results.append(RefResult("crossref_doi", set(refs)))
                 if verbose:
-                    print(f"  [xval] CrossRef/DOI   {len(refs):>4} refs")
+                    logger.debug(f"  [xval] CrossRef/DOI   {len(refs):>4} refs")
         except Exception:
             pass
         time.sleep(0.15)
@@ -526,7 +529,7 @@ def fetch_refs_all_sources(
             if refs:
                 results.append(RefResult("crossref_query", set(refs)))
                 if verbose:
-                    print(f"  [xval] CrossRef/query {len(refs):>4} refs")
+                    logger.debug(f"  [xval] CrossRef/query {len(refs):>4} refs")
                 # If we found a DOI via query and didn't have one, use it
                 if found_doi and not doi:
                     doi = found_doi
@@ -541,7 +544,7 @@ def fetch_refs_all_sources(
             if refs:
                 results.append(RefResult("openalex_doi", set(refs)))
                 if verbose:
-                    print(f"  [xval] OpenAlex/DOI  {len(refs):>4} refs")
+                    logger.debug(f"  [xval] OpenAlex/DOI  {len(refs):>4} refs")
         except Exception:
             pass
         time.sleep(0.15)
@@ -562,7 +565,7 @@ def fetch_refs_all_sources(
             if refs:
                 results.append(RefResult("openalex_title", set(refs)))
                 if verbose:
-                    print(f"  [xval] OpenAlex/title {len(refs):>4} refs")
+                    logger.debug(f"  [xval] OpenAlex/title {len(refs):>4} refs")
                 break
         except Exception:
             pass
@@ -575,7 +578,7 @@ def fetch_refs_all_sources(
             if refs:
                 results.append(RefResult("s2", set(refs)))
                 if verbose:
-                    print(f"  [xval] S2            {len(refs):>4} refs")
+                    logger.debug(f"  [xval] S2            {len(refs):>4} refs")
         except Exception:
             pass
 
@@ -652,8 +655,8 @@ def fetch_all_refs(
         return refs
 
     if verbose:
-        print(f"[citation] Fetching references for {len(need)} papers "
-              f"(cross-validating: CrossRef + OpenAlex + S2) ...")
+        logger.info(f"[citation] Fetching references for {len(need)} papers "
+                    f"(cross-validating: CrossRef + OpenAlex + S2) ...")
 
     for meta in need:
         all_results = fetch_refs_all_sources(
@@ -679,8 +682,8 @@ def fetch_all_refs(
     n_multi = (sum(1 for v in ref_sources_out.values() if len(v) >= 2)
                if ref_sources_out else 0)
     if verbose:
-        print(f"[citation] Got references for {n_ok}/{len(need)} papers"
-              f" ({n_multi} cross-validated by 2+ sources).")
+        logger.info(f"[citation] Got references for {n_ok}/{len(need)} papers"
+                    f" ({n_multi} cross-validated by 2+ sources).")
     return refs
 
 

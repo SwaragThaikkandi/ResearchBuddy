@@ -21,8 +21,11 @@ The resulting G_causal is used by:
 
 from __future__ import annotations
 
+import logging
 import networkx as nx
 from typing import Optional, TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from researchbuddy.core.graph_model import PaperMeta
@@ -292,7 +295,7 @@ def build_causal_dag(
     # ── 3. Break remaining cycles ────────────────────────────────────
     n_reversed = break_cycles(dag)
     if n_reversed:
-        print(f"[causal] Reversed {n_reversed} edge(s) to eliminate cycles")
+        logger.info("Reversed %d edge(s) to eliminate cycles", n_reversed)
 
     # ── 4. Validate ──────────────────────────────────────────────────
     assert nx.is_directed_acyclic_graph(dag), (
@@ -307,7 +310,7 @@ def build_causal_dag(
             dag[src][tgt]["causal_confidence"] = round(old_conf * penalty, 3)
             dag[src][tgt]["anomaly"] = reason
     if anomalies:
-        print(f"[causal] Flagged {len(anomalies)} anomalies "
-              f"(run 'Audit graph edges' for details)")
+        logger.info("Flagged %d anomalies (run 'Audit graph edges' for details)",
+                     len(anomalies))
 
     return dag, anomalies

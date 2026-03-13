@@ -16,6 +16,7 @@ creating edges between papers the user links through their queries.
 
 from __future__ import annotations
 
+import logging
 import numpy as np
 import networkx as nx
 from collections import defaultdict
@@ -23,6 +24,8 @@ from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
 
 from researchbuddy.core.embedder import embed, cosine_similarity
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from researchbuddy.core.graph_model import HierarchicalResearchGraph, PaperMeta
@@ -123,6 +126,9 @@ class Reasoner:
 
     def __init__(self, top_k: int = 10):
         self.top_k = top_k
+        # Session-level PageRank cache (invalidated when graph edge count changes)
+        self._pr_cache: dict[str, float] = {}
+        self._pr_edge_count: int = -1
 
     # ── Main entry point ──────────────────────────────────────────────────
 
@@ -227,15 +233,19 @@ class Reasoner:
         query_emb: np.ndarray,
         graph: "HierarchicalResearchGraph",
     ) -> list[tuple["PaperMeta", float, dict]]:
-        # PageRank on paper-only subgraph
+        # PageRank on paper-only subgraph (cached per session)
         paper_ids_set = {m.paper_id for m in graph.all_papers()}
         sub = graph.G.subgraph(
             [n for n in graph.G.nodes if n in paper_ids_set]
         )
-        try:
-            pr = nx.pagerank(sub, alpha=0.85, max_iter=100)
-        except Exception:
-            pr = {}
+        current_edges = sub.number_of_edges()
+        if self._pr_edge_count != current_edges:
+            try:
+                self._pr_cache = nx.pagerank(sub, alpha=0.85, max_iter=100)
+            except Exception:
+                self._pr_cache = {}
+            self._pr_edge_count = current_edges
+        pr = self._pr_cache
 
         # Adaptive centrality weight: if graph is dense, centrality is
         # nearly uniform and shouldn't influence ranking much.

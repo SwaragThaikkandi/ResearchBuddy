@@ -31,6 +31,9 @@ from researchbuddy.config import (
 )
 from researchbuddy.core.graph_model import PaperMeta, ResearchGraph
 
+import logging
+logger = logging.getLogger(__name__)
+
 
 _HEADERS = {"User-Agent": "ResearchBuddy/0.1 (local research assistant)"}
 _S2_API_KEY = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "").strip()
@@ -66,8 +69,8 @@ def _activate_s2_cooldown(response: Optional[requests.Response] = None):
             except ValueError:
                 pass
     _s2_backoff_until = max(_s2_backoff_until, time.time() + delay)
-    print(
-        f"  [searcher] S2 cooldown active for {delay:.0f}s after rate-limit. "
+    logger.warning(
+        f"S2 cooldown active for {delay:.0f}s after rate-limit. "
         "Set SEMANTIC_SCHOLAR_API_KEY to improve limits."
     )
 
@@ -151,7 +154,7 @@ def _get(url: str, params: dict) -> Optional[dict | str]:
     if _is_s2_url(url):
         cooldown = _s2_cooldown_remaining()
         if cooldown > 0:
-            print(f"  [searcher] S2 cooldown active ({cooldown:.0f}s), skipping request.")
+            logger.debug(f"S2 cooldown active ({cooldown:.0f}s), skipping request.")
             return None
 
     response: Optional[requests.Response] = None
@@ -161,8 +164,8 @@ def _get(url: str, params: dict) -> Optional[dict | str]:
 
             if response.status_code in _RETRYABLE_STATUS_CODES and attempt < _MAX_HTTP_RETRIES:
                 delay = _retry_delay_seconds(response, attempt)
-                print(
-                    f"  [searcher] GET retry {attempt + 1}/{_MAX_HTTP_RETRIES} "
+                logger.debug(
+                    f"GET retry {attempt + 1}/{_MAX_HTTP_RETRIES} "
                     f"(status={response.status_code}) in {delay:.1f}s"
                 )
                 time.sleep(delay)
@@ -174,18 +177,18 @@ def _get(url: str, params: dict) -> Optional[dict | str]:
         except requests.RequestException as e:
             if attempt < _MAX_HTTP_RETRIES:
                 delay = _retry_delay_seconds(response, attempt)
-                print(
-                    f"  [searcher] GET error (attempt {attempt + 1}/{_MAX_HTTP_RETRIES}): {e}; "
+                logger.debug(
+                    f"GET error (attempt {attempt + 1}/{_MAX_HTTP_RETRIES}): {e}; "
                     f"retrying in {delay:.1f}s"
                 )
                 time.sleep(delay)
                 continue
             if response is not None and response.status_code == 429 and _is_s2_url(url):
                 _activate_s2_cooldown(response)
-            print(f"  [searcher] Request failed: {e}")
+            logger.warning(f"Request failed: {e}")
             return None
         except Exception as e:
-            print(f"  [searcher] Request failed: {e}")
+            logger.warning(f"Request failed: {e}")
             return None
     return None
 
@@ -193,7 +196,7 @@ def _post(url: str, payload: dict) -> Optional[dict]:
     if _is_s2_url(url):
         cooldown = _s2_cooldown_remaining()
         if cooldown > 0:
-            print(f"  [searcher] S2 cooldown active ({cooldown:.0f}s), skipping POST request.")
+            logger.debug(f"S2 cooldown active ({cooldown:.0f}s), skipping POST request.")
             return None
 
     response: Optional[requests.Response] = None
@@ -203,8 +206,8 @@ def _post(url: str, payload: dict) -> Optional[dict]:
 
             if response.status_code in _RETRYABLE_STATUS_CODES and attempt < _MAX_HTTP_RETRIES:
                 delay = _retry_delay_seconds(response, attempt)
-                print(
-                    f"  [searcher] POST retry {attempt + 1}/{_MAX_HTTP_RETRIES} "
+                logger.debug(
+                    f"POST retry {attempt + 1}/{_MAX_HTTP_RETRIES} "
                     f"(status={response.status_code}) in {delay:.1f}s"
                 )
                 time.sleep(delay)
@@ -215,18 +218,18 @@ def _post(url: str, payload: dict) -> Optional[dict]:
         except requests.RequestException as e:
             if attempt < _MAX_HTTP_RETRIES:
                 delay = _retry_delay_seconds(response, attempt)
-                print(
-                    f"  [searcher] POST error (attempt {attempt + 1}/{_MAX_HTTP_RETRIES}): {e}; "
+                logger.debug(
+                    f"POST error (attempt {attempt + 1}/{_MAX_HTTP_RETRIES}): {e}; "
                     f"retrying in {delay:.1f}s"
                 )
                 time.sleep(delay)
                 continue
             if response is not None and response.status_code == 429 and _is_s2_url(url):
                 _activate_s2_cooldown(response)
-            print(f"  [searcher] POST failed: {e}")
+            logger.warning(f"POST failed: {e}")
             return None
         except Exception as e:
-            print(f"  [searcher] POST failed: {e}")
+            logger.warning(f"POST failed: {e}")
             return None
     return None
 
@@ -392,7 +395,7 @@ def _generate_hyde_abstract(query: str) -> Optional[str]:
     cache_payload = {"query": query.strip(), "model": LLM_MODEL}
     cached = _cache_load("hyde", cache_payload)
     if isinstance(cached, str) and len(cached) > 50:
-        print(f"  [HyDE] Cache hit ({len(cached)} chars)")
+        logger.debug(f"[HyDE] Cache hit ({len(cached)} chars)")
         return cached
 
     try:
@@ -417,10 +420,10 @@ def _generate_hyde_abstract(query: str) -> Optional[str]:
         result = client.generate(prompt, system=system, temperature=temperature, max_tokens=256)
         if result and len(result) > 50:
             _cache_save("hyde", cache_payload, result)
-            print(f"  [HyDE] Generated hypothetical abstract ({len(result)} chars)")
+            logger.info(f"[HyDE] Generated hypothetical abstract ({len(result)} chars)")
             return result
     except Exception as e:
-        print(f"  [HyDE] Failed: {e}")
+        logger.warning(f"[HyDE] Failed: {e}")
     return None
 
 
@@ -453,7 +456,7 @@ def _expand_query(query: str, keywords: list[str]) -> list[str]:
             if isinstance(q, str) and len(q.strip()) >= 5
         ]
         if expanded:
-            print(f"  [LLM expand] Cache hit (+{len(expanded)} queries)")
+            logger.debug(f"[LLM expand] Cache hit (+{len(expanded)} queries)")
             return expanded[:3]
 
     try:
@@ -488,11 +491,11 @@ def _expand_query(query: str, keywords: list[str]) -> list[str]:
             expanded = list(dict.fromkeys(expanded))
             if expanded:
                 _cache_save("expand_query", cache_payload, expanded[:3])
-                print(f"  [LLM expand] +{len(expanded)} queries: "
+                logger.info(f"[LLM expand] +{len(expanded)} queries: "
                       f"{', '.join(q[:40] for q in expanded[:3])}")
                 return expanded[:3]
     except Exception as e:
-        print(f"  [LLM expand] Failed: {e}")
+        logger.warning(f"[LLM expand] Failed: {e}")
     return []
 
 
@@ -556,7 +559,7 @@ def _llm_rerank(query: str, candidates: list[PaperMeta], top_n: int = 15) -> lis
             ordered = _normalize_indices(cached)
             if ordered:
                 reranked = [to_rerank[i] for i in ordered] + rest
-                print(f"  [LLM rerank] Cache hit ({len(ordered)} candidates)")
+                logger.debug(f"[LLM rerank] Cache hit ({len(ordered)} candidates)")
                 return reranked
 
         # Build paper descriptions for LLM
@@ -587,11 +590,11 @@ def _llm_rerank(query: str, candidates: list[PaperMeta], top_n: int = 15) -> lis
             if ordered:
                 _cache_save("rerank", cache_payload, ordered)
                 reranked = [to_rerank[i] for i in ordered] + rest
-                print(f"  [LLM rerank] Reranked {len(ordered)} candidates")
+                logger.info(f"[LLM rerank] Reranked {len(ordered)} candidates")
                 return reranked
 
     except Exception as e:
-        print(f"  [LLM rerank] Failed: {e}")
+        logger.warning(f"[LLM rerank] Failed: {e}")
     return candidates
 
 
@@ -640,7 +643,7 @@ def find_candidates(
     neg_ids = [m.s2_id for m in graph.rated_papers() if m.s2_id and m.user_rating is not None and m.user_rating <= 3][:5]
 
     if pos_ids:
-        print("  [search] Fetching S2 recommendations ...")
+        logger.info("Fetching S2 recommendations ...")
         add(get_s2_recommendations(pos_ids, neg_ids))
 
     # Build search queries from keywords + top-rated paper titles
@@ -673,11 +676,11 @@ def find_candidates(
 
     s2_query_cap = S2_SEARCH_QUERIES if _S2_API_KEY else min(S2_SEARCH_QUERIES, 3)
     for q in queries[:s2_query_cap]:
-        print(f"  [search] S2 search: '{q[:60]}' ...")
+        logger.info(f"S2 search: '{q[:60]}' ...")
         add(search_semantic_scholar(q, limit=S2_SEARCH_LIMIT))
 
     for q in queries[:ARXIV_SEARCH_QUERIES]:
-        print(f"  [search] ArXiv search: '{q[:60]}' ...")
+        logger.info(f"ArXiv search: '{q[:60]}' ...")
         add(search_arxiv(q, limit=ARXIV_SEARCH_LIMIT))
 
     # â”€â”€ LLM reranking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -699,7 +702,7 @@ def find_candidates(
             reverse=True,
         )
 
-    print(f"  [search] Total candidates fetched: {len(all_candidates)}")
+    logger.info(f"Total candidates fetched: {len(all_candidates)}")
     return all_candidates, hyde_embedding
 
 

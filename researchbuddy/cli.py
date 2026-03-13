@@ -21,6 +21,7 @@ Run without installing:
 from __future__ import annotations
 
 import argparse
+import logging
 import textwrap
 import time
 
@@ -939,13 +940,40 @@ def _build_parser() -> argparse.ArgumentParser:
                        help=f"Ollama model name. Default: {cfg.LLM_MODEL}")
     llm_g.add_argument("--no-llm", action="store_true",
                        help="Disable all LLM features (pure graph-based mode)")
+
+    # ── Logging ───────────────────────────────────────────────────────────────
+    p.add_argument("--log-level", type=str, default="INFO",
+                   choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                   help="Set logging verbosity (default: INFO)")
     return p
 
 
 # â”€â”€ Entry point â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+def _validate_cli_args(args: argparse.Namespace) -> None:
+    """Validate CLI argument ranges before applying to config."""
+    if args.alpha is not None and not (0.0 <= args.alpha <= 1.0):
+        raise SystemExit("Error: --alpha must be between 0.0 and 1.0")
+    if args.exploration_ratio is not None and not (0.0 <= args.exploration_ratio <= 1.0):
+        raise SystemExit("Error: --exploration-ratio must be between 0.0 and 1.0")
+    if args.similarity_threshold is not None and not (0.0 <= args.similarity_threshold <= 1.0):
+        raise SystemExit("Error: --similarity-threshold must be between 0.0 and 1.0")
+    if args.n_recommendations is not None and args.n_recommendations < 1:
+        raise SystemExit("Error: --n-recommendations must be at least 1")
+
+
 def main():
     args = _build_parser().parse_args()
+
+    # ── Logging setup ──────────────────────────────────────────────────────
+    log_level = getattr(logging, (getattr(args, "log_level", None) or "INFO").upper(), logging.INFO)
+    logging.basicConfig(
+        level=log_level,
+        format="[%(name)s] %(message)s",
+        handlers=[logging.StreamHandler()],
+    )
+
+    _validate_cli_args(args)
 
     # Apply CLI overrides to config module (affects all imports)
     if args.alpha                is not None: cfg.FUSION_ALPHA         = args.alpha

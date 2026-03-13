@@ -15,6 +15,7 @@ Relies on matplotlib only (no graphviz required).
 
 from __future__ import annotations
 
+import logging
 import textwrap
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,6 +23,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import networkx as nx
 import matplotlib
+
+logger = logging.getLogger(__name__)
 matplotlib.use("Agg")                    # headless — no GUI window
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -369,7 +372,7 @@ def save_semantic_pdf(graph: "HierarchicalResearchGraph", output_path: Path):
         _page_level_summary(pdf, graph._clusters, len(paper_ids))
         _page_stats(pdf, graph.stats(), top_papers)
 
-    print(f"[viz] Semantic network PDF saved → {output_path}")
+    logger.info("Semantic network PDF saved → %s", output_path)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -525,7 +528,7 @@ def save_citation_pdf(graph: "HierarchicalResearchGraph", output_path: Path):
         _cit_page_coupling_heatmap(pdf, G_cit, paper_ids, titles)
         _page_stats(pdf, graph.stats(), top_papers)
 
-    print(f"[viz] Citation network PDF saved → {output_path}")
+    logger.info("Citation network PDF saved → %s", output_path)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -656,7 +659,7 @@ def save_combined_pdf(graph: "HierarchicalResearchGraph", output_path: Path):
         _comb_page_edge_breakdown(pdf, graph.G_semantic, graph.G_citation, G)
         _page_stats(pdf, graph.stats(), top_papers)
 
-    print(f"[viz] Combined network PDF saved → {output_path}")
+    logger.info("Combined network PDF saved → %s", output_path)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

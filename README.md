@@ -1,6 +1,6 @@
 # ResearchBuddy
 
-> **v0.3.0** — Adaptive Hierarchical Small World Network + three-network architecture + comprehensive multi-signal prediction
+> **v0.4.0** — Adaptive Hierarchical Small World Network + Causal DAG + LLM-powered Reasoning & Creative Modes
 
 A **graph-based literature search assistant** that learns your research interests from your own PDFs and actively finds new papers for you — like a smart colleague who reads everything and brings you only what matters.
 
@@ -8,41 +8,49 @@ A **graph-based literature search assistant** that learns your research interest
 
 ## How it works
 
-ResearchBuddy builds **three interconnected networks** from your literature:
+ResearchBuddy builds **four interconnected networks** from your literature:
 
 ```
 Your PDF folder
       │
       ▼  (NLP embeddings via sentence-transformers)
-┌─────────────────────────────────────────────────────────────────┐
-│             Semantic Network  (HSWN — auto-levelled)            │
-│                                                                 │
-│  Level 3 (Domain)    [D1]──────────[D2]                         │
-│                       │             │                           │
-│  Level 2 (Area)    [A1]  [A2]    [A3]  [A4]                     │
-│                     │    │        │    │                         │
-│  Level 1 (Niche) [N1][N2][N3]  [N4][N5][N6]                     │
-│                   │   │   │     │   │   │                       │
-│  Level 0 (Paper) [p1][p2][p3] [p4][p5][p6]                      │
-│                   ←── dense intra-niche edges ───►              │
-│                   ←── sparse cross-niche shortcuts ─►           │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│             Semantic Network  (HSWN — auto-levelled)               │
+│                                                                    │
+│  Level 3 (Domain)    [D1]──────────[D2]                            │
+│                       │             │                              │
+│  Level 2 (Area)    [A1]  [A2]    [A3]  [A4]                        │
+│                     │    │        │    │                            │
+│  Level 1 (Niche) [N1][N2][N3]  [N4][N5][N6]                       │
+│                   │   │   │     │   │   │                          │
+│  Level 0 (Paper) [p1][p2][p3] [p4][p5][p6]                        │
+│                   ←── dense intra-niche edges ───►                 │
+│                   ←── sparse cross-niche shortcuts ─►              │
+└─────────────────────────────────────────────────────────────────────┘
       +
-┌─────────────────────────────────────────────────────────────────┐
-│             Citation Network  (directed)                        │
-│                                                                 │
-│  [Paper A] ──cites──► [Paper B] ──cites──► [Paper C]            │
-│      │                                          │               │
-│      └── bibliographic coupling ──────────────►┘               │
-│      └── co-citation (both cited by [X]) ──────►               │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│             Citation Network  (directed)                           │
+│                                                                    │
+│  [Paper A] ──cites──► [Paper B] ──cites──► [Paper C]              │
+│      │                                          │                  │
+│      └── bibliographic coupling ────────────────►┘                 │
+│      └── co-citation (both cited by [X]) ────────►                 │
+└─────────────────────────────────────────────────────────────────────┘
       │
       ▼  (Similarity Network Fusion — Wang et al. 2014)
-┌─────────────────────────────────────────────────────────────────┐
-│             Combined Network  (fused, multi-modal)              │
-│  SNF iteratively diffuses information between both networks     │
-│  amplifying consistent signals, dampening noise                 │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│             Combined Network  (fused, multi-modal)                 │
+│  SNF iteratively diffuses information between both networks        │
+│  amplifying consistent signals, dampening noise                    │
+└─────────────────────────────────────────────────────────────────────┘
+      │
+      ▼  (Temporal ordering + citation direction)
+┌─────────────────────────────────────────────────────────────────────┐
+│             Causal DAG  (directed acyclic graph)                   │
+│  Edges oriented by publication year + citation direction            │
+│  Cycles broken by removing weakest-confidence edge                 │
+│  Temporal anomalies flagged automatically                          │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 After each session, **three separate PDFs** are generated in `~/.researchbuddy/`:
@@ -55,30 +63,56 @@ After each session, **three separate PDFs** are generated in `~/.researchbuddy/`
 
 ---
 
+## Features
+
+### Interactive Paper Search (Option 1)
+
+Search for papers using natural language queries. ResearchBuddy combines Semantic Scholar and ArXiv APIs to find candidates, then ranks them using a multi-signal scoring system. Rate each paper 1–10 to teach the graph your preferences.
+
+### Reasoning Mode (Option 7)
+
+Uses a local LLM (via Ollama) to answer research questions grounded in your graph. The reasoner identifies relevant papers using PageRank + keyword matching, then generates answers with citations. Supports follow-up questions in an interactive session.
+
+### Creative Mode (Option 8)
+
+Generates structured argument paragraphs connecting papers in your graph. Each paragraph includes claims, evidence, and citations. Rate the generated arguments to improve future quality.
+
+### Causal DAG & Edge Auditing (Option 10)
+
+View low-confidence citation edges, temporal anomalies (e.g., a 2020 paper citing a 2025 paper), and metadata quality issues. Helps identify weak spots in your literature network.
+
+### Quality & Reliability Report (Option 11)
+
+Generates a diagnostic report covering graph connectivity, metadata completeness, and citation coverage.
+
+### Topology Evolution Tracking
+
+Timestamped graph snapshots stored automatically. Visualize how your research graph grows and changes over time with `researchbuddy-evolution`.
+
+---
+
 ## Key algorithms
 
-### Adaptive Hierarchy (new in v0.3.0)
+### Adaptive Hierarchy
 
 The number of hierarchy levels is **determined automatically** by the data — no user input needed.
 
 1. Compute pairwise distances between paper embeddings (PCA-reduced for stability)
 2. Build a **Ward-linkage dendrogram** (scipy)
 3. Detect "phase transitions" in merge distances using **two complementary signals**:
-   - **Acceleration peaks** (second derivative of merge-distance sequence, threshold = mean + 0.8 × std)
-   - **Relative jump ratio** (Δdistance / distance, 75th-percentile threshold)
+   - **Acceleration peaks** (second derivative of merge-distance sequence)
+   - **Relative jump ratio** (threshold at 75th percentile)
 4. Each combined peak becomes a hierarchy level cut
-5. Fallback: always ensure at least one k ≈ √n level exists
-6. Result: 1–8 levels depending on how many genuine structural breaks exist
-
-This means small corpora naturally collapse to 1–2 levels, large diverse corpora expand to 3–5+ levels automatically.
+5. Fallback: at least one level near k ≈ √n
+6. Result: 1–8 levels depending on structural breaks in the data
 
 ### Small-World Structure
 
 Within each detected level:
 - **Dense intra-niche edges** (cosine similarity ≥ threshold) connect similar papers
-- **Sparse shortcut edges** between niches (best paper-pair across niche boundary, if similarity ≥ threshold + 0.15) create small-world navigation paths
+- **Sparse shortcut edges** between niches create small-world navigation paths
 
-### Five-Signal Prediction
+### Multi-Signal Prediction
 
 Candidate papers are scored using five complementary signals:
 
@@ -90,18 +124,13 @@ Candidate papers are scored using five complementary signals:
 | 4 | **Citation coupling** (bibliographic coupling + co-citation with existing papers) | 2 × (1 − α) |
 | 5 | **SNF-fused adjacency** approximation (proximity to top-rated papers in fused space) | 1.5 |
 
-All signals are combined as a weighted mean and clipped to [0, 1].
-
 ### Similarity Network Fusion (SNF)
 
-The semantic and citation similarity matrices are fused via iterative cross-network diffusion:
+The semantic and citation similarity matrices are fused via iterative cross-network diffusion (Wang et al. 2014). If citation data is too sparse (< 5% non-zero), SNF falls back to the semantic matrix directly.
 
-1. Build KNN kernel (k=10) for each network
-2. Alternately diffuse: `P1 ← K1 @ P2 @ K1ᵀ`, `P2 ← K2 @ P1 @ K2ᵀ`
-3. Row-normalise after each step
-4. Final: `W_fused = α·P1 + (1-α)·P2`, symmetrised and min-max scaled
+### Causal DAG Construction
 
-If citation data is too sparse (< 5% non-zero compared to semantic), SNF falls back to the semantic matrix directly.
+Edges are oriented by publication year and citation direction, then cycles are broken by removing the weakest-confidence edge in each cycle. Temporal anomalies (future citations, missing years) are flagged automatically.
 
 ---
 
@@ -117,12 +146,24 @@ cd ResearchBuddy
 pip install -e .
 ```
 
-**Requirements:** Python ≥ 3.9, and the following packages (installed automatically):
+**Requirements:** Python ≥ 3.9. Dependencies are installed automatically:
 
 ```
 sentence-transformers  networkx  pdfplumber  requests  numpy
 scikit-learn  scipy  rich  keybert  matplotlib
 ```
+
+### Optional: LLM integration (Reasoning & Creative Modes)
+
+Options 7 and 8 require a local LLM via [Ollama](https://ollama.ai/):
+
+```bash
+# Install Ollama, then pull a model
+ollama pull mistral
+# Or any model — configure in option 9 (LLM status & setup)
+```
+
+ResearchBuddy works fully without an LLM — options 7–9 simply won't be available.
 
 ---
 
@@ -157,15 +198,46 @@ python -m researchbuddy --pdf /path/to/pdf/folder
   [4] Fetch citation data (improves fusion quality)
   [5] Resolve Semantic Scholar IDs for seed papers
   [6] Rebuild hierarchy & regenerate all graph PDFs
+  [7] Query your research network (Reasoning Mode)
+  [8] Creative Mode — generate & rate argument paragraphs
+  [9] LLM status & setup
+  [10] Audit graph edges (low-confidence & anomalies)
+  [11] Quality & reliability report
   [q] Save & quit
 ```
 
-After searching, you rate each suggested paper 1–10:
+After searching (option 1), you rate each suggested paper 1–10:
 - **7–10** → highly relevant, paper added to graph with high weight
 - **4–6** → moderate, added with medium weight
 - **1–3** → low relevance, used as negative signal
 
 The graph and all three PDF maps are updated after each session.
+
+---
+
+## Topology Evolution
+
+ResearchBuddy stores timestamped graph snapshots in `~/.researchbuddy/history/` on each save. Visualize topology evolution:
+
+```bash
+researchbuddy-evolution
+# or
+python -m researchbuddy.evolution
+```
+
+Outputs are written to `~/.researchbuddy/evolution/`:
+
+- `graph_evolution_metrics.csv`  — per-snapshot graph-theory metrics
+- `graph_evolution_timeline.png` — timeline plots (growth, density, clustering, modularity, etc.)
+- `graph_evolution_summary.txt`  — textual trend summary
+
+Useful flags:
+
+```bash
+researchbuddy-evolution --max-snapshots 200
+researchbuddy-evolution --no-current
+researchbuddy-evolution --out-dir /custom/path
+```
 
 ---
 
@@ -182,8 +254,28 @@ All parameters override `config.py` defaults for the current session:
 | `--similarity-threshold FLOAT` | 0.45 | Min cosine similarity to draw a semantic edge |
 | `--n-recommendations INT` | 10 | Papers shown per search session |
 | `--no-plot` | — | Disable PDF generation after each session |
+| `--log-level` | WARNING | Logging verbosity: DEBUG, INFO, WARNING, ERROR |
 
 Hierarchy depth is **not** a CLI parameter — it is determined automatically by the data.
+
+---
+
+## Testing
+
+The test suite uses mock embeddings and requires no GPU or model downloads:
+
+```bash
+# Install test dependencies
+pip install -e ".[test]"
+
+# Run all tests
+pytest tests/
+
+# Run a specific test file
+pytest tests/test_graph_model.py -v
+```
+
+Tests cover: graph model operations, embedder utilities, PDF text processing, causal DAG construction, citation network analysis, and the reasoning engine.
 
 ---
 
@@ -210,26 +302,41 @@ Persistent defaults live in `researchbuddy/config.py`:
 ```
 ResearchBuddy/
 ├── researchbuddy/
-│   ├── __init__.py           # version
-│   ├── __main__.py           # python -m researchbuddy
-│   ├── cli.py                # interactive CLI
-│   ├── config.py             # all constants
+│   ├── __init__.py              # version
+│   ├── __main__.py              # python -m researchbuddy
+│   ├── cli.py                   # interactive CLI (11 menu options)
+│   ├── config.py                # all constants
+│   ├── evolution.py             # topology evolution analysis
 │   └── core/
-│       ├── pdf_processor.py  # pdfplumber → chunks + metadata
-│       ├── embedder.py       # sentence-transformers singleton
-│       ├── hierarchy.py      # adaptive Ward HSWN algorithm
-│       ├── citation_network.py # bibliographic coupling + co-citation
-│       ├── fusion.py         # SNF (Wang et al. 2014)
-│       ├── graph_model.py    # HierarchicalResearchGraph (3 networks)
-│       ├── searcher.py       # Semantic Scholar + ArXiv APIs
-│       ├── state_manager.py  # pickle save/load + PDF import
-│       └── visualizer.py     # 3-PDF matplotlib renderer
+│       ├── pdf_processor.py     # pdfplumber → chunks + metadata
+│       ├── embedder.py          # sentence-transformers singleton
+│       ├── hierarchy.py         # adaptive Ward HSWN algorithm
+│       ├── citation_network.py  # bibliographic coupling + co-citation
+│       ├── citation_classifier.py # citation edge classification
+│       ├── fusion.py            # SNF (Wang et al. 2014)
+│       ├── graph_model.py       # HierarchicalResearchGraph (4 networks)
+│       ├── causal.py            # causal DAG construction + anomaly detection
+│       ├── reasoner.py          # LLM-powered research Q&A
+│       ├── arguer.py            # creative argument generation
+│       ├── llm.py               # Ollama LLM interface
+│       ├── searcher.py          # Semantic Scholar + ArXiv APIs
+│       ├── state_manager.py     # pickle save/load + PDF import
+│       └── visualizer.py        # 3-PDF matplotlib renderer
+├── tests/
+│   ├── conftest.py              # shared fixtures + mock embedder
+│   ├── test_graph_model.py      # graph operations + scoring
+│   ├── test_embedder.py         # cosine similarity + torchvision guard
+│   ├── test_pdf_processor.py    # text cleaning + DOI extraction
+│   ├── test_reasoner.py         # keyword scoring + PageRank caching
+│   ├── test_citation_network.py # DOI normalization + coupling
+│   └── test_causal.py           # edge orientation + cycle breaking
 ├── pyproject.toml
 └── README.md
 ```
 
 **Persistent data** is stored in `~/.researchbuddy/`:
 - `research_graph.pkl` — saved graph state
+- `history/` — timestamped graph snapshots
 - `network_semantic.pdf` — NLP network visualization
 - `network_citation.pdf` — citation network visualization
 - `network_combined.pdf` — combined network visualization

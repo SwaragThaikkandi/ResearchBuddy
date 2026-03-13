@@ -48,6 +48,9 @@ from researchbuddy.core.fusion import snf, fuse_scores
 from researchbuddy.core.reasoner import QueryInteraction
 from researchbuddy.core.arguer import ArgumentInteraction, StyleProfile
 
+import logging
+logger = logging.getLogger(__name__)
+
 
 # ── Paper data model ───────────────────────────────────────────────────────────
 
@@ -170,7 +173,7 @@ class HierarchicalResearchGraph:
             n_missing = sum(1 for m in self._papers.values()
                             if m.paper_id not in self._refs)
             if n_missing > 0:
-                print(f"[graph] Auto-fetching citations for {n_missing} papers ...")
+                logger.info("Auto-fetching citations for %d papers ...", n_missing)
                 self.fetch_citations(verbose=True)
         papers_with_emb = [m for m in self._papers.values() if m.embedding is not None]
         if len(papers_with_emb) < 3:
@@ -198,10 +201,12 @@ class HierarchicalResearchGraph:
 
         n_found = n_levels_detected(clusters)
         if n_found:
-            print(f"[graph] Hierarchy: {n_found} level(s) detected automatically "
-                  f"({sum(1 for c in clusters.values() if c.level==1)} niches, "
-                  f"{sum(1 for c in clusters.values() if c.level==2)} areas"
-                  + (f", {sum(1 for c in clusters.values() if c.level>=3)} higher)" if n_found>=3 else ")"))
+            logger.info("Hierarchy: %d level(s) detected automatically "
+                  "(%d niches, %d areas%s",
+                  n_found,
+                  sum(1 for c in clusters.values() if c.level==1),
+                  sum(1 for c in clusters.values() if c.level==2),
+                  f", {sum(1 for c in clusters.values() if c.level>=3)} higher)" if n_found>=3 else ")")
 
         # ── 2. Citation graph ─────────────────────────────────────────────
         s2_ids = [self._papers[pid].s2_id for pid in ids]
@@ -234,7 +239,7 @@ class HierarchicalResearchGraph:
             from researchbuddy.core.citation_classifier import annotate_citation_types
             annotate_citation_types(self.G_citation, self._papers)
         except Exception as e:
-            print(f"[graph] Citation type annotation skipped: {e}")
+            logger.warning("Citation type annotation skipped: %s", e)
 
         # ── 6. Causal DAG (acyclic influence flow) ────────────────────────
         try:
@@ -244,10 +249,11 @@ class HierarchicalResearchGraph:
                 self.G, self.G_citation, self._papers,
                 min_confidence=CAUSAL_CONFIDENCE_THRESHOLD,
             )
-            print(f"[graph] Causal DAG: {self.G_causal.number_of_edges()} edges, "
-                  f"acyclic={nx.is_directed_acyclic_graph(self.G_causal)}")
+            logger.info("Causal DAG: %d edges, acyclic=%s",
+                  self.G_causal.number_of_edges(),
+                  nx.is_directed_acyclic_graph(self.G_causal))
         except Exception as e:
-            print(f"[graph] Causal DAG construction skipped: {e}")
+            logger.warning("Causal DAG construction skipped: %s", e)
             self.G_causal = nx.DiGraph()
             self._edge_anomalies = []
 
@@ -458,16 +464,16 @@ class HierarchicalResearchGraph:
             new_title, new_doi = reextract_title_doi(fp)
             if new_title and new_title != meta.title:
                 if verbose:
-                    print(f"  [title fix] {(meta.title or '')[:35]!r}"
-                          f" → {new_title[:50]!r}")
+                    logger.info("  [title fix] %r → %r",
+                          (meta.title or '')[:35], new_title[:50])
                 meta.title = new_title
                 n_title_fixed += 1
             if new_doi and not getattr(meta, 'doi', ''):
                 meta.doi = new_doi
                 n_doi_fixed += 1
         if verbose and (n_title_fixed or n_doi_fixed):
-            print(f"[graph] Re-extracted from PDFs:"
-                  f" {n_title_fixed} titles, {n_doi_fixed} DOIs fixed.")
+            logger.info("Re-extracted from PDFs: %d titles, %d DOIs fixed.",
+                  n_title_fixed, n_doi_fixed)
 
         # ── Step 1: Scan text for DOIs not extracted during import ────────
         for meta in self._papers.values():
@@ -482,10 +488,10 @@ class HierarchicalResearchGraph:
                 if m.paper_id not in self._refs]
         if not need:
             if verbose:
-                print("[graph] Citation data already up to date.")
+                logger.info("Citation data already up to date.")
             return
         if verbose:
-            print(f"[graph] Fetching citations for {len(need)} papers ...")
+            logger.info("Fetching citations for %d papers ...", len(need))
         self._refs = fetch_all_refs(
             need, existing=self._refs, verbose=verbose,
             ref_sources_out=self._ref_sources,
@@ -1062,7 +1068,7 @@ class HierarchicalResearchGraph:
             # If refs are s2-keyed, reset — they will be re-fetched via OpenAlex.
             paper_id_set = set(getattr(self, "_papers", {}).keys())
             if self._refs and not any(k in paper_id_set for k in self._refs):
-                print("[graph] Migrating citation refs to new format (will re-fetch) ...")
+                logger.info("Migrating citation refs to new format (will re-fetch) ...")
                 self._refs = {}
         if not hasattr(self, "_fused_W"):
             self._fused_W = None
@@ -1104,7 +1110,7 @@ class HierarchicalResearchGraph:
         # Rebuild three networks from scratch if we only have the old single G
         if (self.G_semantic.number_of_nodes() == 0
                 and len(self._papers) >= 3):
-            print("[graph] Migrating v0.2.0 graph to v0.3.0 three-network format ...")
+            logger.info("Migrating v0.2.0 graph to v0.3.0 three-network format ...")
             # Seed all paper nodes into the three graphs
             for meta in self._papers.values():
                 for graph in (self.G_semantic, self.G_citation, self.G):
@@ -1132,7 +1138,7 @@ class HierarchicalResearchGraph:
             for G in (new.G_semantic, new.G_citation, new.G, new.G_causal):
                 G.add_node(meta.paper_id, level=0, node_type="paper",
                            weight=meta.effective_weight)
-        print(f"[graph] Migrated {len(new._papers)} papers from legacy format.")
+        logger.info("Migrated %d papers from legacy format.", len(new._papers))
         return new
 
 

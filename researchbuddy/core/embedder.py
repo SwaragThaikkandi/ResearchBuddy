@@ -6,10 +6,14 @@ Loaded once per process; all modules share the same instance.
 
 from __future__ import annotations
 
+import importlib.machinery
+import logging
 import numpy as np
 import sys
 import types
 from typing import Union
+
+logger = logging.getLogger(__name__)
 
 _model = None
 _device = None
@@ -39,10 +43,16 @@ def _guard_torchvision():
 
     try:
         import torchvision  # noqa: F401 - test if it loads
-    except Exception:
+    except (Exception, ValueError):
         # Build a minimal stub.
         tv = types.ModuleType("torchvision")
         tv.__path__ = []  # mark as package
+        # importlib.util.find_spec() crashes with ValueError when __spec__
+        # is None.  transformers.utils.import_utils calls find_spec() during
+        # is_torchvision_available() — setting a proper ModuleSpec avoids this.
+        tv.__spec__ = importlib.machinery.ModuleSpec(
+            "torchvision", None, is_package=True,
+        )
 
         transforms = types.ModuleType("torchvision.transforms")
         transforms.InterpolationMode = type(
@@ -62,18 +72,33 @@ def _guard_torchvision():
         functional = types.ModuleType("torchvision.transforms.functional")
         tv.transforms.functional = functional
 
+        # Set __spec__ on every sub-module so importlib.util.find_spec()
+        # never encounters __spec__ = None.
+        for mod_name, mod_obj in [
+            ("torchvision", tv),
+            ("torchvision.transforms", transforms),
+            ("torchvision.transforms.functional", functional),
+        ]:
+            if mod_obj.__spec__ is None:
+                mod_obj.__spec__ = importlib.machinery.ModuleSpec(
+                    mod_name, None, is_package="." not in mod_name,
+                )
+
+        meta_reg = types.ModuleType("torchvision._meta_registrations")
+        meta_reg.__spec__ = importlib.machinery.ModuleSpec(
+            "torchvision._meta_registrations", None,
+        )
+
         sys.modules["torchvision"] = tv
         sys.modules["torchvision.transforms"] = transforms
         sys.modules["torchvision.transforms.functional"] = functional
-        sys.modules["torchvision._meta_registrations"] = types.ModuleType(
-            "torchvision._meta_registrations"
-        )
+        sys.modules["torchvision._meta_registrations"] = meta_reg
 
-        print(
-            "[embedder] Warning: torchvision is broken or missing; "
+        logger.info(
+            "torchvision is broken or missing; "
             "stubbed out (not needed for text embeddings)."
         )
-        print("[embedder] To fix permanently: pip install --upgrade torch torchvision")
+        logger.info("To fix permanently: pip install --upgrade torch torchvision")
 
 
 def _cuda_status() -> tuple[bool, str]:
@@ -112,15 +137,15 @@ def _resolve_device() -> str:
     if EMBEDDING_DEVICE == "cuda":
         if cuda_ok:
             return "cuda"
-        print(f"[embedder] CUDA requested but unavailable: {detail}")
-        print("[embedder] Falling back to CPU.")
+        logger.warning("CUDA requested but unavailable: %s", detail)
+        logger.info("Falling back to CPU.")
         return "cpu"
 
     # "auto" - try CUDA first
     if cuda_ok:
         return "cuda"
 
-    print(f"[embedder] CUDA not usable ({detail}); using CPU.")
+    logger.info("CUDA not usable (%s); using CPU.", detail)
     return "cpu"
 
 
@@ -132,20 +157,20 @@ def _get_model():
         from researchbuddy.config import EMBEDDING_MODEL
 
         _device = _resolve_device()
-        print(f"[embedder] Loading '{EMBEDDING_MODEL}' on {_device} ...")
+        logger.info("Loading '%s' on %s ...", EMBEDDING_MODEL, _device)
 
         try:
             _model = SentenceTransformer(EMBEDDING_MODEL, device=_device)
         except Exception as e:
             if _device == "cuda":
-                print(f"[embedder] CUDA model load failed: {e}")
-                print("[embedder] Retrying on CPU.")
+                logger.warning("CUDA model load failed: %s", e)
+                logger.info("Retrying on CPU.")
                 _device = "cpu"
                 _model = SentenceTransformer(EMBEDDING_MODEL, device=_device)
             else:
                 raise
 
-        print(f"[embedder] Model ready ({_device}).")
+        logger.info("Model ready (%s).", _device)
     return _model
 
 
