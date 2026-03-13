@@ -4,9 +4,9 @@ Fetch candidate papers from Semantic Scholar and ArXiv (both free, no key needed
 Falls back gracefully if a source is unreachable.
 
 LLM enhancements (optional, degrade gracefully when Ollama is unavailable):
-  * HyDE â€” Hypothetical Document Embeddings for superior semantic matching
-  * Query expansion â€” LLM generates alternative search formulations
-  * LLM reranking â€” reranks top candidates by semantic relevance
+  * HyDE â€" Hypothetical Document Embeddings for superior semantic matching
+  * Query expansion â€" LLM generates alternative search formulations
+  * LLM reranking â€" reranks top candidates by semantic relevance
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import numpy as np
 import requests
 
 from researchbuddy.config import (
-    S2_SEARCH_URL, S2_REC_URL,
+    S2_SEARCH_URL, S2_REC_URL, S2_PAPER_URL,
     ARXIV_SEARCH_URL, MAX_SEARCH_RESULTS, REQUEST_TIMEOUT, REQUEST_DELAY,
     S2_SEARCH_QUERIES, S2_SEARCH_LIMIT, ARXIV_SEARCH_QUERIES, ARXIV_SEARCH_LIMIT,
 )
@@ -148,7 +148,7 @@ def _cache_save(namespace: str, payload: dict, value: Any):
     except Exception:
         pass
 
-# â”€â”€ Internal helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€ Internal helpers â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 def _get(url: str, params: dict) -> Optional[dict | str]:
     if _is_s2_url(url):
@@ -246,7 +246,7 @@ def _s2_to_meta(item: dict) -> Optional[PaperMeta]:
     arxiv_id = ext_ids.get("ArXiv", "")
     url      = item.get("url") or (f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else "")
 
-    # â”€â”€ Publication venue / peer-review status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # â"€â"€ Publication venue / peer-review status â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
     venue_info = item.get("publicationVenue") or {}
     venue_name = venue_info.get("name", "")
     venue_type = venue_info.get("type", "")   # "Journal", "Conference", "Book", etc.
@@ -274,7 +274,7 @@ def _s2_to_meta(item: dict) -> Optional[PaperMeta]:
     )
 
 
-# â”€â”€ Semantic Scholar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€ Semantic Scholar â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 def search_semantic_scholar(query: str, limit: int = MAX_SEARCH_RESULTS) -> list[PaperMeta]:
     data = _get(S2_SEARCH_URL, {"query": query, "limit": min(limit, 100), "fields": S2_FIELDS})
@@ -313,7 +313,33 @@ def get_s2_recommendations(
     return results
 
 
-# â”€â”€ ArXiv â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Forward citations ──────────────────────────────────────────────────────────
+
+def fetch_forward_citations(s2_id: str, limit: int = 20) -> list[PaperMeta]:
+    """
+    Fetch papers that CITE the given S2 paper (forward/incoming citations).
+
+    This is complementary to recommendations: recommendations find similar
+    papers, while forward citations find papers that *build on* this one —
+    often the most directly relevant follow-up work.
+    """
+    if not s2_id:
+        return []
+    url = f"{S2_PAPER_URL}/{s2_id}/citations"
+    data = _get(url, {"fields": S2_FIELDS, "limit": min(limit, 100)})
+    if not data or not isinstance(data, dict):
+        return []
+    results = []
+    for item in data.get("data", []):
+        citing = item.get("citingPaper", {})
+        m = _s2_to_meta(citing)
+        if m:
+            results.append(m)
+    time.sleep(REQUEST_DELAY)
+    return results
+
+
+# â"€â"€ ArXiv â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 def search_arxiv(query: str, limit: int = MAX_SEARCH_RESULTS) -> list[PaperMeta]:
     xml_text = _get(ARXIV_SEARCH_URL, {
@@ -371,7 +397,7 @@ def search_arxiv(query: str, limit: int = MAX_SEARCH_RESULTS) -> list[PaperMeta]
     return results
 
 
-# â”€â”€ LLM-enhanced search helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€ LLM-enhanced search helpers â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 def _generate_hyde_abstract(query: str) -> Optional[str]:
     """
@@ -598,7 +624,7 @@ def _llm_rerank(query: str, candidates: list[PaperMeta], top_n: int = 15) -> lis
     return candidates
 
 
-# â”€â”€ High-level orchestrator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€ High-level orchestrator â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 def find_candidates(
     graph: ResearchGraph,
@@ -619,16 +645,30 @@ def find_candidates(
     """
     all_candidates: list[PaperMeta] = []
     seen_ids: set[str] = set()
+    seen_arxiv_ids: set[str] = set()
+    seen_dois: set[str] = set()
     hyde_embedding: Optional[np.ndarray] = None
     from researchbuddy.config import DETERMINISTIC_MODE
 
     def add(papers: list[PaperMeta]):
         for p in papers:
-            if p.paper_id not in seen_ids:
-                seen_ids.add(p.paper_id)
-                all_candidates.append(p)
+            # Primary dedup by paper_id
+            if p.paper_id in seen_ids:
+                continue
+            # Cross-source dedup: same ArXiv preprint may appear from S2 and ArXiv
+            if p.arxiv_id and p.arxiv_id in seen_arxiv_ids:
+                continue
+            # Cross-source dedup: same DOI from different S2 IDs
+            if p.doi and p.doi in seen_dois:
+                continue
+            seen_ids.add(p.paper_id)
+            if p.arxiv_id:
+                seen_arxiv_ids.add(p.arxiv_id)
+            if p.doi:
+                seen_dois.add(p.doi)
+            all_candidates.append(p)
 
-    # â”€â”€ HyDE: generate hypothetical abstract â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── HyDE: generate hypothetical abstract ─────────────────────────────────
     if query:
         hyde_abstract = _generate_hyde_abstract(query)
         if hyde_abstract:
@@ -645,6 +685,13 @@ def find_candidates(
     if pos_ids:
         logger.info("Fetching S2 recommendations ...")
         add(get_s2_recommendations(pos_ids, neg_ids))
+
+    # ── Forward citation expansion: papers that build on highly-rated work ───
+    # Cap at 3 papers to limit API calls; skip if S2 cooldown is active
+    if pos_ids and not _s2_cooldown_remaining():
+        for s2_id in pos_ids[:3]:
+            logger.info(f"Fetching forward citations for S2:{s2_id[:12]} ...")
+            add(fetch_forward_citations(s2_id, limit=15))
 
     # Build search queries from keywords + top-rated paper titles
     keywords = graph.top_seed_keywords(n=6)
@@ -666,7 +713,7 @@ def find_candidates(
     for m in top_rated:
         queries.append(m.title)
 
-    # â”€â”€ LLM query expansion â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # â"€â"€ LLM query expansion â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
     if query:
         expanded = _expand_query(query, keywords)
         queries = expanded + queries   # LLM expansions go first
@@ -683,11 +730,11 @@ def find_candidates(
         logger.info(f"ArXiv search: '{q[:60]}' ...")
         add(search_arxiv(q, limit=ARXIV_SEARCH_LIMIT))
 
-    # â”€â”€ LLM reranking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # â"€â"€ LLM reranking â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
     if query and all_candidates:
         all_candidates = _llm_rerank(query, all_candidates)
 
-    # â”€â”€ Soft prioritization: peer-reviewed before preprints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # â"€â"€ Soft prioritization: peer-reviewed before preprints â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
     if DETERMINISTIC_MODE:
         all_candidates.sort(
             key=lambda p: (

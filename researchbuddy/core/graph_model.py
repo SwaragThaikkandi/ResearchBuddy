@@ -607,6 +607,17 @@ class HierarchicalResearchGraph:
         score_parts.append(pub_q)
         weight_parts.append(0.5)   # light weight — nudge, not dominate
 
+        # ── 7. Recency boost ──────────────────────────────────────────────
+        # Linear decay: 0 years old → 1.0, 10 years → 0.5, 20+ years → 0.0
+        # Weight is light (0.3) so it nudges but doesn't dominate.
+        if meta.year is not None:
+            import datetime
+            current_year = datetime.datetime.now().year
+            age = max(0, current_year - meta.year)
+            recency = max(0.0, 1.0 - age / 20.0)
+            score_parts.append(recency)
+            weight_parts.append(0.3)
+
         if not score_parts:
             return 0.0
 
@@ -679,6 +690,10 @@ class HierarchicalResearchGraph:
         """
         How far is this paper from ALL existing papers AND cluster centroids?
         High novelty = useful for exploration.
+
+        Uses the mean of the 3 highest cosine similarities (instead of the
+        single max) so that one near-duplicate paper doesn't falsely mark a
+        paper as low-novelty when it's otherwise distant from the corpus.
         """
         if meta.embedding is None:
             return 0.0
@@ -687,8 +702,12 @@ class HierarchicalResearchGraph:
         embs += [nd.centroid for nd in self._clusters.values()]
         if not embs:
             return 1.0
-        max_sim = max(float(cosine_similarity(meta.embedding, e)) for e in embs)
-        return float(1.0 - max_sim)
+        sims = sorted(
+            (float(cosine_similarity(meta.embedding, e)) for e in embs),
+            reverse=True,
+        )
+        top_k = sims[:min(3, len(sims))]
+        return float(1.0 - np.mean(top_k))
 
     # ── Ranking ────────────────────────────────────────────────────────────────
 
@@ -728,6 +747,11 @@ class HierarchicalResearchGraph:
                 hyde_sim = float(cosine_similarity(hyde_embedding, c.embedding))
                 hyde_sim = max(0.0, hyde_sim)  # clamp negatives
                 rel = rel * 0.6 + hyde_sim * 0.4
+
+            # Diminishing-returns penalty for papers shown many times already.
+            # Factor: 1.0 (never shown) → ~0.57 (shown 5×) → ~0.33 (shown 10×)
+            if c.times_shown > 0:
+                rel = rel / (1.0 + c.times_shown * 0.15)
 
             novel = self.novelty_score(c)
             scored.append((c, rel, novel))
