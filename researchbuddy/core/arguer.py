@@ -667,6 +667,8 @@ def _extract_theme(query: str, papers: list["PaperMeta"]) -> str:
     if current:
         phrases.append(' '.join(current))
 
+    if len(phrases) >= 3:
+        return f"{phrases[0]}, {phrases[1]}, and {phrases[2]}"
     if len(phrases) >= 2:
         return f"{phrases[0]} and {phrases[1]}"
     if phrases:
@@ -686,6 +688,117 @@ def _extract_theme(query: str, papers: list["PaperMeta"]) -> str:
     return "this research area"
 
 
+# ── Query-aware helpers ────────────────────────────────────────────────────────
+
+def _query_terms(query: str) -> set[str]:
+    """Extract meaningful content words from the query."""
+    words = re.split(r'\W+', query.lower())
+    return {w for w in words if w and len(w) > 3 and w not in _THEME_STOP}
+
+
+def _sentence_query_overlap(sentence: str, query_terms: set[str]) -> float:
+    """Score a sentence by the fraction of query terms it contains."""
+    if not sentence or not query_terms:
+        return 0.0
+    s_words = set(re.split(r'\W+', sentence.lower()))
+    return len(query_terms & s_words) / len(query_terms)
+
+
+def _extract_query_relevant_claim(
+    abstract: str,
+    query: str,
+    max_len: int = 110,
+    title: str = "",
+) -> str:
+    """
+    Find the sentence in the abstract most relevant to the query.
+    Scores each readable sentence by overlap with query content words;
+    falls back to _extract_main_claim if no query-relevant sentence found.
+    """
+    q_terms = _query_terms(query)
+    good = _readable_sentences(abstract)
+    if q_terms and good:
+        scored = sorted(
+            ((s, _sentence_query_overlap(s, q_terms)) for s in good),
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        best, score = scored[0]
+        if score > 0.08:
+            claim = best.strip()[:max_len].lower().rstrip('.,;:')
+            if _claim_looks_clean(claim) and len(claim) > 15:
+                return claim + ('...' if len(best) > max_len else '')
+    return _extract_main_claim(abstract, max_len=max_len, title=title)
+
+
+_QUERY_INTENT_PATTERNS: dict[str, re.Pattern] = {
+    ARG_EVOLUTION: re.compile(
+        r'\b(?:evolv|evolution|histor|how\s+has|changed|changing|progress|'
+        r'over\s+time|temporal|decades?|timeline|early|later|recent|traditional|modern)\b',
+        re.I,
+    ),
+    ARG_CONVERGENCE: re.compile(
+        r'\b(?:agree|agreement|consensus|converg|support|consistent|replicated|'
+        r'robust|established|confirmed|evidence\s+for)\b',
+        re.I,
+    ),
+    ARG_TENSION: re.compile(
+        r'\b(?:conflict|disagree|debate|tension|contradict|competing|controversial|'
+        r'challenge|opposing|different\s+view|vs\.?\s|versus|dispute)\b',
+        re.I,
+    ),
+    ARG_GAP: re.compile(
+        r'\b(?:gap|missing|lack|future|open\s+question|unresolved|unclear|unknown|'
+        r'unexplored|understudied|not\s+yet|limited)\b',
+        re.I,
+    ),
+    ARG_SYNTHESIS: re.compile(
+        r'\b(?:synthesiz|integrat|combin|bridge|multiple|different\s+approaches?|'
+        r'cross[-\s]disciplin|connect|link|relationship\s+between)\b',
+        re.I,
+    ),
+}
+
+
+def _detect_query_intent(query: str) -> dict[str, float]:
+    """
+    Detect which argument types the query is implicitly asking for.
+    Returns boost weights: 3.0 = strong match, 1.0 = neutral.
+    When a query matches a specific intent pattern, that argument type
+    is sampled with 3× higher probability during type selection.
+    """
+    boosts = {t: 1.0 for t in _ALL_ARG_TYPES}
+    for arg_type, pattern in _QUERY_INTENT_PATTERNS.items():
+        if pattern.search(query):
+            boosts[arg_type] = 3.0
+    return boosts
+
+
+def _gap_from_query(query: str, theme: str) -> str:
+    """
+    Derive a specific gap description from the query rather than using
+    a generic phrase. For example, if the query is "how does Hick's law
+    relate to decision fatigue?", the gap is about that specific link.
+    Prefers longer terms (typically more domain-specific).
+    """
+    q_terms = _query_terms(query)
+    theme_words = set(theme.lower().split())
+    # Sort by length descending — longer tokens tend to be more domain-specific
+    specific = sorted(
+        [w for w in q_terms if w not in theme_words],
+        key=len,
+        reverse=True,
+    )
+    if len(specific) >= 2:
+        return (
+            f"how {specific[0]} and {specific[1]} interact "
+            f"in the context of {theme}"
+        )
+    if specific:
+        return f"the precise role of {specific[0]} in shaping {theme}"
+    return f"the precise mechanisms underlying {theme}"
+
+
 # ── Paragraph generators ───────────────────────────────────────────────────────
 
 def _gen_convergence_template(
@@ -695,8 +808,8 @@ def _gen_convergence_template(
     graph : "HierarchicalResearchGraph",
 ) -> str:
     p_a, p_b = papers[0], papers[1]
-    claim_a  = _extract_main_claim(p_a.abstract, title=p_a.title)
-    claim_b  = _extract_main_claim(p_b.abstract, title=p_b.title)
+    claim_a  = _extract_query_relevant_claim(p_a.abstract, query, title=p_a.title)
+    claim_b  = _extract_query_relevant_claim(p_b.abstract, query, title=p_b.title)
     ref_a    = _paper_ref(p_a)
     ref_b    = _paper_ref(p_b)
 
@@ -755,8 +868,8 @@ def _gen_tension_template(
         p_a = papers[0]
         p_b = papers[1] if len(papers) > 1 else papers[0]
 
-    claim_a = _extract_main_claim(p_a.abstract, title=p_a.title)
-    claim_b = _extract_main_claim(p_b.abstract, title=p_b.title)
+    claim_a = _extract_query_relevant_claim(p_a.abstract, query, title=p_a.title)
+    claim_b = _extract_query_relevant_claim(p_b.abstract, query, title=p_b.title)
     ref_a   = _paper_ref(p_a)
     ref_b   = _paper_ref(p_b)
 
@@ -815,8 +928,8 @@ def _gen_evolution_template(
     dated = ordered
     p_old, y_old = dated[0]
     p_new, y_new = dated[-1]
-    claim_old = _extract_main_claim(p_old.abstract, title=p_old.title)
-    claim_new = _extract_main_claim(p_new.abstract, title=p_new.title)
+    claim_old = _extract_query_relevant_claim(p_old.abstract, query, title=p_old.title)
+    claim_new = _extract_query_relevant_claim(p_new.abstract, query, title=p_new.title)
     ref_old   = _paper_ref(p_old)
     ref_new   = _paper_ref(p_new)
 
@@ -861,8 +974,8 @@ def _gen_synthesis_template(
 ) -> str:
     p_a     = papers[0]
     p_b     = papers[1] if len(papers) > 1 else papers[0]
-    claim_a = _extract_main_claim(p_a.abstract, title=p_a.title)
-    claim_b = _extract_main_claim(p_b.abstract, title=p_b.title)
+    claim_a = _extract_query_relevant_claim(p_a.abstract, query, title=p_a.title)
+    claim_b = _extract_query_relevant_claim(p_b.abstract, query, title=p_b.title)
     finding = _extract_key_finding(p_a.abstract, title=p_a.title)
     ref_a   = _paper_ref(p_a)
     ref_b   = _paper_ref(p_b)
@@ -906,7 +1019,7 @@ def _gen_gap_template(
 ) -> str:
     p_a   = papers[0]
     ref_a = _paper_ref(p_a)
-    claim_a = _extract_main_claim(p_a.abstract, title=p_a.title)
+    claim_a = _extract_query_relevant_claim(p_a.abstract, query, title=p_a.title)
 
     openings = [
         f"Despite progress in {theme}, important questions remain open.",
@@ -919,17 +1032,21 @@ def _gen_gap_template(
     if len(papers) > 1:
         p_b   = papers[1]
         ref_b = _paper_ref(p_b)
-        body += f". {ref_b} further demonstrated that {_extract_main_claim(p_b.abstract, title=p_b.title)}"
+        body += (
+            f". {ref_b} further demonstrated that "
+            f"{_extract_query_relevant_claim(p_b.abstract, query, title=p_b.title)}"
+        )
 
-    gap_ideas = [
-        f"the precise mechanistic link between these findings",
+    # Use a query-derived gap if possible; fall back to generic alternatives
+    query_gap = _gap_from_query(query, theme)
+    fallback_gaps = [
         f"the boundary conditions under which these effects reliably hold",
         f"the developmental trajectory and temporal stability of {theme}",
         f"the cross-cultural and cross-population generalizability of these results",
         f"the computational or neural basis underlying {theme}",
         f"how individual differences moderate the observed effects",
     ]
-    gap = random.choice(gap_ideas)
+    gap = query_gap if len(query_gap) > 20 else random.choice(fallback_gaps)
 
     closings = [
         f"Future work targeting {gap} would substantially advance the field.",
@@ -965,7 +1082,10 @@ _LLM_SYSTEM = (
     "the abstracts provided, not just titles.\n"
     "6. Output ONLY the paragraph text. No headers, labels, bullet points, "
     "or markdown formatting.\n"
-    "7. Length: 4-6 sentences."
+    "7. Length: 4-6 sentences.\n"
+    "8. MOST IMPORTANT: your paragraph must directly address the Research "
+    "Question. Every sentence should connect back to what is being asked. "
+    "Do NOT write a generic overview — write specifically about the question."
 )
 
 
@@ -1268,8 +1388,17 @@ class Arguer:
 
         theme = _extract_theme(query, papers)
 
-        available     = self._available_types(papers, graph)
-        selected      = style_profile.weighted_sample(available, n=n)
+        available = self._available_types(papers, graph)
+
+        # Combine StyleProfile weights with query intent signals so the
+        # argument types most relevant to the question are preferred.
+        intent_boosts = _detect_query_intent(query)
+        boosted_weights = {
+            t: style_profile.type_weights.get(t, 1.0) * intent_boosts.get(t, 1.0)
+            for t in _ALL_ARG_TYPES
+        }
+        intent_profile = StyleProfile(type_weights=boosted_weights)
+        selected = intent_profile.weighted_sample(available, n=n)
 
         # Pad if fewer than n types are available
         if len(selected) < n:
