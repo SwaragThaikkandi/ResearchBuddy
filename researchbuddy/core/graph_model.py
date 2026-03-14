@@ -22,6 +22,7 @@ import hashlib
 import re
 import time
 import numpy as np
+from pathlib import Path
 import networkx as nx
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -149,15 +150,90 @@ class HierarchicalResearchGraph:
         if not text_chunks:
             return
         vecs = embed(text_chunks)
-        meta.embedding = vecs.mean(axis=0)
-        n = np.linalg.norm(meta.embedding)
-        if n > 0:
-            meta.embedding /= n
+        meta.embedding = mean_pool(list(vecs))
 
     def embed_abstract(self, meta: PaperMeta):
         text = meta.abstract or meta.title
         if text:
             meta.embedding = embed(text)
+
+    def reembed_all_papers(self) -> None:
+        """
+        Re-embed every paper using the current embedding model.
+
+        Called automatically when a saved graph has embeddings whose dimension
+        does not match EMBEDDING_DIM (i.e. the model was changed in config.py).
+        Falls back to abstract when a seed PDF file is no longer accessible.
+        """
+        from researchbuddy.core.pdf_processor import extract_from_pdf
+        logger.info("[reembed] Re-embedding %d papers with current model ...",
+                    len(self._papers))
+        for meta in self._papers.values():
+            if meta.filepath and Path(meta.filepath).exists():
+                try:
+                    ep = extract_from_pdf(meta.filepath)
+                    if ep and ep.chunks:
+                        self.embed_paper(meta, ep.chunks)
+                        continue
+                except Exception:
+                    pass
+            # Fallback: abstract or title
+            self.embed_abstract(meta)
+        # Reset CORE enrichment so full-text embeddings are redone with new model
+        self._fulltext_enriched: set = set()
+        self._invalidate()
+        logger.info("[reembed] Done.")
+
+    def enrich_with_full_text(self, verbose: bool = True) -> int:
+        """
+        Fetch full text from CORE for papers not yet enriched, then re-embed
+        them using chunked mean-pooling over the full document.
+
+        Only papers whose CORE full text has not already been fetched (tracked
+        in self._fulltext_enriched) are processed.  Papers for which CORE
+        returns nothing keep their abstract-based embedding unchanged.
+
+        Returns the number of papers successfully enriched.
+        """
+        from researchbuddy.core.core_fetcher import fetch_fulltext
+        from researchbuddy.core.pdf_processor import _to_chunks
+
+        enriched_set: set = getattr(self, "_fulltext_enriched", set())
+
+        candidates = [
+            m for m in self._papers.values()
+            if m.paper_id not in enriched_set
+        ]
+        if not candidates:
+            return 0
+
+        if verbose:
+            logger.info("[CORE enrich] Fetching full text for %d papers ...",
+                        len(candidates))
+
+        n_enriched = 0
+        for meta in candidates:
+            fulltext = fetch_fulltext(
+                doi      = getattr(meta, "doi", "") or "",
+                arxiv_id = getattr(meta, "arxiv_id", "") or "",
+                title    = meta.title or "",
+            )
+            enriched_set.add(meta.paper_id)   # mark regardless of outcome
+
+            if fulltext and len(fulltext) >= 200:
+                chunks = _to_chunks(fulltext, chunk_size=500, overlap=100)
+                if chunks:
+                    self.embed_paper(meta, chunks)
+                    n_enriched += 1
+
+        self._fulltext_enriched = enriched_set
+
+        if n_enriched:
+            self._invalidate()
+        if verbose:
+            logger.info("[CORE enrich] %d/%d papers enriched with full-text embeddings.",
+                        n_enriched, len(candidates))
+        return n_enriched
 
     # ── Hierarchy rebuild ──────────────────────────────────────────────────────
 

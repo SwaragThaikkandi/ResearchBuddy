@@ -149,6 +149,21 @@ def _resolve_device() -> str:
     return "cpu"
 
 
+def _needs_trust_remote_code(model_name: str) -> bool:
+    return "nomic" in model_name.lower()
+
+
+def _doc_prefix(model_name: str) -> str:
+    """
+    Some models (nomic-embed-text) use task prefixes for best performance.
+    All embeddings in ResearchBuddy are document-to-document similarity,
+    so we always use the document prefix.
+    """
+    if "nomic" in model_name.lower():
+        return "search_document: "
+    return ""
+
+
 def _get_model():
     global _model, _device
     if _model is None:
@@ -159,14 +174,19 @@ def _get_model():
         _device = _resolve_device()
         logger.info("Loading '%s' on %s ...", EMBEDDING_MODEL, _device)
 
+        kwargs = {"device": _device}
+        if _needs_trust_remote_code(EMBEDDING_MODEL):
+            kwargs["trust_remote_code"] = True
+
         try:
-            _model = SentenceTransformer(EMBEDDING_MODEL, device=_device)
+            _model = SentenceTransformer(EMBEDDING_MODEL, **kwargs)
         except Exception as e:
             if _device == "cuda":
                 logger.warning("CUDA model load failed: %s", e)
                 logger.info("Retrying on CPU.")
                 _device = "cpu"
-                _model = SentenceTransformer(EMBEDDING_MODEL, device=_device)
+                kwargs["device"] = "cpu"
+                _model = SentenceTransformer(EMBEDDING_MODEL, **kwargs)
             else:
                 raise
 
@@ -177,12 +197,17 @@ def _get_model():
 def embed(texts: Union[str, list[str]]) -> np.ndarray:
     """
     Encode one string or a list of strings.
+    Prepends the model's document task prefix when required (e.g. nomic-embed-text).
     Returns shape (dim,) for a single string, (n, dim) for a list.
     """
+    from researchbuddy.config import EMBEDDING_MODEL
     model = _get_model()
+    prefix = _doc_prefix(EMBEDDING_MODEL)
     single = isinstance(texts, str)
     if single:
         texts = [texts]
+    if prefix:
+        texts = [prefix + t for t in texts]
     vecs = model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
     return vecs[0] if single else vecs
 

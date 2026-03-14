@@ -68,10 +68,32 @@ def load(path: Path = STATE_FILE) -> Optional[HierarchicalResearchGraph]:
         if not isinstance(graph, HierarchicalResearchGraph):
             graph = HierarchicalResearchGraph.from_legacy(graph)
         logger.info("Graph loaded <- %s", path)
+        _migrate_embeddings_if_needed(graph)
         return graph
     except Exception as e:
         logger.warning("Could not load saved state (%s). Starting fresh.", e)
         return None
+
+
+def _migrate_embeddings_if_needed(graph: HierarchicalResearchGraph) -> None:
+    """
+    Detect an embedding dimension mismatch (model changed in config) and
+    re-embed all papers with the current model when one is found.
+    """
+    from researchbuddy.config import EMBEDDING_DIM
+    papers_with_emb = [
+        m for m in graph._papers.values() if m.embedding is not None
+    ]
+    if not papers_with_emb:
+        return
+    actual_dim = papers_with_emb[0].embedding.shape[0]
+    if actual_dim != EMBEDDING_DIM:
+        logger.warning(
+            "Embedding dim mismatch: stored=%d, model expects=%d. "
+            "Re-embedding all papers — this runs once and may take a minute.",
+            actual_dim, EMBEDDING_DIM,
+        )
+        graph.reembed_all_papers()
 
 
 # Import seed PDFs ------------------------------------------------------------
@@ -112,6 +134,8 @@ def import_pdf_folder(graph: HierarchicalResearchGraph, folder: str | Path) -> i
     if added > 0:
         logger.info("Fetching citation data via OpenAlex (DOI/title lookup) ...")
         graph.fetch_citations(verbose=True)
+        logger.info("Enriching with full text via CORE ...")
+        graph.enrich_with_full_text(verbose=True)
         logger.info("Rebuilding hierarchy ...")
         graph.rebuild_hierarchy()
     return added

@@ -13,7 +13,8 @@ CITATION_PDF  = DATA_DIR / "network_citation.pdf"   # directed citation graph
 COMBINED_PDF  = DATA_DIR / "network_combined.pdf"   # fused (semantic + citation)
 
 # ── Embedding ──────────────────────────────────────────────────────────────────
-EMBEDDING_MODEL      = "all-MiniLM-L6-v2"   # 384-dim, CPU-friendly
+EMBEDDING_MODEL      = "nomic-ai/nomic-embed-text-v1.5"   # 768-dim, 8192-token context
+EMBEDDING_DIM        = 768   # expected output dim; bump when changing model
 
 # ── Graph / edges ──────────────────────────────────────────────────────────────
 SIMILARITY_THRESHOLD = 0.45    # min cosine sim to draw a semantic edge
@@ -44,6 +45,12 @@ S2_REC_URL           = "https://api.semanticscholar.org/recommendations/v1/paper
 S2_PAPER_URL         = "https://api.semanticscholar.org/graph/v1/paper"
 ARXIV_SEARCH_URL     = "https://export.arxiv.org/api/query"
 OPENALEX_URL         = "https://api.openalex.org/works"   # free, no key needed
+
+# ── CORE full-text ─────────────────────────────────────────────────────────────
+# Register for a free key at https://core.ac.uk/services/api
+# Set env var CORE_API_KEY=<your_key>  (anonymous access works but is slower)
+CORE_API_URL         = "https://api.core.ac.uk/v3"
+CORE_FULL_TEXT       = True   # enrich discovered papers with full text via CORE
 MAX_SEARCH_RESULTS   = 30
 REQUEST_TIMEOUT      = 15
 REQUEST_DELAY        = 1.0

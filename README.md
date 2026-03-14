@@ -1,6 +1,6 @@
 # ResearchBuddy
 
-> **v0.4.0** — Adaptive Hierarchical Small World Network + Causal DAG + LLM-powered Reasoning & Creative Modes
+> **v0.5.0** — Full-text embeddings via CORE · nomic-embed-text (8192-token context) · Adaptive Hierarchical Small World Network + Causal DAG + LLM-powered Reasoning & Creative Modes
 
 A **graph-based literature search assistant** that learns your research interests from your own PDFs and actively finds new papers for you — like a smart colleague who reads everything and brings you only what matters.
 
@@ -85,6 +85,16 @@ View low-confidence citation edges, temporal anomalies (e.g., a 2020 paper citin
 
 Generates a diagnostic report covering graph connectivity, metadata completeness, and citation coverage.
 
+### Full-Text Embeddings via CORE
+
+After adding papers, ResearchBuddy enriches discovered papers with full text from [CORE](https://core.ac.uk) — a free aggregator of 220M+ open-access works. Full text (equations stripped) is chunked into 500-word segments and embedded via mean-pooling, replacing the abstract-only embedding. This produces richer semantic similarity signals especially for ArXiv papers where the abstract captures only a fraction of the technical content.
+
+Papers that CORE cannot supply fall back to their abstract embedding unchanged. All results are cached locally so each paper is only fetched once.
+
+The embedding model was upgraded from `all-MiniLM-L6-v2` (384-dim, 512-token limit) to `nomic-ai/nomic-embed-text-v1.5` (768-dim, 8192-token context), enabling the model to process full sections of a paper in a single pass rather than truncating at ~384 words.
+
+If you have an existing graph saved with the old model, the dimension mismatch is detected automatically on startup and all papers are re-embedded once.
+
 ### Topology Evolution Tracking
 
 Timestamped graph snapshots stored automatically. Visualize how your research graph grows and changes over time with `researchbuddy-evolution`.
@@ -149,9 +159,25 @@ pip install -e .
 **Requirements:** Python ≥ 3.9. Dependencies are installed automatically:
 
 ```
-sentence-transformers  networkx  pdfplumber  requests  numpy
+sentence-transformers>=2.7.0  einops  networkx  pdfplumber  requests  numpy
 scikit-learn  scipy  rich  keybert  matplotlib
 ```
+
+On first run, `nomic-embed-text-v1.5` (~274 MB) is downloaded automatically from HuggingFace.
+
+### Optional: CORE full-text enrichment
+
+ResearchBuddy fetches full paper text from [CORE](https://core.ac.uk) to build richer embeddings. Anonymous access works out of the box; a free API key removes rate limits:
+
+1. Register at [core.ac.uk/services/api](https://core.ac.uk/services/api)
+2. Set the environment variable before running:
+
+```bash
+export CORE_API_KEY=your_key_here   # Linux/macOS
+set CORE_API_KEY=your_key_here      # Windows
+```
+
+Full texts are cached in `~/.researchbuddy/cache/core/` so each paper is only fetched once.
 
 ### Optional: LLM integration (Reasoning & Creative Modes)
 
@@ -293,7 +319,10 @@ Persistent defaults live in `researchbuddy/config.py`:
 | `SIMILARITY_THRESHOLD` | 0.45 | Min cosine sim for semantic edges |
 | `N_RECOMMENDATIONS` | 10 | Papers shown per search |
 | `EXPLORATION_RATIO` | 0.25 | Fraction of exploratory suggestions |
-| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | sentence-transformers model |
+| `EMBEDDING_MODEL` | `nomic-ai/nomic-embed-text-v1.5` | sentence-transformers model (8192-token context, 768-dim) |
+| `EMBEDDING_DIM` | 768 | Expected embedding dimension; bump when changing model |
+| `CORE_FULL_TEXT` | `True` | Fetch full paper text from CORE for richer embeddings |
+| `CORE_API_URL` | `https://api.core.ac.uk/v3` | CORE API endpoint |
 
 ---
 
@@ -319,6 +348,7 @@ ResearchBuddy/
 │       ├── reasoner.py          # LLM-powered research Q&A
 │       ├── arguer.py            # creative argument generation
 │       ├── llm.py               # Ollama LLM interface
+│       ├── core_fetcher.py      # CORE full-text API + equation stripping
 │       ├── searcher.py          # Semantic Scholar + ArXiv APIs
 │       ├── state_manager.py     # pickle save/load + PDF import
 │       └── visualizer.py        # 3-PDF matplotlib renderer
@@ -337,6 +367,8 @@ ResearchBuddy/
 **Persistent data** is stored in `~/.researchbuddy/`:
 - `research_graph.pkl` — saved graph state
 - `history/` — timestamped graph snapshots
+- `cache/core/` — CORE full-text cache (one JSON per paper, never re-fetched)
+- `cache/` — LLM search helper cache (HyDE, query expansion, reranking)
 - `network_semantic.pdf` — NLP network visualization
 - `network_citation.pdf` — citation network visualization
 - `network_combined.pdf` — combined network visualization
