@@ -34,6 +34,9 @@ from researchbuddy.config import (
     FUSION_ALPHA, SNF_KNN, SNF_ITER,
     MIN_CLUSTER_SIZE, MAX_HIERARCHY_LEVELS,
     QUERY_FEEDBACK_WEIGHT,
+    RATING_HALF_LIFE_DAYS, RATING_DECAY_FLOOR,
+    WEIGHT_LEARNING_MIN_RATINGS, WEIGHT_LEARNING_REGULARIZATION,
+    COLD_START_THRESHOLD,
 )
 from researchbuddy.core.embedder import embed, cosine_similarity, mean_pool
 from researchbuddy.core.hierarchy import (
@@ -72,14 +75,25 @@ class PaperMeta:
     venue: str                      = ""
     is_peer_reviewed: Optional[bool]= None   # None=unknown, True=journal/conf, False=preprint
     user_rating: Optional[float]    = None
+    rated_at: float                 = 0.0    # timestamp when user_rating was set
     times_shown: int                = 0
     last_shown: float               = 0.0
 
     @property
     def effective_weight(self) -> float:
         if self.user_rating is not None:
-            return self.user_rating
+            return self.user_rating * self.temporal_decay_factor
         return DEFAULT_SEED_WEIGHT if self.source == "seed" else 0.0
+
+    @property
+    def temporal_decay_factor(self) -> float:
+        """Exponential decay based on time since rating. Recent ratings matter more."""
+        if self.rated_at <= 0:
+            return 1.0
+        age_days = (time.time() - self.rated_at) / 86400.0
+        half_life = RATING_HALF_LIFE_DAYS
+        factor = 2.0 ** (-age_days / half_life)
+        return max(RATING_DECAY_FLOOR, factor)
 
 
 # ── Hierarchical research graph ────────────────────────────────────────────────
@@ -123,6 +137,11 @@ class HierarchicalResearchGraph:
         # ── Argument interactions (creative mode feedback) ─────────────────
         self._argument_interactions: list[ArgumentInteraction] = []
         self._style_profile: Optional[StyleProfile]            = None
+
+        # ── Learned scoring weights ─────────────────────────────────────────
+        # 7 signal weights: [context, niche, area, citation, snf, pub_quality, recency]
+        self._default_signal_weights = np.array([3.0, 2.0, 1.0, 2.0, 1.5, 0.5, 0.3])
+        self._learned_signal_weights: Optional[np.ndarray] = None
 
         # ── Hyper-parameters ──────────────────────────────────────────────
         self.alpha = alpha
@@ -504,10 +523,12 @@ class HierarchicalResearchGraph:
     def rate_paper(self, paper_id: str, rating: float):
         if paper_id not in self._papers:
             raise KeyError(paper_id)
-        self._papers[paper_id].user_rating = float(rating)
+        meta = self._papers[paper_id]
+        meta.user_rating = float(rating)
+        meta.rated_at = time.time()
         for G in (self.G_semantic, self.G_citation, self.G, self.G_causal):
             if G.has_node(paper_id):
-                G.nodes[paper_id]["weight"] = float(rating)
+                G.nodes[paper_id]["weight"] = meta.effective_weight
         self._invalidate()
 
     # ── Fetch citations ────────────────────────────────────────────────────────
@@ -622,84 +643,189 @@ class HierarchicalResearchGraph:
             return 0.3
         return 0.5
 
-    # ── Comprehensive multi-level scoring ──────────────────────────────────────
+    # ── Learned scoring weights ──────────────────────────────────────────────
 
-    def score_candidate(self, meta: PaperMeta) -> float:
+    def _signal_weights(self) -> np.ndarray:
+        """Return learned weights if available, else defaults."""
+        if self._learned_signal_weights is not None:
+            return self._learned_signal_weights
+        return self._default_signal_weights
+
+    def learn_signal_weights(self) -> bool:
         """
-        Comprehensive relevance score combining five signals:
-          1. Cosine similarity to global context vector (paper level)
-          2. Similarity to each niche centroid, weighted by niche importance
-          3. Similarity to each area centroid (and higher levels)
-          4. Citation coupling (bibliographic coupling + co-citation)
-          5. SNF-fused adjacency score (if matrix available)
+        Learn optimal signal weights from user ratings via logistic regression.
+
+        Requires at least WEIGHT_LEARNING_MIN_RATINGS rated papers with both
+        positive (>=7) and negative (<=4) examples. Returns True if weights
+        were updated.
         """
+        rated = [m for m in self._papers.values()
+                 if m.user_rating is not None and m.embedding is not None]
+        if len(rated) < WEIGHT_LEARNING_MIN_RATINGS:
+            return False
+
+        positives = [m for m in rated if m.user_rating >= 7]
+        negatives = [m for m in rated if m.user_rating <= 4]
+        if len(positives) < 2 or len(negatives) < 2:
+            return False
+
+        # Build feature matrix: each row = 7 raw signal values for a paper
+        X = []
+        y = []
+        for m in rated:
+            signals = self._extract_signals(m)
+            if signals is not None:
+                X.append(signals)
+                y.append(1.0 if m.user_rating >= 7 else 0.0)
+
+        if len(X) < WEIGHT_LEARNING_MIN_RATINGS:
+            return False
+
+        X = np.array(X)
+        y = np.array(y)
+
+        # Simple logistic regression via gradient descent (no sklearn dependency)
+        n_features = X.shape[1]
+        weights = np.ones(n_features)  # start from uniform
+        lr = 0.5
+        reg = WEIGHT_LEARNING_REGULARIZATION
+
+        for _ in range(200):
+            logits = X @ weights
+            probs = 1.0 / (1.0 + np.exp(-np.clip(logits, -20, 20)))
+            grad = X.T @ (probs - y) / len(y) + reg * weights
+            weights -= lr * grad
+
+        # Clamp to positive and normalize to same scale as defaults
+        weights = np.maximum(weights, 0.05)
+        weights = weights * (self._default_signal_weights.sum() / weights.sum())
+        self._learned_signal_weights = weights
+        logger.info("Learned signal weights: %s",
+                    ", ".join(f"{w:.2f}" for w in weights))
+        return True
+
+    def _extract_signals(self, meta: PaperMeta) -> Optional[np.ndarray]:
+        """Extract the 7 raw signal values for a paper (for weight learning)."""
         if meta.embedding is None:
-            return 0.0
+            return None
 
-        score_parts: list[float] = []
-        weight_parts: list[float] = []
+        signals = np.zeros(7)
 
-        # ── 1. Global context similarity ──────────────────────────────────
+        # 1. Global context similarity
         ctx = self.context_vector()
         if ctx is not None:
-            score_parts.append(float(cosine_similarity(ctx, meta.embedding)))
-            weight_parts.append(3.0)
+            signals[0] = float(cosine_similarity(ctx, meta.embedding))
 
-        # ── 2. Niche-level similarities ───────────────────────────────────
+        # 2. Niche similarity (max across niches)
+        niche_sims = []
         for node in self._clusters.values():
             if node.level == 1:
                 niche_w = sum(self._papers[p].effective_weight
                               for p in node.paper_ids if p in self._papers)
                 if niche_w > 0:
-                    sim = float(cosine_similarity(node.centroid, meta.embedding))
-                    score_parts.append(sim)
-                    weight_parts.append(niche_w / 10.0 * 2.0)
+                    niche_sims.append(float(cosine_similarity(
+                        node.centroid, meta.embedding)))
+        signals[1] = max(niche_sims) if niche_sims else 0.0
 
-        # ── 3. Area/domain-level similarities ─────────────────────────────
+        # 3. Area similarity (max across areas)
+        area_sims = []
         for node in self._clusters.values():
             if node.level >= 2:
                 area_w = sum(self._papers[p].effective_weight
                              for p in node.paper_ids if p in self._papers)
                 if area_w > 0:
-                    sim = float(cosine_similarity(node.centroid, meta.embedding))
-                    # Discount deeper levels slightly (coarser = less precise)
-                    discount = 0.8 ** (node.level - 1)
-                    score_parts.append(sim * discount)
-                    weight_parts.append(area_w / 20.0)
+                    area_sims.append(float(cosine_similarity(
+                        node.centroid, meta.embedding)))
+        signals[2] = max(area_sims) if area_sims else 0.0
 
-        # ── 4. Citation coupling ───────────────────────────────────────────
-        cit = self._citation_score(meta)
-        score_parts.append(cit)
-        weight_parts.append(2.0 * (1.0 - self.alpha))
+        # 4. Citation coupling
+        signals[3] = self._citation_score(meta)
 
-        # ── 5. SNF fused adjacency (if available) ─────────────────────────
-        snf_score = self._snf_score(meta)
-        if snf_score > 0:
-            score_parts.append(snf_score)
-            weight_parts.append(1.5)
+        # 5. SNF fused adjacency
+        signals[4] = self._snf_score(meta)
 
-        # ── 6. Publication quality (peer-review bonus) ────────────────────
-        pub_q = self._pub_quality_score(meta)
-        score_parts.append(pub_q)
-        weight_parts.append(0.5)   # light weight — nudge, not dominate
+        # 6. Publication quality
+        signals[5] = self._pub_quality_score(meta)
 
-        # ── 7. Recency boost ──────────────────────────────────────────────
-        # Linear decay: 0 years old → 1.0, 10 years → 0.5, 20+ years → 0.0
-        # Weight is light (0.3) so it nudges but doesn't dominate.
+        # 7. Recency
         if meta.year is not None:
             import datetime
-            current_year = datetime.datetime.now().year
-            age = max(0, current_year - meta.year)
-            recency = max(0.0, 1.0 - age / 20.0)
-            score_parts.append(recency)
-            weight_parts.append(0.3)
+            age = max(0, datetime.datetime.now().year - meta.year)
+            signals[6] = max(0.0, 1.0 - age / 20.0)
 
-        if not score_parts:
+        return signals
+
+    # ── Comprehensive multi-level scoring ──────────────────────────────────────
+
+    def score_candidate(self, meta: PaperMeta) -> float:
+        """
+        Comprehensive relevance score combining seven signals.
+
+        When enough user ratings exist, signal weights are learned from
+        user preferences via logistic regression. Otherwise, uses curated
+        defaults. In cold-start mode (<COLD_START_THRESHOLD papers),
+        simplifies to context similarity + recency.
+        """
+        if meta.embedding is None:
             return 0.0
 
-        total_w = sum(weight_parts) or 1.0
-        fused   = sum(s * w for s, w in zip(score_parts, weight_parts)) / total_w
+        # ── Cold-start fast path ──────────────────────────────────────────
+        n_papers = len(self._papers)
+        if n_papers < COLD_START_THRESHOLD:
+            return self._cold_start_score(meta)
+
+        # ── Extract raw signals ───────────────────────────────────────────
+        signals = self._extract_signals(meta)
+        if signals is None:
+            return 0.0
+
+        # ── Apply weights (learned or default) ────────────────────────────
+        w = self._signal_weights()
+        total_w = w.sum() or 1.0
+        fused = float(np.dot(signals, w) / total_w)
         return float(np.clip(fused, 0.0, 1.0))
+
+    def _cold_start_score(self, meta: PaperMeta) -> float:
+        """
+        Simplified scoring for small graphs (<COLD_START_THRESHOLD papers).
+
+        Leans on context vector similarity and recency — the signals that
+        work with sparse data. Citation coupling and cluster-level signals
+        are unreliable with few papers.
+        """
+        if meta.embedding is None:
+            return 0.0
+
+        parts, weights = [], []
+
+        # Context similarity (primary signal)
+        ctx = self.context_vector()
+        if ctx is not None:
+            parts.append(float(cosine_similarity(ctx, meta.embedding)))
+            weights.append(4.0)
+
+        # Direct similarity to each rated/seed paper
+        for m in self._papers.values():
+            if m.embedding is not None and m.effective_weight > 0:
+                sim = float(cosine_similarity(m.embedding, meta.embedding))
+                parts.append(sim)
+                weights.append(m.effective_weight / 5.0)
+
+        # Recency
+        if meta.year is not None:
+            import datetime
+            age = max(0, datetime.datetime.now().year - meta.year)
+            parts.append(max(0.0, 1.0 - age / 20.0))
+            weights.append(0.5)
+
+        # Publication quality
+        parts.append(self._pub_quality_score(meta))
+        weights.append(0.3)
+
+        if not parts:
+            return 0.0
+        total = sum(weights) or 1.0
+        return float(np.clip(sum(s * w for s, w in zip(parts, weights)) / total, 0.0, 1.0))
 
     @staticmethod
     def _source_support_factor(n_sources: int) -> float:
@@ -832,14 +958,36 @@ class HierarchicalResearchGraph:
             novel = self.novelty_score(c)
             scored.append((c, rel, novel))
 
-        n_explore  = max(1, int(n * exploration_ratio))
+        # ── Adaptive exploration ratio ────────────────────────────────────
+        adaptive_ratio = self._adaptive_exploration_ratio(exploration_ratio)
+        n_explore  = max(1, int(n * adaptive_ratio))
         n_relevant = n - n_explore
 
         by_rel = sorted(scored, key=lambda x: (-x[1], x[0].paper_id))
-        by_novel = sorted(
-            [s for s in scored if s[1] > 0.12 and s[2] >= MIN_NOVELTY_DISTANCE],
-            key=lambda x: (-x[2], x[0].paper_id),
-        )
+
+        # ── Strategic exploration: prefer papers in coverage gaps ─────────
+        gap_centroids = self._find_coverage_gaps()
+        if gap_centroids:
+            # Score exploratory candidates by proximity to gaps, not just raw novelty
+            def gap_explore_score(s):
+                meta, rel, nov = s
+                if meta.embedding is None or nov < MIN_NOVELTY_DISTANCE:
+                    return -1.0
+                if rel <= 0.12:
+                    return -1.0
+                gap_sims = [float(cosine_similarity(meta.embedding, gc))
+                            for gc in gap_centroids]
+                gap_affinity = max(gap_sims) if gap_sims else 0.0
+                # Blend novelty with gap affinity: explore gaps, not random far-off papers
+                return nov * 0.4 + gap_affinity * 0.6
+
+            by_novel = sorted(scored, key=lambda x: -gap_explore_score(x))
+            by_novel = [s for s in by_novel if gap_explore_score(s) > 0]
+        else:
+            by_novel = sorted(
+                [s for s in scored if s[1] > 0.12 and s[2] >= MIN_NOVELTY_DISTANCE],
+                key=lambda x: (-x[2], x[0].paper_id),
+            )
 
         results: list[tuple[PaperMeta, float, str]] = []
         seen: set[str] = set()
@@ -855,6 +1003,74 @@ class HierarchicalResearchGraph:
                 seen.add(meta.paper_id)
 
         return results
+
+    def _adaptive_exploration_ratio(self, base_ratio: float) -> float:
+        """
+        Adjust exploration ratio based on graph diversity and maturity.
+
+        - Small graphs → more exploration (up to 40%)
+        - High cluster diversity with good coverage → less exploration (down to 10%)
+        - Low diversity / few niches → more exploration
+        """
+        n_papers = len(self._papers)
+        n_rated = len(self.rated_papers())
+        n_niches = sum(1 for c in self._clusters.values() if c.level == 1)
+
+        if n_papers < COLD_START_THRESHOLD:
+            return min(0.40, base_ratio * 1.6)
+
+        if n_niches <= 1:
+            return min(0.40, base_ratio * 1.5)
+
+        # Diversity measure: how evenly are rated papers spread across niches?
+        p2n = self.paper_to_niche()
+        niche_counts = defaultdict(int)
+        for m in self.rated_papers():
+            nid = p2n.get(m.paper_id)
+            if nid:
+                niche_counts[nid] += 1
+
+        if len(niche_counts) >= 2 and n_rated >= 10:
+            counts = np.array(list(niche_counts.values()), dtype=float)
+            # Entropy-based diversity (normalized)
+            probs = counts / counts.sum()
+            entropy = -float(np.sum(probs * np.log(probs + 1e-10)))
+            max_entropy = np.log(len(counts) + 1e-10)
+            diversity = entropy / max_entropy if max_entropy > 0 else 0
+            # High diversity → less exploration needed
+            return float(np.clip(base_ratio * (1.5 - diversity), 0.10, 0.40))
+
+        return base_ratio
+
+    def _find_coverage_gaps(self) -> list[np.ndarray]:
+        """
+        Find under-covered areas in the semantic space.
+
+        Returns centroid vectors for niches that have few/no highly-rated papers,
+        indicating areas the user hasn't explored much.
+        """
+        if not self._clusters:
+            return []
+
+        gaps = []
+        for node in self._clusters.values():
+            if node.level != 1:
+                continue
+            # Count highly-rated papers in this niche
+            high_rated = sum(
+                1 for pid in node.paper_ids
+                if pid in self._papers
+                and self._papers[pid].user_rating is not None
+                and self._papers[pid].user_rating >= 6
+            )
+            total = len([pid for pid in node.paper_ids if pid in self._papers])
+            # Gap = niche exists but user hasn't engaged with it
+            if total >= 2 and high_rated == 0:
+                gaps.append(node.centroid)
+            elif total >= 4 and high_rated <= 1:
+                gaps.append(node.centroid)
+
+        return gaps
 
     # ── Accessors ──────────────────────────────────────────────────────────────
 
@@ -1196,11 +1412,19 @@ class HierarchicalResearchGraph:
             self._edge_anomalies: list = []
         if not hasattr(self, "_reliability_history"):
             self._reliability_history: list = []
+        # v1.0.0 — learned signal weights + temporal decay + adaptive exploration
+        if not hasattr(self, "_default_signal_weights"):
+            self._default_signal_weights = np.array([3.0, 2.0, 1.0, 2.0, 1.5, 0.5, 0.3])
+        if not hasattr(self, "_learned_signal_weights"):
+            self._learned_signal_weights = None
         for meta in self._papers.values():
             if not hasattr(meta, "venue"):
                 meta.venue = ""
             if not hasattr(meta, "is_peer_reviewed"):
                 meta.is_peer_reviewed = None
+            if not hasattr(meta, "rated_at"):
+                # Backfill: if paper was rated, assume it was rated "recently"
+                meta.rated_at = time.time() if meta.user_rating is not None else 0.0
         # v0.2.0 used n_levels; v0.3.0 uses alpha only
         if not hasattr(self, "alpha"):
             self.alpha = FUSION_ALPHA

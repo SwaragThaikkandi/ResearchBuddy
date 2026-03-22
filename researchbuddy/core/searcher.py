@@ -28,6 +28,7 @@ from researchbuddy.config import (
     S2_SEARCH_URL, S2_REC_URL, S2_PAPER_URL,
     ARXIV_SEARCH_URL, MAX_SEARCH_RESULTS, REQUEST_TIMEOUT, REQUEST_DELAY,
     S2_SEARCH_QUERIES, S2_SEARCH_LIMIT, ARXIV_SEARCH_QUERIES, ARXIV_SEARCH_LIMIT,
+    COLD_START_THRESHOLD,
 )
 from researchbuddy.core.graph_model import PaperMeta, ResearchGraph
 
@@ -721,12 +722,21 @@ def find_candidates(
     queries = [q.strip() for q in queries if q and q.strip()]
     queries = list(dict.fromkeys(queries))
 
-    s2_query_cap = S2_SEARCH_QUERIES if _S2_API_KEY else min(S2_SEARCH_QUERIES, 3)
-    for q in queries[:s2_query_cap]:
+    # In cold-start mode, expand search breadth to compensate for thin graph
+    is_cold_start = len(graph.all_papers()) < COLD_START_THRESHOLD
+    s2_cap = S2_SEARCH_QUERIES if _S2_API_KEY else min(S2_SEARCH_QUERIES, 3)
+    arxiv_cap = ARXIV_SEARCH_QUERIES
+    if is_cold_start:
+        s2_cap = min(s2_cap + 3, len(queries))      # more text queries
+        arxiv_cap = min(arxiv_cap + 2, len(queries)) # broader ArXiv coverage
+        logger.info("Cold-start mode: expanded search queries (S2=%d, ArXiv=%d)",
+                     s2_cap, arxiv_cap)
+
+    for q in queries[:s2_cap]:
         logger.info(f"S2 search: '{q[:60]}' ...")
         add(search_semantic_scholar(q, limit=S2_SEARCH_LIMIT))
 
-    for q in queries[:ARXIV_SEARCH_QUERIES]:
+    for q in queries[:arxiv_cap]:
         logger.info(f"ArXiv search: '{q[:60]}' ...")
         add(search_arxiv(q, limit=ARXIV_SEARCH_LIMIT))
 

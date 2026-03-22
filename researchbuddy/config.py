@@ -35,6 +35,17 @@ N_RECOMMENDATIONS    = 10
 EXPLORATION_RATIO    = 0.25    # fraction of suggestions that are exploratory
 MIN_NOVELTY_DISTANCE = 0.30    # min distance from graph for "explore" papers
 
+# ── Learned scoring weights ───────────────────────────────────────────────────
+WEIGHT_LEARNING_MIN_RATINGS = 8   # minimum rated papers before learning kicks in
+WEIGHT_LEARNING_REGULARIZATION = 0.1  # L2 regularization strength
+
+# ── Temporal decay ────────────────────────────────────────────────────────────
+RATING_HALF_LIFE_DAYS  = 90    # rating influence halves every 90 days
+RATING_DECAY_FLOOR     = 0.25  # minimum decay factor (never fully forget)
+
+# ── Cold-start thresholds ─────────────────────────────────────────────────────
+COLD_START_THRESHOLD   = 15    # papers below this count = cold-start mode
+
 # ── Reasoner ("Prefrontal Cortex") ───────────────────────────────────────────
 QUERY_TOP_K          = 10      # papers shown per query response
 QUERY_FEEDBACK_WEIGHT= 0.3     # how much a rated query influences context vector

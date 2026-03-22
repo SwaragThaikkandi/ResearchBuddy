@@ -175,6 +175,8 @@ def rating_session(graph: HierarchicalResearchGraph, results: list[tuple[PaperMe
     if rated_any:
         print_info("\n[graph] Rebuilding hierarchy with new ratings ...")
         graph.rebuild_hierarchy()
+        if graph.learn_signal_weights():
+            print_success("[graph] Signal weights updated from your rating history.")
 
 
 # â”€â”€ Stats â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -235,6 +237,25 @@ def show_stats(graph: HierarchicalResearchGraph):
     print_info(f"    exploration ratio       = {cfg.EXPLORATION_RATIO}")
     print_info(f"    similarity threshold    = {cfg.SIMILARITY_THRESHOLD}")
 
+    # Scoring mode indicator
+    n_papers = stats["total_papers"]
+    if n_papers < cfg.COLD_START_THRESHOLD:
+        print_warn(f"\n  Scoring: COLD-START mode ({n_papers}/{cfg.COLD_START_THRESHOLD} papers)")
+        print_info("    Using simplified scoring (context similarity + per-paper matching).")
+        print_info("    Add more papers for full multi-signal fusion.")
+    elif graph._learned_signal_weights is not None:
+        w = graph._learned_signal_weights
+        labels = ["context", "niche", "area", "citation", "snf", "pub_qual", "recency"]
+        w_str = "  ".join(f"{l}={v:.1f}" for l, v in zip(labels, w))
+        print_success(f"\n  Scoring: LEARNED weights from your ratings")
+        print_info(f"    {w_str}")
+    else:
+        print_info(f"\n  Scoring: default weights (need {cfg.WEIGHT_LEARNING_MIN_RATINGS}+ rated papers to learn)")
+
+    # LLM status in stats
+    if cfg.LLM_ENABLED and not _check_llm_available():
+        print_warn("\n  LLM: UNAVAILABLE -- search is running without HyDE/expansion/reranking")
+
 
 # â”€â”€ Search session â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -253,7 +274,10 @@ def search_session(graph: HierarchicalResearchGraph, plot: bool = True):
     extra = [kw.strip() for kw in raw.split(",") if kw.strip()] if raw.strip() else []
 
     print()
-    llm_note = " with LLM enhancements" if query and cfg.LLM_ENABLED else ""
+    if query and cfg.LLM_ENABLED and not _check_llm_available():
+        print_warn("LLM is enabled but unreachable -- searching without HyDE/expansion.")
+        print_info("Start Ollama for better results: ollama serve\n")
+    llm_note = " with LLM enhancements" if query and _check_llm_available() else ""
     print_info(f"Searching{llm_note} ...  (may take 20-40 s)\n")
     candidates, hyde_embedding = find_candidates(
         graph, extra_keywords=extra, query=query
@@ -263,6 +287,10 @@ def search_session(graph: HierarchicalResearchGraph, plot: bool = True):
         return
 
     score_note = " + HyDE" if hyde_embedding is not None else ""
+    n_papers = len(graph.all_papers())
+    if n_papers < cfg.COLD_START_THRESHOLD:
+        print_info(f"Cold-start mode ({n_papers}/{cfg.COLD_START_THRESHOLD} papers) -- using simplified scoring.")
+        print_info("Add more papers & ratings for full fusion scoring.")
     print_info(f"Ranking candidates (fused semantic + citation{score_note} scores) ...")
     results = graph.rank_candidates(
         candidates, n=cfg.N_RECOMMENDATIONS,
@@ -756,10 +784,32 @@ def quality_report_session(graph: HierarchicalResearchGraph):
 
 # â”€â”€ LLM Status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+_LLM_AVAILABLE: bool | None = None  # session-level cache
+
+
+def _check_llm_available() -> bool:
+    """Check if LLM is actually reachable. Uses session cache."""
+    global _LLM_AVAILABLE
+    if _LLM_AVAILABLE is not None:
+        return _LLM_AVAILABLE
+    if not cfg.LLM_ENABLED:
+        _LLM_AVAILABLE = False
+        return False
+    try:
+        from researchbuddy.core.llm import get_llm
+        client = get_llm()
+        _LLM_AVAILABLE = client.is_available()
+    except Exception:
+        _LLM_AVAILABLE = False
+    return _LLM_AVAILABLE
+
+
 def _show_llm_status_banner():
-    """Print a one-line LLM status at startup."""
+    """Print LLM status at startup with clear degradation warnings."""
+    global _LLM_AVAILABLE
     if not cfg.LLM_ENABLED:
         print_info("  LLM: disabled (--no-llm)")
+        _LLM_AVAILABLE = False
         return
     try:
         from researchbuddy.core.llm import get_llm
@@ -769,11 +819,18 @@ def _show_llm_status_banner():
             gpu_str = f" on {st.gpu_name}" if st.gpu_name else ""
             vram_str = f" ({st.gpu_vram_mb} MB VRAM)" if st.gpu_vram_mb else ""
             print_success(f"  LLM: {st.model_name}{gpu_str}{vram_str} -- ready")
+            _LLM_AVAILABLE = True
         else:
-            print_warn(f"  LLM: {st.error}")
-            print_info("  (ResearchBuddy works without LLM â€” using template fallback)")
+            _LLM_AVAILABLE = False
+            print_warn(f"  LLM: UNAVAILABLE -- {st.error}")
+            print_warn("  Degraded mode: HyDE, query expansion, LLM reranking, and")
+            print_warn("  argumentation are all disabled. Search quality is reduced.")
+            print_info("  To fix: ollama serve && ollama pull " + cfg.LLM_MODEL)
     except Exception as e:
-        print_warn(f"  LLM: check failed ({e})")
+        _LLM_AVAILABLE = False
+        print_warn(f"  LLM: UNAVAILABLE -- {e}")
+        print_warn("  Running in degraded mode (no HyDE/expansion/reranking).")
+        print_info("  To fix: ollama serve && ollama pull " + cfg.LLM_MODEL)
 
 
 def show_llm_status():
@@ -851,11 +908,20 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
     while True:
         print_header("ResearchBuddy")
         s = graph.stats()
+        mode_tag = ""
+        if s['total_papers'] < cfg.COLD_START_THRESHOLD:
+            mode_tag = "  [COLD-START]"
+        elif graph._learned_signal_weights is not None:
+            mode_tag = "  [LEARNED]"
+        llm_tag = ""
+        if cfg.LLM_ENABLED and not _check_llm_available():
+            llm_tag = "  [NO LLM]"
         print_info(
             f"  {s['total_papers']} papers  |  {s['rated_papers']} rated  |  "
             f"{s['hierarchy_levels']} levels  |  "
             f"{s['niche_clusters']} niches  |  {s['area_clusters']} areas  |  "
             f"sem={s['semantic_edges']} edges  cit={s['citation_edges']} edges"
+            f"{mode_tag}{llm_tag}"
         )
         print()
         for key, desc in options.items():
