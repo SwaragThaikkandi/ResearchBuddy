@@ -538,9 +538,8 @@ class Neo4jBackend:
             rel_type = _rel_type_for(layer, etype)
             props = {k: val for k, val in attrs.items()
                      if val is not None and not isinstance(val, (np.ndarray, np.generic))}
-            props["_u"] = u
-            props["_v"] = v
-            by_type.setdefault(rel_type, []).append(props)
+            entry = {"_u": u, "_v": v, "_props": props}
+            by_type.setdefault(rel_type, []).append(entry)
 
         with self._driver.session(database=self._database) as session:
             for rel_type, batch in by_type.items():
@@ -549,7 +548,7 @@ class Neo4jBackend:
                     f"MATCH (a) WHERE a.paper_id = e._u OR a.node_id = e._u "
                     f"MATCH (b) WHERE b.paper_id = e._v OR b.node_id = e._v "
                     f"MERGE (a)-[r:{rel_type}]->(b) "
-                    f"SET r += apoc.map.removeKeys(e, ['_u', '_v'])",
+                    f"SET r += e._props",
                     batch=batch,
                 )
         self._invalidate_cache(layer)
