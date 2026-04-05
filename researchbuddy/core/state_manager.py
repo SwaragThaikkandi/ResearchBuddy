@@ -25,6 +25,9 @@ from researchbuddy.core.pdf_processor import extract_from_folder, ExtractedPaper
 
 def save(graph: ResearchGraph, path: Path = STATE_FILE) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Flush any pending writes to the backend before persisting
+    if hasattr(graph, "_backend"):
+        graph._backend.sync()
     with open(path, "wb") as f:
         pickle.dump(graph, f, protocol=pickle.HIGHEST_PROTOCOL)
     _save_history_snapshot(graph)

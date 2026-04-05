@@ -1415,7 +1415,24 @@ class HierarchicalResearchGraph:
         self._context_dirty = True
         self._fused_W       = None
 
-    # ── Pickle backward compatibility ──────────────────────────────────────────
+    # ── Pickle serialisation ─────────────────────────────────────────────────────
+
+    def __getstate__(self) -> dict:
+        """
+        Convert Neo4j backend to NetworkX before pickling, since the Neo4j
+        driver contains unpicklable connection-pool objects.
+        """
+        state = self.__dict__.copy()
+        backend = state.get("_backend")
+        if backend is not None and not isinstance(backend, NetworkXBackend):
+            # Snapshot all layers into a fresh NetworkXBackend
+            nx_backend = NetworkXBackend()
+            for layer in ALL_LAYERS:
+                G = backend.to_networkx(layer)
+                if G.number_of_nodes() > 0:
+                    nx_backend.set_from_networkx(layer, G)
+            state["_backend"] = nx_backend
+        return state
 
     def __setstate__(self, state: dict):
         """
