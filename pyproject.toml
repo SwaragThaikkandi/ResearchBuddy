@@ -37,8 +37,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+neo4j = [
+    "neo4j>=5.0",
+]
 test = [
     "pytest>=7.0",
+]
+all = [
+    "neo4j>=5.0",
 ]
 
 [project.scripts]

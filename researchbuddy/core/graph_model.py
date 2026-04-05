@@ -51,6 +51,10 @@ from researchbuddy.core.pdf_processor import reextract_title_doi
 from researchbuddy.core.fusion import snf, fuse_scores
 from researchbuddy.core.reasoner import QueryInteraction
 from researchbuddy.core.arguer import ArgumentInteraction, StyleProfile
+from researchbuddy.core.graph_backend import (
+    GraphBackend, NetworkXBackend, create_backend,
+    LAYER_SEMANTIC, LAYER_CITATION, LAYER_COMBINED, LAYER_CAUSAL, ALL_LAYERS,
+)
 
 import logging
 logger = logging.getLogger(__name__)
@@ -104,12 +108,10 @@ class HierarchicalResearchGraph:
     Three graphs are maintained and exported as separate PDFs.
     """
 
-    def __init__(self, alpha: float = FUSION_ALPHA):
-        # ── Four networks ────────────────────────────────────────────────
-        self.G_semantic: nx.DiGraph  = nx.DiGraph()   # NLP / HSWN
-        self.G_citation: nx.DiGraph  = nx.DiGraph()   # citation relationships
-        self.G: nx.DiGraph           = nx.DiGraph()   # fused (combined)
-        self.G_causal: nx.DiGraph    = nx.DiGraph()   # causal DAG (acyclic influence)
+    def __init__(self, alpha: float = FUSION_ALPHA,
+                 backend: Optional[GraphBackend] = None):
+        # ── Graph backend (Neo4j or NetworkX) ────────────────────────────
+        self._backend: GraphBackend = backend or NetworkXBackend()
 
         # ── Paper registry ────────────────────────────────────────────────
         self._papers: dict[str, PaperMeta]       = {}
@@ -146,6 +148,46 @@ class HierarchicalResearchGraph:
         # ── Hyper-parameters ──────────────────────────────────────────────
         self.alpha = alpha
 
+    # ── Backward-compatible graph property accessors ──────────────────────────
+    # These delegate to the backend so that reasoner.py, visualizer.py, cli.py
+    # etc. can still access graph.G_semantic, graph.G, etc. without changes.
+
+    @property
+    def G_semantic(self) -> nx.DiGraph:
+        return self._backend.to_networkx(LAYER_SEMANTIC)
+
+    @G_semantic.setter
+    def G_semantic(self, value: nx.DiGraph) -> None:
+        if isinstance(self._backend, NetworkXBackend):
+            self._backend.set_from_networkx(LAYER_SEMANTIC, value)
+
+    @property
+    def G_citation(self) -> nx.DiGraph:
+        return self._backend.to_networkx(LAYER_CITATION)
+
+    @G_citation.setter
+    def G_citation(self, value: nx.DiGraph) -> None:
+        if isinstance(self._backend, NetworkXBackend):
+            self._backend.set_from_networkx(LAYER_CITATION, value)
+
+    @property
+    def G(self) -> nx.DiGraph:
+        return self._backend.to_networkx(LAYER_COMBINED)
+
+    @G.setter
+    def G(self, value: nx.DiGraph) -> None:
+        if isinstance(self._backend, NetworkXBackend):
+            self._backend.set_from_networkx(LAYER_COMBINED, value)
+
+    @property
+    def G_causal(self) -> nx.DiGraph:
+        return self._backend.to_networkx(LAYER_CAUSAL)
+
+    @G_causal.setter
+    def G_causal(self, value: nx.DiGraph) -> None:
+        if isinstance(self._backend, NetworkXBackend):
+            self._backend.set_from_networkx(LAYER_CAUSAL, value)
+
     # ── Add paper ─────────────────────────────────────────────────────────────
 
     def add_paper(self, meta: PaperMeta, embedding: Optional[np.ndarray] = None) -> bool:
@@ -157,9 +199,10 @@ class HierarchicalResearchGraph:
         self._infer_peer_review_status(meta)
         self._papers[meta.paper_id] = meta
         self._seen_titles.add(norm)
-        for G in (self.G_semantic, self.G_citation, self.G, self.G_causal):
-            G.add_node(meta.paper_id, level=0, node_type="paper",
-                       weight=meta.effective_weight)
+        for layer in ALL_LAYERS:
+            self._backend.add_node(meta.paper_id, layer, level=0,
+                                   node_type="paper",
+                                   weight=meta.effective_weight)
         self._invalidate()
         return True
 
@@ -291,8 +334,10 @@ class HierarchicalResearchGraph:
 
         # Restore node weights
         for pid, meta in self._papers.items():
-            if pid in self.G_semantic:
-                self.G_semantic.nodes[pid]["weight"] = meta.effective_weight
+            if self._backend.has_node(pid, LAYER_SEMANTIC):
+                self._backend.set_node_attr(pid, "weight",
+                                            meta.effective_weight,
+                                            LAYER_SEMANTIC)
 
         n_found = n_levels_detected(clusters)
         if n_found:
@@ -312,11 +357,12 @@ class HierarchicalResearchGraph:
             ref_sources=self._ref_sources,
             paper_metas=self._papers,
         )
-        # Ensure all paper nodes exist
+        # Ensure all paper nodes exist in citation layer
         for pid in ids:
-            if not self.G_citation.has_node(pid):
-                self.G_citation.add_node(pid, level=0, node_type="paper",
-                                         weight=self._papers[pid].effective_weight)
+            if not self._backend.has_node(pid, LAYER_CITATION):
+                self._backend.add_node(pid, LAYER_CITATION, level=0,
+                                       node_type="paper",
+                                       weight=self._papers[pid].effective_weight)
 
         # ── 3. Fused similarity matrix ────────────────────────────────────
         self._build_fused_matrix(ids, embs, s2_ids)
@@ -452,11 +498,15 @@ class HierarchicalResearchGraph:
             # ── Strengthen / create edges between shown papers ────────────
             for i, pid_a in enumerate(paper_ids):
                 for pid_b in paper_ids[i + 1:]:
-                    for G in (self.G_semantic, self.G):
-                        if G.has_edge(pid_a, pid_b):
-                            w = G[pid_a][pid_b].get("weight", 0.5)
-                            G[pid_a][pid_b]["weight"] = min(1.0, w + boost * 0.1)
-                        elif G.has_node(pid_a) and G.has_node(pid_b):
+                    for layer in (LAYER_SEMANTIC, LAYER_COMBINED):
+                        if self._backend.has_edge(pid_a, pid_b, layer):
+                            w = self._backend.get_edge_attr(
+                                pid_a, pid_b, "weight", layer) or 0.5
+                            self._backend.set_edge_attr(
+                                pid_a, pid_b, "weight",
+                                min(1.0, w + boost * 0.1), layer)
+                        elif (self._backend.has_node(pid_a, layer)
+                              and self._backend.has_node(pid_b, layer)):
                             # Create an interest edge if papers are at least
                             # somewhat related
                             ma = self._papers.get(pid_a)
@@ -467,30 +517,34 @@ class HierarchicalResearchGraph:
                                 sim = float(cosine_similarity(
                                     ma.embedding, mb.embedding))
                                 if sim > 0.30:
-                                    G.add_edge(pid_a, pid_b,
-                                               weight=sim,
-                                               edge_type="interest")
+                                    self._backend.add_edge(
+                                        pid_a, pid_b, layer,
+                                        weight=sim,
+                                        edge_type="interest")
 
             # ── Boost node weights for top shown papers ───────────────────
             for pid in paper_ids[:5]:
                 meta = self._papers.get(pid)
                 if meta and meta.user_rating is None:
-                    for G in (self.G_semantic, self.G_citation, self.G, self.G_causal):
-                        if G.has_node(pid):
-                            old_w = G.nodes[pid].get("weight",
-                                                     DEFAULT_SEED_WEIGHT)
-                            G.nodes[pid]["weight"] = min(10.0,
-                                                         old_w + boost * 0.2)
+                    for layer in ALL_LAYERS:
+                        if self._backend.has_node(pid, layer):
+                            old_w = self._backend.get_node_attr(
+                                pid, "weight", layer) or DEFAULT_SEED_WEIGHT
+                            self._backend.set_node_attr(
+                                pid, "weight",
+                                min(10.0, old_w + boost * 0.2), layer)
 
         elif rating <= 3:
             dampen = (4 - rating) * 0.2    # 1→0.6, 2→0.4, 3→0.2
             for pid in paper_ids[:5]:
                 if pid in self._papers:
-                    for G in (self.G_semantic, self.G_citation, self.G, self.G_causal):
-                        if G.has_node(pid):
-                            old_w = G.nodes[pid].get("weight",
-                                                     DEFAULT_SEED_WEIGHT)
-                            G.nodes[pid]["weight"] = max(1.0, old_w - dampen)
+                    for layer in ALL_LAYERS:
+                        if self._backend.has_node(pid, layer):
+                            old_w = self._backend.get_node_attr(
+                                pid, "weight", layer) or DEFAULT_SEED_WEIGHT
+                            self._backend.set_node_attr(
+                                pid, "weight",
+                                max(1.0, old_w - dampen), layer)
 
         self._invalidate()
 
@@ -526,9 +580,10 @@ class HierarchicalResearchGraph:
         meta = self._papers[paper_id]
         meta.user_rating = float(rating)
         meta.rated_at = time.time()
-        for G in (self.G_semantic, self.G_citation, self.G, self.G_causal):
-            if G.has_node(paper_id):
-                G.nodes[paper_id]["weight"] = meta.effective_weight
+        for layer in ALL_LAYERS:
+            if self._backend.has_node(paper_id, layer):
+                self._backend.set_node_attr(paper_id, "weight",
+                                            meta.effective_weight, layer)
         self._invalidate()
 
     # ── Fetch citations ────────────────────────────────────────────────────────
@@ -1113,7 +1168,7 @@ class HierarchicalResearchGraph:
 
     def _edge_confidences(self) -> list[float]:
         confs: list[float] = []
-        for _, _, data in self.G_citation.edges(data=True):
+        for _, _, data in self._backend.edges_data(LAYER_CITATION):
             conf = data.get("edge_confidence", data.get("cit_confidence", 1.0))
             try:
                 confs.append(float(np.clip(float(conf), 0.0, 1.0)))
@@ -1336,12 +1391,11 @@ class HierarchicalResearchGraph:
             "niche_clusters"        : sum(1 for c in self._clusters.values() if c.level == 1),
             "area_clusters"         : sum(1 for c in self._clusters.values() if c.level == 2),
             "higher_clusters"       : sum(1 for c in self._clusters.values() if c.level >= 3),
-            "semantic_edges"        : self.G_semantic.number_of_edges(),
-            "citation_edges"        : self.G_citation.number_of_edges(),
-            "combined_edges"        : self.G.number_of_edges(),
-            "causal_edges"          : self.G_causal.number_of_edges(),
-            "causal_is_dag"         : nx.is_directed_acyclic_graph(self.G_causal)
-                                      if self.G_causal.number_of_edges() > 0 else True,
+            "semantic_edges"        : self._backend.edge_count(LAYER_SEMANTIC),
+            "citation_edges"        : self._backend.edge_count(LAYER_CITATION),
+            "combined_edges"        : self._backend.edge_count(LAYER_COMBINED),
+            "causal_edges"          : self._backend.edge_count(LAYER_CAUSAL),
+            "causal_is_dag"         : self._backend.is_dag(LAYER_CAUSAL),
             "citations_loaded"      : len(self._refs),
             "multi_source_refs"     : sum(1 for v in self._ref_sources.values()
                                          if len(v) >= 2),
@@ -1366,22 +1420,35 @@ class HierarchicalResearchGraph:
     def __setstate__(self, state: dict):
         """
         Called by pickle.load() when deserialising an older saved graph.
-        Initialises any attributes that did not exist in earlier versions.
+        Initialises any attributes that did not exist in earlier versions
+        and migrates raw DiGraph objects into the backend abstraction.
         """
         self.__dict__.update(state)
+
+        # ── Migrate raw DiGraph objects into a NetworkXBackend ────────────
+        # Old pickles store G_semantic, G_citation, G, G_causal as raw DiGraphs.
+        # New code uses a _backend. Create a backend and populate it.
+        if not hasattr(self, "_backend"):
+            backend = NetworkXBackend()
+            _layer_map = {
+                LAYER_SEMANTIC: "G_semantic",
+                LAYER_CITATION: "G_citation",
+                LAYER_COMBINED: "G",
+                LAYER_CAUSAL:   "G_causal",
+            }
+            for layer, attr_name in _layer_map.items():
+                old_g = self.__dict__.pop(attr_name, None)
+                if old_g is not None and isinstance(old_g, nx.DiGraph):
+                    backend.set_from_networkx(layer, old_g)
+            self._backend = backend
+
         # v0.3.0 additions — absent from v0.2.0 pickles
         if not hasattr(self, "_clusters"):
             self._clusters: dict = {}
-        if not hasattr(self, "G_semantic"):
-            self.G_semantic = nx.DiGraph()
-        if not hasattr(self, "G_citation"):
-            self.G_citation = nx.DiGraph()
         if not hasattr(self, "_refs"):
             self._refs: dict = {}
         else:
             # v0.3.0 refs were keyed by s2_id; v0.3.1+ uses paper_id.
-            # Detect by checking if any key looks like a paper_id (short hex/prefix).
-            # If refs are s2-keyed, reset — they will be re-fetched via OpenAlex.
             paper_id_set = set(getattr(self, "_papers", {}).keys())
             if self._refs and not any(k in paper_id_set for k in self._refs):
                 logger.info("Migrating citation refs to new format (will re-fetch) ...")
@@ -1402,9 +1469,6 @@ class HierarchicalResearchGraph:
             self._argument_interactions: list = []
         if not hasattr(self, "_style_profile"):
             self._style_profile = None
-        # v0.6.0 — causal DAG (acyclic influence flow)
-        if not hasattr(self, "G_causal"):
-            self.G_causal = nx.DiGraph()
         # v0.8.0 — citation cross-validation + publication quality
         if not hasattr(self, "_ref_sources"):
             self._ref_sources: dict = {}
@@ -1423,25 +1487,21 @@ class HierarchicalResearchGraph:
             if not hasattr(meta, "is_peer_reviewed"):
                 meta.is_peer_reviewed = None
             if not hasattr(meta, "rated_at"):
-                # Backfill: if paper was rated, assume it was rated "recently"
                 meta.rated_at = time.time() if meta.user_rating is not None else 0.0
         # v0.2.0 used n_levels; v0.3.0 uses alpha only
         if not hasattr(self, "alpha"):
             self.alpha = FUSION_ALPHA
-        # Ensure combined graph exists
-        if not hasattr(self, "G") or self.G is None:
-            self.G = nx.DiGraph()
-        # Rebuild three networks from scratch if we only have the old single G
-        if (self.G_semantic.number_of_nodes() == 0
+        # Ensure semantic layer has nodes (migrate v0.2.0 → v0.3.0)
+        if (self._backend.node_count(LAYER_SEMANTIC) == 0
                 and len(self._papers) >= 3):
             logger.info("Migrating v0.2.0 graph to v0.3.0 three-network format ...")
-            # Seed all paper nodes into the three graphs
             for meta in self._papers.values():
-                for graph in (self.G_semantic, self.G_citation, self.G):
-                    if not graph.has_node(meta.paper_id):
-                        graph.add_node(meta.paper_id, level=0,
-                                       node_type="paper",
-                                       weight=meta.effective_weight)
+                for layer in (LAYER_SEMANTIC, LAYER_CITATION, LAYER_COMBINED):
+                    if not self._backend.has_node(meta.paper_id, layer):
+                        self._backend.add_node(
+                            meta.paper_id, layer, level=0,
+                            node_type="paper",
+                            weight=meta.effective_weight)
 
     @staticmethod
     def make_id(title: str, doi: str = "", s2_id: str = "", arxiv_id: str = "") -> str:
@@ -1459,9 +1519,10 @@ class HierarchicalResearchGraph:
         for meta in getattr(old, "_papers", {}).values():
             new._papers[meta.paper_id] = meta
             new._seen_titles.add(meta.title.lower().strip())
-            for G in (new.G_semantic, new.G_citation, new.G, new.G_causal):
-                G.add_node(meta.paper_id, level=0, node_type="paper",
-                           weight=meta.effective_weight)
+            for layer in ALL_LAYERS:
+                new._backend.add_node(meta.paper_id, layer, level=0,
+                                      node_type="paper",
+                                      weight=meta.effective_weight)
         logger.info("Migrated %d papers from legacy format.", len(new._papers))
         return new
 

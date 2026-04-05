@@ -1,6 +1,6 @@
 # ResearchBuddy
 
-> **v1.0.0** — Adaptive learned scoring · Temporal decay · Cold-start intelligence · Full-text embeddings via CORE · Hierarchical Small World Network + Causal DAG + LLM-powered Reasoning & Creative Modes
+> **v2.0.0** — Neo4j graph backend · Adaptive learned scoring · Temporal decay · Cold-start intelligence · Full-text embeddings via CORE · Hierarchical Small World Network + Causal DAG + LLM-powered Reasoning & Creative Modes
 
 A **graph-based literature search assistant** that learns your research interests from your own PDFs and actively finds new papers for you — like a smart colleague who reads everything and brings you only what matters.
 
@@ -73,6 +73,44 @@ This works out of the box without any setup. For faster access and no rate limit
 export CORE_API_KEY=your_key_here   # Linux/macOS
 set CORE_API_KEY=your_key_here      # Windows
 ```
+
+### Optional: Neo4j graph database
+
+By default, ResearchBuddy stores the research graph in memory using NetworkX (same as always). For **persistent graph storage**, **faster multi-hop traversals**, and the ability to **explore your graph in Neo4j Browser**, you can optionally use Neo4j as the backend:
+
+```bash
+# Install the Neo4j driver
+pip install researchbuddy[neo4j]
+
+# Option A: Docker (easiest)
+docker run -d --name researchbuddy-neo4j \
+  -p 7474:7474 -p 7687:7687 \
+  -e NEO4J_AUTH=neo4j/researchbuddy \
+  neo4j:5-community
+
+# Option B: Install Neo4j Desktop from https://neo4j.com/download/
+```
+
+Then enable it:
+
+```bash
+# Set environment variables (or add to your shell profile)
+export RESEARCHBUDDY_NEO4J_ENABLED=true
+export RESEARCHBUDDY_NEO4J_PASSWORD=researchbuddy
+
+# Start ResearchBuddy — it will auto-migrate your existing graph
+researchbuddy
+```
+
+When Neo4j is enabled, you get:
+- **Persistent storage** — your graph survives without pickle files
+- **Neo4j Browser** — open `http://localhost:7474` to visually explore your research graph with Cypher queries
+- **Faster traversals** — citation chains and influence paths use native graph algorithms
+- **Full-text search** — Cypher-based search across paper titles and abstracts
+
+If Neo4j is unavailable (server down, not installed), ResearchBuddy automatically falls back to NetworkX with a warning message. No data is lost.
+
+The menu header shows which backend is active: `[Neo4j]` or `[NetworkX]`.
 
 ### Optional: LLM features (Ollama)
 

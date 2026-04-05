@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 from researchbuddy.config import STATE_FILE, DATA_DIR, HISTORY_DIR, STATE_HISTORY_KEEP
 from researchbuddy.core.graph_model import HierarchicalResearchGraph, ResearchGraph, PaperMeta
+from researchbuddy.core.graph_backend import create_backend, NetworkXBackend
 from researchbuddy.core.pdf_processor import extract_from_folder, ExtractedPaper
 
 
@@ -69,10 +70,47 @@ def load(path: Path = STATE_FILE) -> Optional[HierarchicalResearchGraph]:
             graph = HierarchicalResearchGraph.from_legacy(graph)
         logger.info("Graph loaded <- %s", path)
         _migrate_embeddings_if_needed(graph)
+
+        # If Neo4j is configured, migrate the in-memory graph to Neo4j backend
+        backend = create_backend()
+        if not isinstance(backend, NetworkXBackend):
+            _migrate_to_backend(graph, backend)
+
         return graph
     except Exception as e:
         logger.warning("Could not load saved state (%s). Starting fresh.", e)
         return None
+
+
+def _migrate_to_backend(graph: HierarchicalResearchGraph, backend) -> None:
+    """Migrate graph data from NetworkX backend to a new backend (e.g. Neo4j)."""
+    from researchbuddy.core.graph_backend import (
+        LAYER_SEMANTIC, LAYER_CITATION, LAYER_COMBINED, LAYER_CAUSAL,
+    )
+
+    # Check if Neo4j already has data
+    if backend.node_count(LAYER_SEMANTIC) > 0:
+        logger.info("Neo4j backend already has data, using existing graph.")
+        graph._backend = backend
+        return
+
+    logger.info("Migrating graph to Neo4j backend ...")
+    old_backend = graph._backend
+
+    # Transfer each layer
+    for layer, attr_name in [
+        (LAYER_SEMANTIC, "semantic"),
+        (LAYER_CITATION, "citation"),
+        (LAYER_COMBINED, "combined"),
+        (LAYER_CAUSAL, "causal"),
+    ]:
+        G = old_backend.to_networkx(layer)
+        if G.number_of_nodes() > 0:
+            backend.set_from_networkx(layer, G)
+
+    graph._backend = backend
+    backend.sync()
+    logger.info("Migration to Neo4j complete.")
 
 
 def _migrate_embeddings_if_needed(graph: HierarchicalResearchGraph) -> None:

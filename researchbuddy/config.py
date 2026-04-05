@@ -96,6 +96,15 @@ HYDE_ENABLED          = True             # HyDE for search
 LLM_QUERY_EXPANSION  = True             # LLM query expansion for search
 LLM_RERANK_ENABLED   = True             # LLM reranking of search results
 
+# ── Neo4j (optional — falls back to NetworkX if unavailable) ─────────────────
+import os as _os
+NEO4J_ENABLED        = _os.getenv("RESEARCHBUDDY_NEO4J_ENABLED", "").lower() in ("1", "true", "yes")
+NEO4J_URI            = _os.getenv("RESEARCHBUDDY_NEO4J_URI", "bolt://localhost:7687")
+NEO4J_USER           = _os.getenv("RESEARCHBUDDY_NEO4J_USER", "neo4j")
+NEO4J_PASSWORD       = _os.getenv("RESEARCHBUDDY_NEO4J_PASSWORD", "")
+NEO4J_DATABASE       = _os.getenv("RESEARCHBUDDY_NEO4J_DATABASE", "neo4j")
+NON_GRAPH_STATE_FILE = DATA_DIR / "non_graph_state.pkl"
+
 # ── Embedding device ─────────────────────────────────────────────────────────
 EMBEDDING_DEVICE     = "auto"           # "auto" | "cuda" | "cpu"
 

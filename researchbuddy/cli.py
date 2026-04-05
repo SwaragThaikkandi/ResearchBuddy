@@ -669,7 +669,7 @@ def audit_edges(graph: HierarchicalResearchGraph):
 
     # â”€â”€ 1. Low-confidence citation edges â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     low_conf_edges = []
-    for u, v, d in graph.G_citation.edges(data=True):
+    for u, v, d in graph._backend.edges_data("citation"):
         conf = d.get("edge_confidence", 1.0)
         if conf < 0.5:
             low_conf_edges.append((u, v, conf, d.get("etype", "?")))
@@ -916,12 +916,13 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
         llm_tag = ""
         if cfg.LLM_ENABLED and not _check_llm_available():
             llm_tag = "  [NO LLM]"
+        backend_tag = f"  [{graph._backend.backend_name}]"
         print_info(
             f"  {s['total_papers']} papers  |  {s['rated_papers']} rated  |  "
             f"{s['hierarchy_levels']} levels  |  "
             f"{s['niche_clusters']} niches  |  {s['area_clusters']} areas  |  "
             f"sem={s['semantic_edges']} edges  cit={s['citation_edges']} edges"
-            f"{mode_tag}{llm_tag}"
+            f"{mode_tag}{llm_tag}{backend_tag}"
         )
         print()
         for key, desc in options.items():
