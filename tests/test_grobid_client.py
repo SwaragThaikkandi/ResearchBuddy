@@ -235,6 +235,20 @@ def test_extract_end_to_end_with_mocked_grobid(tmp_path: pathlib.Path):
     assert any(r.doi == "10.5678/pearl.2023" for r in ep.references)
 
 
+def test_extract_raises_GrobidTimeout_on_read_timeout(tmp_path: pathlib.Path):
+    """Read timeouts should be raised so callers can retry with a larger budget."""
+    import requests
+    from researchbuddy.core.grobid_client import GrobidTimeout
+
+    pdf = tmp_path / "sample.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+
+    with patch("researchbuddy.core.grobid_client.requests.post") as mock_post:
+        mock_post.side_effect = requests.ReadTimeout("read timed out")
+        with pytest.raises(GrobidTimeout):
+            extract(pdf, base_url="http://localhost:8070", timeout=5.0)
+
+
 def test_extract_returns_none_on_grobid_error(tmp_path: pathlib.Path):
     pdf = tmp_path / "sample.pdf"
     pdf.write_bytes(b"%PDF-1.4 fake")

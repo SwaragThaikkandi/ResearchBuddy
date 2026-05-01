@@ -125,28 +125,39 @@ By default, ResearchBuddy parses PDFs with `pdfplumber`. That works, but `pdfplu
 - **Cleaner embeddings** — section-aware chunking instead of dumb word splits
 - **Far better titles** — no more "Microsoft Word - draft.docx" garbage
 
-Run GROBID as a Docker container (it uses ~1 GB of RAM, runs on CPU, no GPU needed):
+Run GROBID as a Docker container. There are two flavours:
 
 ```bash
-# One-shot
-docker run -d --rm --name grobid -p 8070:8070 lfoppiano/grobid:0.8.1
-
-# Or with a persistent name so you can stop / start it
+# Recommended for most users — full image with deep-learning models
+# (~1.5 GB RAM, slower first PDF on CPU)
 docker run -d --name grobid -p 8070:8070 lfoppiano/grobid:0.8.1
-docker start grobid          # next time
+
+# Lighter alternative — CRF-only, no deep learning
+# (~700 MB RAM, ~3-5x faster on CPU, slightly less accurate)
+docker run -d --name grobid -p 8070:8070 grobid/grobid:0.8.1-crf
 ```
 
 That's it — no further configuration needed. If GROBID is reachable at `http://localhost:8070`, ResearchBuddy will use it.
 
-To disable or point at a different instance:
+**First-PDF cold start:** the first time GROBID handles a PDF after startup, it loads its ML models (~30 seconds on CPU). ResearchBuddy sends a tiny warmup request the moment it detects GROBID is alive, so by the time your real PDFs arrive the models are already loaded.
+
+**Slow CPU?** Bump the per-PDF timeout. ResearchBuddy already retries once at double the budget on a timeout before falling back to pdfplumber:
 
 ```bash
-# Disable (force pdfplumber)
+# Default is 180s. Doubles to 360s on first timeout. If your PDFs are
+# long or your CPU is slow, raise this:
+export RESEARCHBUDDY_GROBID_TIMEOUT=300
+```
+
+Other knobs:
+
+```bash
+# Disable GROBID entirely (force pdfplumber)
 export RESEARCHBUDDY_GROBID_ENABLED=false
-# Custom URL
+# Custom URL (e.g. remote GROBID server)
 export RESEARCHBUDDY_GROBID_URL=http://my-grobid-host:8070
-# Per-PDF timeout in seconds (default 60)
-export RESEARCHBUDDY_GROBID_TIMEOUT=120
+# Skip the warmup ping (first real PDF will pay the model-load cost)
+export RESEARCHBUDDY_GROBID_WARMUP=false
 ```
 
 If the GROBID service goes down mid-import, ResearchBuddy will silently fall back to `pdfplumber` for the affected papers — your import never fails because of GROBID.

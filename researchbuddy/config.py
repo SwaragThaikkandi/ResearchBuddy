@@ -136,7 +136,14 @@ LLM_RERANK_ENABLED   = True             # LLM reranking of search results
 #   docker run -d --rm -p 8070:8070 lfoppiano/grobid:0.8.1
 GROBID_ENABLED = _env_bool("RESEARCHBUDDY_GROBID_ENABLED", True)
 GROBID_URL     = _os.getenv("RESEARCHBUDDY_GROBID_URL", "http://localhost:8070").rstrip("/")
-GROBID_TIMEOUT = _env_int("RESEARCHBUDDY_GROBID_TIMEOUT", 60, min_value=5)
+# Generous default — GROBID's first request triggers ML model loading
+# (~30s on CPU); long PDFs add another 30–60s on top. Subsequent requests
+# are much faster. Bump this if you're running GROBID on a slow CPU or
+# parsing book-length documents.
+GROBID_TIMEOUT = _env_int("RESEARCHBUDDY_GROBID_TIMEOUT", 180, min_value=10)
+# Send a tiny warmup request after GROBID becomes reachable so the first
+# real PDF doesn't pay the model-load cost. Disable if undesired.
+GROBID_WARMUP  = _env_bool("RESEARCHBUDDY_GROBID_WARMUP", True)
 
 # ── Neo4j (optional — falls back to NetworkX if unavailable) ─────────────────
 NEO4J_ENABLED        = _os.getenv("RESEARCHBUDDY_NEO4J_ENABLED", "").lower() in ("1", "true", "yes")

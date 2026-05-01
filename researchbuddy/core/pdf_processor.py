@@ -372,7 +372,11 @@ _GROBID_PROBE_TTL = 300.0   # seconds
 
 
 def _grobid_available(base_url: str) -> bool:
-    """Cached availability probe — refreshed every 5 minutes."""
+    """
+    Cached availability probe — refreshed every 5 minutes. The first time
+    a probe succeeds, we also send a warmup request so the first real PDF
+    isn't slowed by GROBID's one-off model-loading cost (~30s on CPU).
+    """
     import time
     from researchbuddy.core import grobid_client
 
@@ -386,6 +390,13 @@ def _grobid_available(base_url: str) -> bool:
     _grobid_probe_cache[base_url] = (now, ok)
     if ok:
         logger.info("GROBID is reachable at %s — using it for PDF parsing.", base_url)
+        try:
+            from researchbuddy.config import GROBID_WARMUP
+        except ImportError:
+            GROBID_WARMUP = True
+        if GROBID_WARMUP:
+            logger.info("[GROBID] Loading models (one-time warmup, ~30s) ...")
+            grobid_client.warmup(base_url)
     else:
         logger.info("GROBID not reachable at %s — falling back to pdfplumber.", base_url)
     return ok
@@ -459,25 +470,47 @@ def extract_from_pdf(filepath: str | Path) -> Optional[ExtractedPaper]:
         return None
 
     try:
-        from researchbuddy.config import GROBID_ENABLED, GROBID_URL
+        from researchbuddy.config import GROBID_ENABLED, GROBID_URL, GROBID_TIMEOUT
     except ImportError:
-        GROBID_ENABLED, GROBID_URL = False, ""
+        GROBID_ENABLED, GROBID_URL, GROBID_TIMEOUT = False, "", 180
 
     if GROBID_ENABLED and GROBID_URL and _grobid_available(GROBID_URL):
-        try:
-            from researchbuddy.core import grobid_client
-            ep = grobid_client.extract(filepath, base_url=GROBID_URL)
-            if ep is not None and (ep.title or ep.full_text):
-                return ep
-            logger.info(
-                "GROBID returned an empty result for %s — falling back to pdfplumber.",
-                filepath.name,
-            )
-        except Exception as e:
-            logger.warning(
-                "GROBID extraction failed for %s (%s) — falling back to pdfplumber.",
-                filepath.name, e,
-            )
+        from researchbuddy.core import grobid_client
+        from researchbuddy.core.grobid_client import GrobidTimeout
+        # Try once at the configured timeout; if it timed out, retry once
+        # with double the budget. After the second failure, fall back to
+        # pdfplumber. This handles cold-start spikes and unusually long PDFs
+        # without blocking forever on a stuck GROBID.
+        for attempt, t in enumerate((float(GROBID_TIMEOUT), float(GROBID_TIMEOUT) * 2.0), 1):
+            try:
+                ep = grobid_client.extract(filepath, base_url=GROBID_URL, timeout=t)
+                if ep is not None and (ep.title or ep.full_text):
+                    return ep
+                # Empty result usually means a non-PDF or a corrupt file —
+                # don't retry, just fall back.
+                logger.info(
+                    "GROBID returned an empty result for %s — falling back to pdfplumber.",
+                    filepath.name,
+                )
+                break
+            except GrobidTimeout:
+                if attempt == 1:
+                    logger.info(
+                        "GROBID timed out on %s after %.0fs — retrying with %.0fs.",
+                        filepath.name, t, t * 2.0,
+                    )
+                    continue
+                logger.warning(
+                    "GROBID timed out twice on %s — falling back to pdfplumber.",
+                    filepath.name,
+                )
+                break
+            except Exception as e:
+                logger.warning(
+                    "GROBID extraction failed for %s (%s) — falling back to pdfplumber.",
+                    filepath.name, e,
+                )
+                break
 
     return _extract_via_pdfplumber(filepath)
 

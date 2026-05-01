@@ -59,6 +59,47 @@ def is_available(base_url: str, timeout: float = 2.0) -> bool:
         return False
 
 
+def warmup(base_url: str, timeout: float = 90.0) -> bool:
+    """
+    Trigger GROBID model loading by sending a no-op header request.
+
+    The first /api/processHeaderDocument call after a fresh GROBID start
+    spends ~20-40s loading transformer models (CPU-only setups can take
+    longer). Calling this once means the first real PDF parse is fast.
+
+    Returns True if a 200 came back within the timeout, False otherwise.
+    Failures are non-fatal — the caller will still try real requests.
+    """
+    # Tiny synthetic PDF (1-page, just a title). This is the smallest
+    # parseable PDF I could produce. GROBID's response is irrelevant —
+    # we only care that the models got loaded.
+    minimal_pdf = (
+        b"%PDF-1.4\n"
+        b"1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+        b"2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\n"
+        b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]"
+        b"/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj\n"
+        b"4 0 obj<</Length 44>>stream\n"
+        b"BT /F1 12 Tf 100 700 Td (Warmup Document) Tj ET\n"
+        b"endstream endobj\n"
+        b"5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\n"
+        b"xref\n0 6\n0000000000 65535 f \n"
+        b"0000000009 00000 n \n0000000052 00000 n \n"
+        b"0000000095 00000 n \n0000000179 00000 n \n0000000273 00000 n \n"
+        b"trailer<</Size 6/Root 1 0 R>>\nstartxref\n333\n%%EOF\n"
+    )
+    url = f"{base_url.rstrip('/')}/api/processHeaderDocument"
+    try:
+        files = {"input": ("warmup.pdf", minimal_pdf, "application/pdf")}
+        r = requests.post(url, files=files, timeout=timeout)
+        # Even a 4xx means the server got the request and loaded models;
+        # we treat anything that returns within the timeout as "warmed".
+        return r.status_code < 500
+    except requests.RequestException as e:
+        logger.debug("GROBID warmup failed (%s) — first PDF may be slow.", e)
+        return False
+
+
 # ── Parsing helpers ───────────────────────────────────────────────────────────
 
 def _text(elem: Optional[ET.Element]) -> str:
@@ -240,14 +281,21 @@ def _full_text_from_sections(sections: list[Section]) -> str:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+class GrobidTimeout(Exception):
+    """Raised when a GROBID request exceeds the configured timeout."""
+
+
 def extract(
     filepath: str | Path,
     base_url: str,
-    timeout: float = 60.0,
+    timeout: float = 180.0,
 ) -> Optional[ExtractedPaper]:
     """
     Send a PDF to GROBID's processFulltextDocument endpoint and return an
     ExtractedPaper, or None on failure.
+
+    Raises GrobidTimeout if the read times out (so callers can retry with
+    a larger budget). All other errors are converted to None and logged.
 
     Note: this does NOT check availability first. Call is_available() at
     the call site if you want a quick health probe before bulk imports.
@@ -267,13 +315,20 @@ def extract(
                 "includeRawCitations": "1",
                 "segmentSentences": "0",
             }
-            r = requests.post(url, files=files, data=data, timeout=timeout)
+            # Short connect timeout (we already health-probed), generous
+            # read timeout for the actual ML inference.
+            r = requests.post(
+                url, files=files, data=data, timeout=(10.0, float(timeout)),
+            )
         if r.status_code != 200:
             logger.warning(
                 "GROBID returned %d for %s (%s)",
                 r.status_code, filepath.name, r.text[:200],
             )
             return None
+    except (requests.ReadTimeout, requests.ConnectTimeout, requests.Timeout) as e:
+        # Surface timeouts so the caller can retry with a longer budget.
+        raise GrobidTimeout(str(e)) from e
     except requests.RequestException as e:
         logger.warning("GROBID request failed for %s: %s", filepath.name, e)
         return None
