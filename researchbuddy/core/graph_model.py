@@ -82,6 +82,11 @@ class PaperMeta:
     rated_at: float                 = 0.0    # timestamp when user_rating was set
     times_shown: int                = 0
     last_shown: float               = 0.0
+    # ── GROBID-derived structured fields (empty when pdfplumber fallback) ──
+    local_refs: list[dict]          = field(default_factory=list)  # parsed references from PDF
+    figure_captions: list[str]      = field(default_factory=list)  # figure captions
+    table_captions: list[str]       = field(default_factory=list)  # table captions
+    equations: list[str]            = field(default_factory=list)  # math formulae
 
     @property
     def effective_weight(self) -> float:
@@ -638,19 +643,96 @@ class HierarchicalResearchGraph:
                 if doi:
                     meta.doi = doi
 
+        # ── Step 1b: Populate _refs from GROBID-parsed local references ──
+        # When a paper was imported via GROBID, its local_refs already contain
+        # parsed reference DOIs from the PDF itself. Use these as a "free"
+        # citation source — no API call, no rate limiting, captures unlisted
+        # citations missed by CrossRef/OpenAlex.
+        n_local_refs_used = self._populate_refs_from_local(verbose=verbose)
+
         need = [m for m in self._papers.values()
                 if m.paper_id not in self._refs]
         if not need:
             if verbose:
-                logger.info("Citation data already up to date.")
+                logger.info(
+                    "Citation data already up to date (%d papers got refs from local PDFs).",
+                    n_local_refs_used,
+                )
             return
         if verbose:
-            logger.info("Fetching citations for %d papers ...", len(need))
+            if n_local_refs_used:
+                logger.info(
+                    "Got %d papers' refs from local PDFs (GROBID); "
+                    "fetching the remaining %d via APIs ...",
+                    n_local_refs_used, len(need),
+                )
+            else:
+                logger.info("Fetching citations for %d papers ...", len(need))
         self._refs = fetch_all_refs(
             need, existing=self._refs, verbose=verbose,
             ref_sources_out=self._ref_sources,
         )
         self._invalidate()
+
+    def _populate_refs_from_local(self, verbose: bool = True) -> int:
+        """
+        Materialise self._refs entries from PaperMeta.local_refs (populated by
+        GROBID at import time). For each cited paper, prefer its DOI; if no DOI
+        was parsed, fall back to a fuzzy title match against the rest of the
+        corpus so we still build internal edges.
+
+        Returns the number of papers whose refs were populated locally.
+        """
+        from researchbuddy.core.citation_network import RefResult
+
+        n_populated = 0
+        # Pre-build a normalised title -> paper_id map for fuzzy resolution
+        title_index = {
+            self._normalise_title(m.title): m.paper_id
+            for m in self._papers.values() if m.title
+        }
+
+        for meta in self._papers.values():
+            if meta.paper_id in self._refs:
+                continue
+            local = getattr(meta, "local_refs", None) or []
+            if not local:
+                continue
+
+            ref_ids: set[str] = set()
+            for r in local:
+                doi = (r.get("doi") or "").lower().strip()
+                if doi:
+                    ref_ids.add(doi)
+                    continue
+                # Fall back to title match within our own corpus
+                title = (r.get("title") or "").strip()
+                if title:
+                    key = self._normalise_title(title)
+                    matched_id = title_index.get(key)
+                    if matched_id and matched_id != meta.paper_id:
+                        ref_ids.add(matched_id)
+
+            if ref_ids:
+                self._refs[meta.paper_id] = ref_ids
+                # Record this as a per-source result so confidence scoring
+                # knows where it came from.
+                self._ref_sources.setdefault(meta.paper_id, []).append(
+                    RefResult(source="grobid_local", ref_ids=set(ref_ids))
+                )
+                n_populated += 1
+
+        if verbose and n_populated:
+            logger.info(
+                "[citation] Populated refs for %d papers directly from "
+                "GROBID-parsed PDFs (no API calls).", n_populated,
+            )
+        return n_populated
+
+    @staticmethod
+    def _normalise_title(title: str) -> str:
+        """Lowercase, alnum-only title fingerprint for fuzzy matching."""
+        return re.sub(r"[^a-z0-9]+", "", (title or "").lower())
 
     # ── Publication quality ─────────────────────────────────────────────────────
 

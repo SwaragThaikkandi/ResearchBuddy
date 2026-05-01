@@ -164,6 +164,33 @@ def import_pdf_folder(graph: HierarchicalResearchGraph, folder: str | Path) -> i
             filepath=ep.filepath,
             doi=ep.doi,  # DOI extracted from PDF text
         )
+        # Carry over GROBID-derived structured fields when present.
+        # These let fetch_citations() build the citation network from the
+        # PDFs themselves before any external API call.
+        if getattr(ep, "references", None):
+            meta.local_refs = [
+                {
+                    "title": r.title,
+                    "doi":   (r.doi or "").lower(),
+                    "year":  r.year,
+                    "authors": list(r.authors),
+                    "raw":   r.raw,
+                }
+                for r in ep.references if (r.title or r.doi)
+            ]
+        if getattr(ep, "figures", None):
+            meta.figure_captions = [
+                (f"{f.label}: {f.caption}".strip(": ").strip())
+                for f in ep.figures if (f.label or f.caption)
+            ]
+        if getattr(ep, "tables", None):
+            meta.table_captions = [
+                (f"{t.label}: {t.caption}".strip(": ").strip())
+                for t in ep.tables if (t.label or t.caption)
+            ]
+        if getattr(ep, "equations", None):
+            meta.equations = list(ep.equations)
+
         graph.embed_paper(meta, ep.chunks)
 
         if graph.add_paper(meta):

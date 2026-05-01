@@ -28,6 +28,35 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class Section:
+    """A logical section parsed from the document (intro, methods, results, …)."""
+    heading: str
+    text: str
+
+
+@dataclass
+class Figure:
+    label: str             # e.g. "Figure 1"
+    caption: str           # full caption text
+
+
+@dataclass
+class Table:
+    label: str             # e.g. "Table 1"
+    caption: str
+    text: str = ""         # flattened table contents (cell-joined)
+
+
+@dataclass
+class Reference:
+    raw: str               # the as-printed reference string (best effort)
+    title: str = ""
+    doi: str = ""
+    year: str = ""
+    authors: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ExtractedPaper:
     filepath: str
     paper_id: str          # SHA-1 of filepath (stable local ID)
@@ -36,6 +65,14 @@ class ExtractedPaper:
     full_text: str         # first ~5000 chars of body text
     chunks: list[str] = field(default_factory=list)  # paragraphs for embedding
     doi: str = ""          # DOI extracted from PDF text (e.g. 10.1234/abc)
+
+    # ── Structured fields (populated by GROBID; empty when pdfplumber falls back)
+    sections:  list[Section]   = field(default_factory=list)
+    figures:   list[Figure]    = field(default_factory=list)
+    tables:    list[Table]     = field(default_factory=list)
+    equations: list[str]       = field(default_factory=list)
+    references: list[Reference] = field(default_factory=list)
+    parser:    str             = "pdfplumber"   # "grobid" | "pdfplumber"
 
 
 # ── Ligature / Unicode normalisation ─────────────────────────────────────────
@@ -328,15 +365,36 @@ def _stable_id(path: str) -> str:
 
 # ── public API ─────────────────────────────────────────────────────────────────
 
-def extract_from_pdf(filepath: str | Path) -> Optional[ExtractedPaper]:
-    """Parse a PDF and return an ExtractedPaper, or None on failure."""
+# Module-level cache of the last GROBID availability probe so we don't pay the
+# health-check round-trip on every PDF in a bulk import.
+_grobid_probe_cache: dict[str, tuple[float, bool]] = {}
+_GROBID_PROBE_TTL = 300.0   # seconds
+
+
+def _grobid_available(base_url: str) -> bool:
+    """Cached availability probe — refreshed every 5 minutes."""
+    import time
+    from researchbuddy.core import grobid_client
+
+    now = time.monotonic()
+    cached = _grobid_probe_cache.get(base_url)
+    if cached is not None:
+        ts, ok = cached
+        if (now - ts) < _GROBID_PROBE_TTL:
+            return ok
+    ok = grobid_client.is_available(base_url)
+    _grobid_probe_cache[base_url] = (now, ok)
+    if ok:
+        logger.info("GROBID is reachable at %s — using it for PDF parsing.", base_url)
+    else:
+        logger.info("GROBID not reachable at %s — falling back to pdfplumber.", base_url)
+    return ok
+
+
+def _extract_via_pdfplumber(filepath: Path) -> Optional[ExtractedPaper]:
+    """Original pdfplumber-based extraction. Used when GROBID is unavailable."""
     if pdfplumber is None:
         raise ImportError("pdfplumber is not installed. Run: pip install pdfplumber")
-
-    filepath = Path(filepath)
-    if not filepath.exists():
-        return None
-
     try:
         pages_text: list[str] = []
         with pdfplumber.open(filepath) as pdf:
@@ -382,10 +440,46 @@ def extract_from_pdf(filepath: str | Path) -> Optional[ExtractedPaper]:
             full_text = body,
             chunks    = chunks,
             doi       = doi,
+            parser    = "pdfplumber",
         )
     except Exception as e:
         logger.warning("Could not read %s: %s", filepath.name, e)
         return None
+
+
+def extract_from_pdf(filepath: str | Path) -> Optional[ExtractedPaper]:
+    """
+    Parse a PDF and return an ExtractedPaper, or None on failure.
+
+    Tries GROBID first (when configured and reachable) for high-quality
+    structured extraction. Falls back to pdfplumber otherwise.
+    """
+    filepath = Path(filepath)
+    if not filepath.exists():
+        return None
+
+    try:
+        from researchbuddy.config import GROBID_ENABLED, GROBID_URL
+    except ImportError:
+        GROBID_ENABLED, GROBID_URL = False, ""
+
+    if GROBID_ENABLED and GROBID_URL and _grobid_available(GROBID_URL):
+        try:
+            from researchbuddy.core import grobid_client
+            ep = grobid_client.extract(filepath, base_url=GROBID_URL)
+            if ep is not None and (ep.title or ep.full_text):
+                return ep
+            logger.info(
+                "GROBID returned an empty result for %s — falling back to pdfplumber.",
+                filepath.name,
+            )
+        except Exception as e:
+            logger.warning(
+                "GROBID extraction failed for %s (%s) — falling back to pdfplumber.",
+                filepath.name, e,
+            )
+
+    return _extract_via_pdfplumber(filepath)
 
 
 def reextract_title_doi(filepath: str | Path) -> tuple[str, str]:

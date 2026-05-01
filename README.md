@@ -1,6 +1,6 @@
 # ResearchBuddy
 
-> **v2.0.0** — Neo4j graph backend · Adaptive learned scoring · Temporal decay · Cold-start intelligence · Full-text embeddings via CORE · Hierarchical Small World Network + Causal DAG + LLM-powered Reasoning & Creative Modes
+> **v2.1.0** — GROBID PDF parsing (figures/tables/equations + local citation network) · Neo4j graph backend · VRAM-aware embedder · Adaptive learned scoring · Temporal decay · Cold-start intelligence · Full-text embeddings via CORE · Hierarchical Small World Network + Causal DAG + LLM-powered Reasoning & Creative Modes
 
 A **graph-based literature search assistant** that learns your research interests from your own PDFs and actively finds new papers for you — like a smart colleague who reads everything and brings you only what matters.
 
@@ -55,6 +55,7 @@ pip install -e .
 
 ```
 sentence-transformers  einops  networkx  pdfplumber  requests  numpy
+# Optional services (auto-detected): GROBID (Docker) · Neo4j (Docker) · Ollama
 scikit-learn  scipy  rich  keybert  matplotlib
 ```
 
@@ -111,6 +112,44 @@ When Neo4j is enabled, you get:
 If Neo4j is unavailable (server down, not installed), ResearchBuddy automatically falls back to NetworkX with a warning message. No data is lost.
 
 The menu header shows which backend is active: `[Neo4j]` or `[NetworkX]`.
+
+### Recommended: GROBID for academic-PDF parsing
+
+By default, ResearchBuddy parses PDFs with `pdfplumber`. That works, but `pdfplumber` was not designed for scholarly papers — it struggles with two-column layouts, ligatures, equations, references, and figure/table captions.
+
+[**GROBID**](https://grobid.readthedocs.io/) is a machine-learning library purpose-built for scientific PDFs. When ResearchBuddy detects a running GROBID instance, it switches to it automatically. You get:
+
+- **Clean structured output** — title, abstract, sections, figures, tables, equations parsed separately
+- **Reference extraction from the PDF itself** — every cited paper's authors, title, year, and DOI parsed locally
+- **Citation graph without API calls** — the bibliography is matched against the rest of your library before CrossRef/OpenAlex is touched, dramatically reducing rate-limit risk and capturing references the APIs miss
+- **Cleaner embeddings** — section-aware chunking instead of dumb word splits
+- **Far better titles** — no more "Microsoft Word - draft.docx" garbage
+
+Run GROBID as a Docker container (it uses ~1 GB of RAM, runs on CPU, no GPU needed):
+
+```bash
+# One-shot
+docker run -d --rm --name grobid -p 8070:8070 lfoppiano/grobid:0.8.1
+
+# Or with a persistent name so you can stop / start it
+docker run -d --name grobid -p 8070:8070 lfoppiano/grobid:0.8.1
+docker start grobid          # next time
+```
+
+That's it — no further configuration needed. If GROBID is reachable at `http://localhost:8070`, ResearchBuddy will use it.
+
+To disable or point at a different instance:
+
+```bash
+# Disable (force pdfplumber)
+export RESEARCHBUDDY_GROBID_ENABLED=false
+# Custom URL
+export RESEARCHBUDDY_GROBID_URL=http://my-grobid-host:8070
+# Per-PDF timeout in seconds (default 60)
+export RESEARCHBUDDY_GROBID_TIMEOUT=120
+```
+
+If the GROBID service goes down mid-import, ResearchBuddy will silently fall back to `pdfplumber` for the affected papers — your import never fails because of GROBID.
 
 ### Optional: LLM features (Ollama)
 
@@ -605,7 +644,8 @@ ResearchBuddy/
 │       ├── arguer.py            # creative argument generation + style learning
 │       ├── llm.py               # Ollama LLM interface + GPU detection
 │       ├── core_fetcher.py      # CORE full-text API + equation stripping
-│       ├── pdf_processor.py     # pdfplumber extraction + chunking + metadata
+│       ├── pdf_processor.py     # PDF extraction (GROBID first, pdfplumber fallback)
+│       ├── grobid_client.py     # HTTP client + TEI-XML parser for GROBID
 │       ├── state_manager.py     # pickle save/load + PDF import + S2 resolution
 │       └── visualizer.py        # 3-PDF matplotlib graph renderer
 ├── tests/

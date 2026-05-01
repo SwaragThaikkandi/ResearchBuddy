@@ -129,6 +129,15 @@ HYDE_ENABLED          = True             # HyDE for search
 LLM_QUERY_EXPANSION  = True             # LLM query expansion for search
 LLM_RERANK_ENABLED   = True             # LLM reranking of search results
 
+# ── GROBID (academic-PDF parser — falls back to pdfplumber if unavailable) ───
+# GROBID is an ML library specialised for scientific PDFs. It outperforms
+# pdfplumber on title/abstract/section detection, figures, tables, equations,
+# and reference parsing. Run it as a Docker container:
+#   docker run -d --rm -p 8070:8070 lfoppiano/grobid:0.8.1
+GROBID_ENABLED = _env_bool("RESEARCHBUDDY_GROBID_ENABLED", True)
+GROBID_URL     = _os.getenv("RESEARCHBUDDY_GROBID_URL", "http://localhost:8070").rstrip("/")
+GROBID_TIMEOUT = _env_int("RESEARCHBUDDY_GROBID_TIMEOUT", 60, min_value=5)
+
 # ── Neo4j (optional — falls back to NetworkX if unavailable) ─────────────────
 NEO4J_ENABLED        = _os.getenv("RESEARCHBUDDY_NEO4J_ENABLED", "").lower() in ("1", "true", "yes")
 NEO4J_URI            = _os.getenv("RESEARCHBUDDY_NEO4J_URI", "bolt://localhost:7687")
