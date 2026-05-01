@@ -1,4 +1,26 @@
 from pathlib import Path
+import os as _os
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = _os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(name: str, default: int, min_value: int | None = None) -> int:
+    raw = _os.getenv(name)
+    if raw is None or not raw.strip():
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = default
+    if min_value is not None:
+        value = max(min_value, value)
+    return value
 
 # ── User data directory ────────────────────────────────────────────────────────
 DATA_DIR   = Path.home() / ".researchbuddy"
@@ -15,6 +37,17 @@ COMBINED_PDF  = DATA_DIR / "network_combined.pdf"   # fused (semantic + citation
 # ── Embedding ──────────────────────────────────────────────────────────────────
 EMBEDDING_MODEL      = "nomic-ai/nomic-embed-text-v1.5"   # 768-dim, 8192-token context
 EMBEDDING_DIM        = 768   # expected output dim; bump when changing model
+# Set to 0 (default) to let ResearchBuddy pick a VRAM-appropriate batch size.
+# Any positive value overrides the auto-tuner.
+EMBEDDING_BATCH_SIZE = _env_int("RESEARCHBUDDY_EMBEDDING_BATCH_SIZE", 0, min_value=0)
+# 0 = let the auto-tuner pick (cap based on VRAM); >0 forces a specific cap
+EMBEDDING_MAX_SEQ_LENGTH = _env_int("RESEARCHBUDDY_EMBEDDING_MAX_SEQ_LENGTH", 0, min_value=0)
+EMBEDDING_CPU_FALLBACK_ON_OOM = _env_bool("RESEARCHBUDDY_EMBEDDING_CPU_FALLBACK_ON_OOM", True)
+# Precision: "auto" picks fp16 on GPUs with <12GB VRAM, fp32 otherwise.
+# Force with "fp16", "fp32", or "bf16".
+EMBEDDING_PRECISION = _os.getenv("RESEARCHBUDDY_EMBEDDING_PRECISION", "auto").strip().lower()
+if EMBEDDING_PRECISION not in ("auto", "fp16", "fp32", "bf16"):
+    EMBEDDING_PRECISION = "auto"
 
 # ── Graph / edges ──────────────────────────────────────────────────────────────
 SIMILARITY_THRESHOLD = 0.45    # min cosine sim to draw a semantic edge
@@ -97,7 +130,6 @@ LLM_QUERY_EXPANSION  = True             # LLM query expansion for search
 LLM_RERANK_ENABLED   = True             # LLM reranking of search results
 
 # ── Neo4j (optional — falls back to NetworkX if unavailable) ─────────────────
-import os as _os
 NEO4J_ENABLED        = _os.getenv("RESEARCHBUDDY_NEO4J_ENABLED", "").lower() in ("1", "true", "yes")
 NEO4J_URI            = _os.getenv("RESEARCHBUDDY_NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER           = _os.getenv("RESEARCHBUDDY_NEO4J_USER", "neo4j")
@@ -106,7 +138,11 @@ NEO4J_DATABASE       = _os.getenv("RESEARCHBUDDY_NEO4J_DATABASE", "neo4j")
 NON_GRAPH_STATE_FILE = DATA_DIR / "non_graph_state.pkl"
 
 # ── Embedding device ─────────────────────────────────────────────────────────
-EMBEDDING_DEVICE     = "auto"           # "auto" | "cuda" | "cpu"
+_emb_device = _os.getenv(
+    "RESEARCHBUDDY_EMBEDDING_DEVICE",
+    _os.getenv("EMBEDDING_DEVICE", "auto"),
+).strip().lower()
+EMBEDDING_DEVICE = _emb_device if _emb_device in ("auto", "cuda", "cpu") else "auto"
 
 # ── Keyword extraction ─────────────────────────────────────────────────────────
 TOP_KEYWORDS         = 8

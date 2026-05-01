@@ -5,7 +5,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from researchbuddy.core.embedder import cosine_similarity, mean_pool
+from researchbuddy.core.embedder import (
+    _batch_sizes_to_try,
+    _is_cuda_oom_error,
+    cosine_similarity,
+    mean_pool,
+)
 
 
 class TestCosineSimilarity:
@@ -59,3 +64,17 @@ class TestTorchvisionGuard:
         # Just verify it's callable — don't actually run it in CI
         # as it manipulates sys.modules
         assert callable(_guard_torchvision)
+
+
+class TestOOMHelpers:
+    def test_batch_ladder_halves_to_one(self):
+        assert _batch_sizes_to_try(8) == [8, 4, 2, 1]
+        assert _batch_sizes_to_try(1) == [1]
+
+    def test_cuda_oom_detection(self):
+        err = RuntimeError("torch.AcceleratorError: CUDA error: out of memory")
+        assert _is_cuda_oom_error(err) is True
+
+    def test_non_oom_detection(self):
+        err = RuntimeError("CUDA error: invalid device function")
+        assert _is_cuda_oom_error(err) is False

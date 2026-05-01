@@ -507,6 +507,9 @@ Persistent defaults live in `researchbuddy/config.py`. All can be overridden via
 |----------|---------|-------------|
 | `EMBEDDING_MODEL` | `nomic-ai/nomic-embed-text-v1.5` | Embedding model (768-dim, 8192-token context) |
 | `EMBEDDING_DIM` | 768 | Expected embedding dimension; bump when changing model |
+| `EMBEDDING_BATCH_SIZE` | 0 (auto) | 0 = pick from VRAM tier; >0 forces a specific batch size |
+| `EMBEDDING_MAX_SEQ_LENGTH` | 0 (auto) | 0 = pick from VRAM tier; >0 caps token length |
+| `EMBEDDING_PRECISION` | `auto` | `auto` / `fp16` / `fp32` / `bf16`. Auto picks fp16 on <12 GB VRAM |
 | `FUSION_ALPHA` | 0.6 | Semantic stream weight in SNF (1-alpha = citation weight) |
 | `SIMILARITY_THRESHOLD` | 0.45 | Min cosine sim to draw a semantic edge |
 | `N_RECOMMENDATIONS` | 10 | Papers shown per search session |
@@ -662,12 +665,40 @@ This is normal when you have fewer than 15 papers. The system automatically uses
 
 If you change the embedding model in `config.py`, ResearchBuddy detects the dimension mismatch on startup and re-embeds all papers automatically. This happens once.
 
-### GPU memory issues
+### GPU memory (VRAM) tuning
 
-The embedding model runs on CPU by default if CUDA isn't available. If you have a GPU but encounter crashes:
-```bash
-export EMBEDDING_DEVICE=cpu    # force CPU embedding
+ResearchBuddy auto-detects your GPU's VRAM at first model load and picks safe defaults. You should not need to do anything for most cards. The tiers are:
+
+| VRAM | Tier | Precision | Batch size | Max seq length | Typical card |
+|------|------|-----------|------------|----------------|--------------|
+| < 5 GB | tiny | fp16 | 2 | 512 | GTX 1650, RTX 3050 4 GB |
+| 5–8 GB | small | fp16 | 4 | 1024 | RTX 3050 6 GB, 3060/4060 8 GB |
+| 9–15 GB | medium | fp16 | 8 | 2048 | RTX 3060 12 GB, 4070 |
+| 16 GB+ | large | fp32 | 8 | unlimited | RTX 4080/4090, A100 |
+| (CPU) | cpu | fp32 | 4 | 512 | no GPU |
+
+If you still hit out-of-memory errors during full-text enrichment, force a tighter setting via env vars:
+
+```powershell
+# PowerShell — current session
+$env:RESEARCHBUDDY_EMBEDDING_PRECISION = "fp16"
+$env:RESEARCHBUDDY_EMBEDDING_BATCH_SIZE = "1"
+$env:RESEARCHBUDDY_EMBEDDING_MAX_SEQ_LENGTH = "512"
 ```
+
+```bash
+# bash / zsh
+export RESEARCHBUDDY_EMBEDDING_PRECISION=fp16
+export RESEARCHBUDDY_EMBEDDING_BATCH_SIZE=1
+export RESEARCHBUDDY_EMBEDDING_MAX_SEQ_LENGTH=512
+```
+
+To force CPU embeddings (slow but never OOMs):
+```powershell
+$env:RESEARCHBUDDY_EMBEDDING_DEVICE = "cpu"
+```
+
+If a CUDA OOM still occurs during encoding, the embedder automatically retries at smaller batch sizes (down to 1) and finally falls back to CPU (set `RESEARCHBUDDY_EMBEDDING_CPU_FALLBACK_ON_OOM=false` to disable).
 
 ---
 

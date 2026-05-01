@@ -283,7 +283,9 @@ class HierarchicalResearchGraph:
             enriched_set.add(meta.paper_id)   # mark regardless of outcome
 
             if fulltext and len(fulltext) >= 200:
-                chunks = _to_chunks(fulltext, chunk_size=500, overlap=100)
+                # 300-word chunks (~400 tokens) keep per-chunk attention memory
+                # well below 1GB even on 4GB VRAM cards.
+                chunks = _to_chunks(fulltext, chunk_size=300, overlap=60)
                 if chunks:
                     self.embed_paper(meta, chunks)
                     n_enriched += 1
