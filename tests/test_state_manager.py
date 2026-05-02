@@ -5,6 +5,8 @@ caused real user-visible breakage (Neo4j had stale nodes, no edges).
 
 from __future__ import annotations
 
+import time
+
 from researchbuddy.core.state_manager import _migrate_to_backend
 from researchbuddy.core.graph_model import HierarchicalResearchGraph
 from researchbuddy.core.graph_backend import (
@@ -235,5 +237,93 @@ def test_save_allows_legitimate_partial_state(tmp_path):
         g_empty = HierarchicalResearchGraph()
         save(g_empty, path=pickle_path)
         assert pickle_path.exists()
+    finally:
+        sm.HISTORY_DIR = orig_history
+
+
+# ── Lightweight evolution log + pickle retention ─────────────────────────────
+
+def test_save_appends_evolution_jsonl(tmp_path):
+    """Every save should append one line to history/evolution.jsonl."""
+    import json
+    from researchbuddy.core.state_manager import save
+
+    g = HierarchicalResearchGraph()
+    _populate_graph_with_edges(g)
+    pickle_path = tmp_path / "graph.pkl"
+
+    import researchbuddy.core.state_manager as sm
+    orig_history = sm.HISTORY_DIR
+    sm.HISTORY_DIR = tmp_path / "history"
+    try:
+        save(g, path=pickle_path)
+        save(g, path=pickle_path)   # equal-edges save still appends
+        log = sm.HISTORY_DIR / "evolution.jsonl"
+        assert log.exists()
+        lines = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        assert len(lines) == 2
+        # Each line should parse as JSON with the expected keys
+        for ln in lines:
+            d = json.loads(ln)
+            assert "total_papers" in d and "combined_edges" in d
+    finally:
+        sm.HISTORY_DIR = orig_history
+
+
+def test_save_caps_pickle_retention(tmp_path, monkeypatch):
+    """Past STATE_HISTORY_KEEP, oldest pickles should be pruned."""
+    import researchbuddy.core.state_manager as sm
+    monkeypatch.setattr(sm, "STATE_HISTORY_KEEP", 2)
+
+    g = HierarchicalResearchGraph()
+    _populate_graph_with_edges(g)
+    pickle_path = tmp_path / "graph.pkl"
+
+    orig_history = sm.HISTORY_DIR
+    sm.HISTORY_DIR = tmp_path / "history"
+    try:
+        for _ in range(5):
+            sm.save(g, path=pickle_path)
+            time.sleep(0.01)   # so timestamps differ
+        snaps = sorted((tmp_path / "history").glob("graph_*.pkl"))
+        assert len(snaps) == 2, f"expected 2 pickles after retention, got {len(snaps)}"
+        # The JSONL log keeps every entry though
+        log = (tmp_path / "history" / "evolution.jsonl")
+        lines = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        assert len(lines) == 5
+    finally:
+        sm.HISTORY_DIR = orig_history
+
+
+def test_compact_history_deletes_pickles_keeps_log(tmp_path, monkeypatch):
+    """compact_history() turns N pickles into N JSONL lines and removes them."""
+    import researchbuddy.core.state_manager as sm
+    monkeypatch.setattr(sm, "STATE_HISTORY_KEEP", 1)
+
+    orig_history = sm.HISTORY_DIR
+    sm.HISTORY_DIR = tmp_path / "history"
+    try:
+        # Fabricate 3 pickle "snapshots" — full graphs, no JSONL entries yet
+        sm.HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+        for i in range(3):
+            g = HierarchicalResearchGraph()
+            _populate_graph_with_edges(g)
+            with open(sm.HISTORY_DIR / f"graph_2026{i:02d}.pkl", "wb") as f:
+                import pickle as _p
+                _p.dump(g, f)
+
+        report = sm.compact_history()
+        assert report["ingested"] == 3
+        # With STATE_HISTORY_KEEP=1 we keep the newest pickle and delete two
+        assert report["deleted"] == 2
+
+        # JSONL has 3 lines now
+        log = sm.HISTORY_DIR / "evolution.jsonl"
+        lines = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        assert len(lines) == 3
+
+        # Re-running is a no-op (already-ingested files are skipped)
+        report2 = sm.compact_history()
+        assert report2["ingested"] == 0
     finally:
         sm.HISTORY_DIR = orig_history

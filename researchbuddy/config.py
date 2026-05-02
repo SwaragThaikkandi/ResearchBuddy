@@ -27,7 +27,11 @@ DATA_DIR   = Path.home() / ".researchbuddy"
 STATE_FILE = DATA_DIR / "research_graph.pkl"
 TEMP_DIR   = DATA_DIR / "temp_papers"
 HISTORY_DIR = DATA_DIR / "history"
-STATE_HISTORY_KEEP = 200    # max timestamped state snapshots retained
+# Most evolution analysis only needs ~25 numeric fields per save, which we
+# now write to history/evolution.jsonl (~1 KB per line). We keep only a few
+# full pickles for emergency recovery; everything else is reconstructable
+# from the JSONL log + the canonical pickle.
+STATE_HISTORY_KEEP = _env_int("RESEARCHBUDDY_HISTORY_KEEP", 3, min_value=0)
 
 # ── PDF output paths (one per network) ────────────────────────────────────────
 SEMANTIC_PDF  = DATA_DIR / "network_semantic.pdf"   # NLP / HSWN

@@ -990,6 +990,7 @@ def manage_services() -> None:
         print_info("  [6] Test Neo4j connection (bolt + auth)")
         print_info("  [7] Set Neo4j password for this session")
         print_info("  [8] Restore graph from a history snapshot")
+        print_info("  [9] Compact history (delete old snapshots, keep stats log)")
         print_info("  [b] Back to main menu")
 
         choice = ask("Choose", "b").strip().lower()
@@ -1056,8 +1057,41 @@ def manage_services() -> None:
                 print_warn(f"Still failing: {res.reason}")
         elif choice == "8":
             _restore_from_snapshot()
+        elif choice == "9":
+            _compact_history_menu()
         else:
             print_warn("Unknown option.")
+
+
+def _compact_history_menu() -> None:
+    """
+    Walk the history dir, fold every existing pickle's metrics into the
+    JSONL log, then delete pickles beyond the configured retention. Print
+    a clear summary of disk reclaimed.
+    """
+    from researchbuddy.core.state_manager import compact_history
+    from researchbuddy.config import STATE_HISTORY_KEEP, HISTORY_DIR
+
+    print_info(f"Compacting history in {HISTORY_DIR} ...")
+    print_info(
+        f"Each save still writes one ~1 KB line to history/evolution.jsonl. "
+        f"Only the {STATE_HISTORY_KEEP} most recent full pickles are kept."
+    )
+    confirm = ask("Proceed? (y/n)", "y").strip().lower()
+    if not confirm.startswith("y"):
+        print_info("Cancelled.")
+        return
+
+    report = compact_history()
+    mb_freed = report["bytes_freed"] / (1024 * 1024)
+    print_success(
+        f"Ingested {report['ingested']} new entries into evolution.jsonl, "
+        f"deleted {report['deleted']} pickle(s), freed {mb_freed:.1f} MB."
+    )
+    print_info(
+        f"Kept the {report['kept_pickles']} most recent pickles for recovery. "
+        f"Long-term history lives in {report['log_path']}."
+    )
 
 
 def _restore_from_snapshot() -> None:

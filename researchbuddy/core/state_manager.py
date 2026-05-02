@@ -6,6 +6,7 @@ Also provides the import-from-PDF-folder workflow.
 
 from __future__ import annotations
 
+import json
 import logging
 import pickle
 import time
@@ -85,15 +86,57 @@ def _on_disk_edge_count(path: Path) -> int:
         return 0
 
 
+_EVOLUTION_LOG_NAME = "evolution.jsonl"
+
+
+def _append_evolution_log(graph: ResearchGraph, timestamp_iso: str,
+                          snapshot_file: str = "") -> None:
+    """
+    Append one line of summary metrics to history/evolution.jsonl.
+    ~1 KB per save vs ~50-200 MB per pickle, so we can keep this forever.
+    """
+    try:
+        from researchbuddy.evolution import compute_metrics_from_graph
+    except Exception as e:
+        logger.debug("Evolution metric computation unavailable: %s", e)
+        return
+    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = HISTORY_DIR / _EVOLUTION_LOG_NAME
+    try:
+        metrics = compute_metrics_from_graph(graph, timestamp_iso, snapshot_file)
+        d = metrics.__dict__.copy()
+        # Clean NaN -> None so the JSONL is parseable everywhere
+        import math
+        for k, v in list(d.items()):
+            if isinstance(v, float) and math.isnan(v):
+                d[k] = None
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(d) + "\n")
+    except Exception as e:
+        logger.debug("Evolution log append failed: %s", e)
+
+
 def _save_history_snapshot(graph: ResearchGraph) -> None:
     """
-    Save a timestamped snapshot for topology-evolution analysis.
-    Keeps only the newest STATE_HISTORY_KEEP snapshots.
+    Append summary metrics to evolution.jsonl, plus keep the newest
+    STATE_HISTORY_KEEP full pickles for emergency recovery.
+
+    The pickle history used to be 200 entries (gigabytes!). It's now 3 by
+    default — enough to roll back a bad save, but the long-term evolution
+    record lives in the much smaller JSONL log.
     """
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    snap_path = HISTORY_DIR / f"graph_{ts}.pkl"
+    ts_filename = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    ts_iso = datetime.now().isoformat(timespec="seconds")
+    snap_path = HISTORY_DIR / f"graph_{ts_filename}.pkl"
 
+    # 1. Always append the lightweight summary log
+    _append_evolution_log(graph, ts_iso, snap_path.name)
+
+    # 2. Optionally write a full pickle for recovery (skip if user set
+    #    RESEARCHBUDDY_HISTORY_KEEP=0).
+    if STATE_HISTORY_KEEP <= 0:
+        return
     try:
         with open(snap_path, "wb") as f:
             pickle.dump(graph, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -101,16 +144,71 @@ def _save_history_snapshot(graph: ResearchGraph) -> None:
         logger.warning("Snapshot save skipped (%s)", e)
         return
 
+    # 3. Prune surplus pickles
     snapshots = sorted(HISTORY_DIR.glob("graph_*.pkl"))
     if len(snapshots) <= STATE_HISTORY_KEEP:
         return
-
-    # Prune oldest snapshots first.
     for old in snapshots[: len(snapshots) - STATE_HISTORY_KEEP]:
         try:
             old.unlink()
         except Exception:
             pass
+
+
+def compact_history() -> dict:
+    """
+    Walk every existing pickle snapshot, fold its metrics into the JSONL
+    log, and delete the pickle. Returns a small report dict.
+
+    Idempotent: snapshots already represented in the log (by `snapshot_file`
+    field) are skipped. Safe to run multiple times.
+    """
+    from researchbuddy.evolution import _compute_metrics, _load_metrics_jsonl
+    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = HISTORY_DIR / _EVOLUTION_LOG_NAME
+
+    existing = {r.snapshot_file for r in _load_metrics_jsonl(log_path)}
+    pickles = sorted(HISTORY_DIR.glob("graph_*.pkl"))
+    bytes_freed = 0
+    n_ingested = 0
+    n_deleted = 0
+
+    for pkl in pickles:
+        if pkl.name not in existing:
+            try:
+                metrics = _compute_metrics(pkl)
+                with open(log_path, "a", encoding="utf-8") as f:
+                    d = metrics.__dict__.copy()
+                    import math
+                    for k, v in list(d.items()):
+                        if isinstance(v, float) and math.isnan(v):
+                            d[k] = None
+                    f.write(json.dumps(d) + "\n")
+                n_ingested += 1
+            except Exception as e:
+                logger.warning("Could not ingest %s: %s", pkl.name, e)
+                continue   # don't delete what we couldn't read
+
+    # Now apply the retention policy: keep only the newest STATE_HISTORY_KEEP
+    pickles = sorted(HISTORY_DIR.glob("graph_*.pkl"))
+    keep_n = max(0, STATE_HISTORY_KEEP)
+    delete_set = pickles[:-keep_n] if keep_n > 0 else pickles
+    for old in delete_set:
+        try:
+            sz = old.stat().st_size
+            old.unlink()
+            bytes_freed += sz
+            n_deleted += 1
+        except Exception:
+            pass
+
+    return {
+        "ingested": n_ingested,
+        "deleted":  n_deleted,
+        "bytes_freed": bytes_freed,
+        "log_path": str(log_path),
+        "kept_pickles": min(len(pickles) - n_deleted, keep_n),
+    }
 
 
 def load(path: Path = STATE_FILE) -> Optional[HierarchicalResearchGraph]:

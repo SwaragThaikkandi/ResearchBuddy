@@ -130,9 +130,16 @@ def _load_graph(path: Path) -> HierarchicalResearchGraph:
     return graph
 
 
-def _compute_metrics(path: Path) -> SnapshotMetrics:
-    graph = _load_graph(path)
-    ts = datetime.fromtimestamp(path.stat().st_mtime)
+def compute_metrics_from_graph(
+    graph: HierarchicalResearchGraph,
+    timestamp_iso: str,
+    snapshot_file: str = "",
+) -> SnapshotMetrics:
+    """
+    Compute all evolution metrics from an in-memory graph. Pure function —
+    no I/O. Re-used by state_manager.save() to write the JSONL log without
+    needing to round-trip a pickle.
+    """
     stats = graph.stats()
 
     rated = graph.rated_papers()
@@ -167,8 +174,8 @@ def _compute_metrics(path: Path) -> SnapshotMetrics:
     lcc_frac, avg_path, diameter = _lcc_stats(g_combined)
 
     return SnapshotMetrics(
-        timestamp_iso=ts.isoformat(timespec="seconds"),
-        snapshot_file=path.name,
+        timestamp_iso=timestamp_iso,
+        snapshot_file=snapshot_file,
         total_papers=int(stats.get("total_papers", 0)),
         rated_papers=int(stats.get("rated_papers", 0)),
         avg_user_rating=avg_rating,
@@ -192,6 +199,57 @@ def _compute_metrics(path: Path) -> SnapshotMetrics:
         query_feedback_events=len(getattr(graph, "_query_interactions", [])),
         argument_feedback_events=len(getattr(graph, "_argument_interactions", [])),
     )
+
+
+def _compute_metrics(path: Path) -> SnapshotMetrics:
+    """Legacy: load a pickle and compute metrics. Used to ingest old snapshots."""
+    graph = _load_graph(path)
+    ts = datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds")
+    return compute_metrics_from_graph(graph, ts, path.name)
+
+
+def _load_metrics_jsonl(
+    jsonl_path: Path, max_rows: int | None = None,
+) -> list[SnapshotMetrics]:
+    """
+    Read evolution metrics from a JSON-lines log. Each line = one save event,
+    serialised as the SnapshotMetrics dataclass.
+    """
+    import json
+    if not jsonl_path.exists():
+        return []
+    rows: list[SnapshotMetrics] = []
+    fields = set(SnapshotMetrics.__dataclass_fields__.keys())
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            # Fill any missing fields with sensible defaults so older log
+            # entries don't break us when we add new metrics.
+            data = {k: d.get(k) for k in fields}
+            for k, v in data.items():
+                if v is None:
+                    if k in {"timestamp_iso", "snapshot_file"}:
+                        data[k] = ""
+                    elif k.endswith("_papers") or k.endswith("_clusters") \
+                         or k.endswith("_edges") or k.endswith("_levels") \
+                         or k.endswith("_events"):
+                        data[k] = 0
+                    else:
+                        data[k] = float("nan")
+            try:
+                rows.append(SnapshotMetrics(**data))
+            except Exception:
+                continue
+    rows.sort(key=lambda r: r.timestamp_iso)
+    if max_rows and max_rows > 0 and len(rows) > max_rows:
+        rows = rows[-max_rows:]
+    return rows
 
 
 def _collect_snapshot_paths(
@@ -374,25 +432,35 @@ def main():
     )
     args = parser.parse_args()
 
+    rows: list[SnapshotMetrics] = []
+
+    # Preferred path: read the lightweight JSONL log written at every save.
+    # Each line is ~1 KB vs ~50-200 MB per pickle.
+    jsonl_path = args.history_dir / "evolution.jsonl"
+    if jsonl_path.exists():
+        rows = _load_metrics_jsonl(jsonl_path, args.max_snapshots)
+        print(f"[evolution] Loaded {len(rows)} entries from evolution.jsonl")
+
+    # Fallback / supplement: any leftover pickle snapshots get folded in too.
     paths = _collect_snapshot_paths(
         history_dir=args.history_dir,
         include_current=not args.no_current,
         state_file=args.state_file,
         max_snapshots=args.max_snapshots,
     )
-    if not paths:
-        print("[evolution] No snapshots found.")
-        return
+    if paths:
+        existing_files = {r.snapshot_file for r in rows}
+        for p in paths:
+            if p.name in existing_files:
+                continue
+            try:
+                rows.append(_compute_metrics(p))
+            except Exception as e:
+                print(f"[evolution] Skipping {p.name}: {e}")
 
-    rows: list[SnapshotMetrics] = []
-    for p in paths:
-        try:
-            rows.append(_compute_metrics(p))
-        except Exception as e:
-            print(f"[evolution] Skipping {p.name}: {e}")
-
+    rows.sort(key=lambda r: r.timestamp_iso)
     if not rows:
-        print("[evolution] No readable snapshots found.")
+        print("[evolution] No history data found (no JSONL log and no pickles).")
         return
 
     out_csv = args.out_dir / "graph_evolution_metrics.csv"
