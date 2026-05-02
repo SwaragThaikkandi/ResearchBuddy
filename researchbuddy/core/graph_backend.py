@@ -362,7 +362,33 @@ class Neo4jBackend:
                 "Install with: pip install researchbuddy[neo4j]"
             )
 
-        self._driver = neo4j_driver.GraphDatabase.driver(uri, auth=(user, password))
+        # ── Silence the noisy 'relationship type X does not exist' warnings ──
+        # Neo4j fires a notification per empty-rel-type *per query*, which
+        # produces hundreds of pages of log spam during initial migration
+        # and any time we query a layer with no edges yet. They're not
+        # actionable for our users — they reflect a transient state.
+        # Two complementary suppressions:
+        #   1. Tell the driver not to deliver UNRECOGNIZED-class notifications
+        #      (driver-side filter, supported by neo4j-python-driver >= 5.7)
+        #   2. Cap the `neo4j.notifications` logger at ERROR so anything that
+        #      slips through (older driver, other categories) stays quiet.
+        # Set RESEARCHBUDDY_NEO4J_VERBOSE=1 if you want them back.
+        import os as _os, logging as _logging
+        if _os.getenv("RESEARCHBUDDY_NEO4J_VERBOSE", "").lower() not in ("1", "true", "yes"):
+            _logging.getLogger("neo4j.notifications").setLevel(_logging.ERROR)
+
+        driver_kwargs: dict = {"auth": (user, password)}
+        try:
+            driver_kwargs["notifications_disabled_categories"] = [
+                "UNRECOGNIZED",
+            ]
+            self._driver = neo4j_driver.GraphDatabase.driver(uri, **driver_kwargs)
+        except (TypeError, AttributeError):
+            # Older driver — fall back to a vanilla driver, the logger
+            # suppression above will still hide the spam.
+            self._driver = neo4j_driver.GraphDatabase.driver(
+                uri, auth=(user, password),
+            )
         self._database = database
 
         # Verify connectivity
