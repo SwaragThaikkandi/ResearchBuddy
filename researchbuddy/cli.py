@@ -22,14 +22,18 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import textwrap
 import time
+
+logger = logging.getLogger(__name__)
 
 import researchbuddy.config as cfg
 from researchbuddy.core.graph_model   import HierarchicalResearchGraph, PaperMeta
 from researchbuddy.core.state_manager import save, load, import_pdf_folder, resolve_seed_s2_ids
 from researchbuddy.core.searcher      import find_candidates
 from researchbuddy.core.reasoner      import Reasoner, QueryResult
+from researchbuddy.core import services as svc
 
 try:
     from rich.console import Console
@@ -888,7 +892,71 @@ def show_llm_status():
         print_warn(f"  Error checking LLM status: {e}")
 
 
-# â”€â”€ Main menu â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Neo4j Browser launch ──────────────────────────────────────────────────────
+
+def browse_in_neo4j(graph: HierarchicalResearchGraph) -> None:
+    """
+    Open Neo4j Browser at a starter Cypher query and tell the user how to
+    apply the bundled stylesheet so the graph is actually readable.
+    """
+    import webbrowser
+    from pathlib import Path
+
+    backend_name = getattr(graph._backend, "backend_name", "?")
+    if backend_name != "Neo4j":
+        print_warn(
+            "You're currently using the NetworkX backend. To browse in Neo4j, "
+            "first start Neo4j (option from the startup prompt, or "
+            "`docker start researchbuddy-neo4j`) and re-launch ResearchBuddy."
+        )
+        return
+
+    # A starter query that returns a meaningful subgraph
+    starter_cypher = (
+        "MATCH (p:Paper)-[r:SEM_SIMILARITY|CIT_CITATION|CAUSAL_INFLUENCE]-(q:Paper) "
+        "WHERE coalesce(r.weight, 0) > 0.4 "
+        "RETURN p, r, q LIMIT 200"
+    )
+    browser_url = f"http://localhost:7474/browser/?cmd=play&arg={starter_cypher}"
+
+    # Locate the bundled .grass file
+    grass_path = Path(__file__).parent / "assets" / "researchbuddy.grass"
+
+    print_header("Neo4j Browser")
+    print_info("Opening http://localhost:7474 in your default browser ...")
+    try:
+        webbrowser.open(browser_url)
+    except Exception:
+        print_warn("Could not auto-open the browser. Please open this URL manually:")
+        print_info(f"  {browser_url}")
+
+    print()
+    print_info("To make the graph readable (recommended, one-time setup):")
+    print_info("  1. In Neo4j Browser, click the cog icon (bottom-left)")
+    print_info("  2. Open the 'Document Settings' panel")
+    print_info("  3. Drag the file below onto 'Graph Stylesheet':")
+    if grass_path.exists():
+        print_success(f"     {grass_path}")
+    else:
+        print_warn("     (stylesheet not bundled — re-install with `pip install -e .`)")
+
+    print()
+    print_info("Useful starter queries (paste into the Browser):")
+    print_info("  Show top semantic neighbours of any paper:")
+    print_info('    MATCH (p:Paper)-[r:SEM_SIMILARITY]->(q:Paper)')
+    print_info("    WHERE p.title CONTAINS 'YOUR_KEYWORD'")
+    print_info("    RETURN p, r, q ORDER BY r.weight DESC LIMIT 25")
+    print()
+    print_info("  Show citation chains (multi-hop):")
+    print_info('    MATCH path = (p:Paper)-[:CIT_CITATION*1..3]->(q:Paper)')
+    print_info("    RETURN path LIMIT 50")
+    print()
+    print_info("  Show clusters and their members:")
+    print_info("    MATCH (c:Cluster)-[:SEM_MEMBER]-(p:Paper)")
+    print_info("    RETURN c, p LIMIT 100")
+
+
+# ── Main menu ─────────────────────────────────────────────────────────────────
 
 def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
     options = {
@@ -903,6 +971,7 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
         "9": "LLM status & setup",
         "10": "Audit graph edges (low-confidence & anomalies)",
         "11": "Quality & reliability report",
+        "12": "Browse graph in Neo4j (open Browser + load style)",
         "q": "Save & quit",
     }
     while True:
@@ -969,6 +1038,8 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
             audit_edges(graph)
         elif choice == "11":
             quality_report_session(graph)
+        elif choice == "12":
+            browse_in_neo4j(graph)
         else:
             print_warn("Unknown option.")
 
@@ -982,6 +1053,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--pdf",    metavar="FOLDER", help="Import PDFs from folder on startup")
     p.add_argument("--reset",  action="store_true", help="Clear saved state and start fresh")
+    p.add_argument("--no-services", action="store_true",
+                   help="Skip the Docker auto-launch prompt for Neo4j / GROBID")
 
     # â”€â”€ Tunable parameters â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     g = p.add_argument_group("model parameters (override config.py defaults)")
@@ -1029,6 +1102,81 @@ def _validate_cli_args(args: argparse.Namespace) -> None:
         raise SystemExit("Error: --n-recommendations must be at least 1")
 
 
+def _ensure_services_at_startup() -> None:
+    """
+    Detect Neo4j and GROBID. If either is missing, ask the user once whether
+    to auto-launch it (using Docker). Choices are remembered across runs.
+
+    Sets the Neo4j env vars on success so the rest of the app picks it up
+    without the user having to export anything.
+    """
+    if not svc.docker_available():
+        return  # silent: nothing to offer
+
+    prefs = svc.load_prefs()
+
+    # ── Neo4j ─────────────────────────────────────────────────────────────
+    if not svc._service_alive(svc.NEO4J_SPEC):
+        choice = prefs.get("neo4j_auto_launch")
+        if choice is None:
+            ans = ask(
+                "Neo4j not running. Start it via Docker now? (y/n/never)",
+                "y",
+            ).strip().lower()
+            if ans in ("never", "no-never"):
+                prefs["neo4j_auto_launch"] = "never"
+                svc.save_prefs(prefs)
+            elif ans.startswith("y"):
+                prefs["neo4j_auto_launch"] = "yes"
+                svc.save_prefs(prefs)
+                choice = "yes"
+            else:
+                choice = "no"
+        if choice == "yes":
+            res = svc.ensure_running(svc.NEO4J_SPEC)
+            if res.already_running:
+                print_info("Neo4j already running.")
+            elif res.started:
+                print_success("Neo4j is up at http://localhost:7474")
+            else:
+                print_warn(f"Could not start Neo4j: {res.error}")
+            # Configure ResearchBuddy to use it (env vars feed config.py)
+            os.environ.setdefault("RESEARCHBUDDY_NEO4J_ENABLED", "true")
+            os.environ.setdefault("RESEARCHBUDDY_NEO4J_PASSWORD", "researchbuddy")
+            # Reload config so the new env vars take effect this session
+            import importlib, researchbuddy.config as _cfg_mod
+            importlib.reload(_cfg_mod)
+    else:
+        # Already running externally — just enable the integration
+        os.environ.setdefault("RESEARCHBUDDY_NEO4J_ENABLED", "true")
+
+    # ── GROBID ────────────────────────────────────────────────────────────
+    if not svc._service_alive(svc.GROBID_SPEC):
+        choice = prefs.get("grobid_auto_launch")
+        if choice is None:
+            ans = ask(
+                "GROBID not running. Start it via Docker now? (y/n/never)",
+                "y",
+            ).strip().lower()
+            if ans in ("never", "no-never"):
+                prefs["grobid_auto_launch"] = "never"
+                svc.save_prefs(prefs)
+            elif ans.startswith("y"):
+                prefs["grobid_auto_launch"] = "yes"
+                svc.save_prefs(prefs)
+                choice = "yes"
+            else:
+                choice = "no"
+        if choice == "yes":
+            res = svc.ensure_running(svc.GROBID_SPEC)
+            if res.already_running:
+                print_info("GROBID already running.")
+            elif res.started:
+                print_success("GROBID is up at http://localhost:8070")
+            else:
+                print_warn(f"Could not start GROBID: {res.error}")
+
+
 def main():
     args = _build_parser().parse_args()
 
@@ -1068,8 +1216,17 @@ def main():
         print("  ResearchBuddy - Hierarchical literature search assistant")
         print("=" * 60)
 
-    # â”€â”€ LLM status at startup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── LLM status at startup ─────────────────────────────────────────────
     _show_llm_status_banner()
+
+    # ── Auto-launch optional Docker services (Neo4j, GROBID) ──────────────
+    # If Docker is installed, offer to start any missing service. The user's
+    # answer (yes/no/never) is remembered across runs.
+    if not getattr(args, "no_services", False):
+        try:
+            _ensure_services_at_startup()
+        except Exception as e:
+            logger.debug("Service auto-launch skipped: %s", e)
 
     if args.reset and cfg.STATE_FILE.exists():
         cfg.STATE_FILE.unlink()

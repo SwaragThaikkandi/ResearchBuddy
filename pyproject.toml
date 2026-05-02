@@ -59,3 +59,6 @@ Issues     = "https://github.com/SwaragThaikkandi/ResearchBuddy/issues"
 [tool.setuptools.packages.find]
 where   = ["."]
 include = ["researchbuddy*"]
+
+[tool.setuptools.package-data]
+researchbuddy = ["assets/*.grass"]

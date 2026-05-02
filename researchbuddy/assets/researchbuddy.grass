@@ -1,0 +1,88 @@
+/* ResearchBuddy — Neo4j Browser style
+ * --------------------------------------------------------------------
+ * Drop into Neo4j Browser via:
+ *   1. Open http://localhost:7474
+ *   2. Click the cog icon (bottom-left) → Document Settings
+ *   3. Drag this file onto the "Graph Stylesheet" area
+ *      (or paste the contents)
+ * --------------------------------------------------------------------
+ */
+
+node {
+  diameter: 50px;
+  color: #A5ABB6;
+  border-color: #9AA1AC;
+  border-width: 2px;
+  text-color-internal: #FFFFFF;
+  font-size: 10px;
+}
+
+node.Paper {
+  /* Coral, our brand colour. Most papers display this. */
+  color: #FF6B6B;
+  border-color: #E04F4F;
+  diameter: 65px;
+  caption: '{display_label}';
+}
+
+node.Cluster {
+  /* Cool slate so clusters visually separate from individual papers. */
+  color: #5C6BC0;
+  border-color: #3F51B5;
+  diameter: 90px;
+  caption: '{display_label}';
+}
+
+relationship {
+  color: #A5ABB6;
+  shaft-width: 1.5px;
+  font-size: 8px;
+  padding: 3px;
+  text-color-external: #4A5670;
+  text-color-internal: #FFFFFF;
+  caption: '{description}';
+}
+
+/* Citation edges: solid teal — a clear "this paper cites that one" */
+relationship.CIT_CITATION {
+  color: #26A69A;
+  shaft-width: 2.5px;
+  caption: '{description}';
+}
+
+/* Bibliographic coupling: lighter teal, dashed (it's an inferred edge) */
+relationship.CIT_BIB_COUPLING {
+  color: #80CBC4;
+  shaft-width: 1.5px;
+}
+
+/* Semantic similarity: warm orange */
+relationship.SEM_SIMILARITY {
+  color: #FFA726;
+  shaft-width: 2px;
+}
+
+/* Cluster membership: subtle grey — it's structural, not informative */
+relationship.SEM_MEMBER {
+  color: #B0BEC5;
+  shaft-width: 1px;
+}
+
+/* Between-cluster similarity: muted purple */
+relationship.SEM_CLUSTER_SIM {
+  color: #9575CD;
+  shaft-width: 1.5px;
+}
+
+/* Small-world shortcuts in the HSWN: dotted pink */
+relationship.SEM_SHORTCUT {
+  color: #EC407A;
+  shaft-width: 1px;
+}
+
+/* Causal edges from the DAG: forest green, the strongest visual emphasis */
+relationship.CAUSAL_INFLUENCE {
+  color: #43A047;
+  shaft-width: 3px;
+  caption: '{description}';
+}

@@ -218,3 +218,57 @@ class TestNetworkXBackendProperties:
 
     def test_close_is_noop(self, backend):
         backend.close()  # should not raise
+
+
+# ── Caption / description helpers (for Neo4j Browser readability) ────────────
+
+class TestCaptionHelpers:
+    def test_paper_caption_with_author_and_year(self):
+        from researchbuddy.core.graph_backend import _compute_node_caption
+        caption = _compute_node_caption({
+            "title":   "Causal Inference in High-Dimensional Settings",
+            "authors": ["Jane Smith", "John Doe"],
+            "year":    2020,
+        })
+        assert caption.startswith("Smith 2020")
+        assert "Causal Inference" in caption
+
+    def test_paper_caption_truncates_long_titles(self):
+        from researchbuddy.core.graph_backend import _compute_node_caption
+        long_title = "A " + ("very " * 40) + "long title"
+        caption = _compute_node_caption({
+            "title": long_title, "authors": ["X Y"], "year": 2020,
+        })
+        # 60 chars + ellipsis + "Y 2020 — " prefix should keep it under ~80
+        assert len(caption) < 80
+        assert caption.endswith("…")
+
+    def test_paper_caption_falls_back_to_title_only(self):
+        from researchbuddy.core.graph_backend import _compute_node_caption
+        c = _compute_node_caption({"title": "Lonely Paper"})
+        assert c == "Lonely Paper"
+
+    def test_paper_caption_falls_back_to_paper_id(self):
+        from researchbuddy.core.graph_backend import _compute_node_caption
+        c = _compute_node_caption({"paper_id": "abc123"})
+        assert c == "abc123"
+
+    def test_cluster_caption(self):
+        from researchbuddy.core.graph_backend import _compute_node_caption
+        c = _compute_node_caption({"node_type": "cluster", "level": 2, "size": 12})
+        assert c == "L2-cluster · 12 papers"
+
+    def test_edge_description_with_weight(self):
+        from researchbuddy.core.graph_backend import _compute_edge_description
+        desc = _compute_edge_description("CIT_CITATION", {"weight": 0.42})
+        assert desc == "cites · 0.42"
+
+    def test_edge_description_without_weight(self):
+        from researchbuddy.core.graph_backend import _compute_edge_description
+        desc = _compute_edge_description("SEM_MEMBER", {})
+        assert desc == "cluster membership"
+
+    def test_edge_description_unknown_type_falls_back_to_lowercase(self):
+        from researchbuddy.core.graph_backend import _compute_edge_description
+        desc = _compute_edge_description("RELATED_FOO", {})
+        assert desc == "related_foo"

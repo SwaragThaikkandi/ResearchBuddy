@@ -266,6 +266,81 @@ def _rel_pattern(layer: str) -> str:
     return ":" + "|".join(types)
 
 
+# ── Caption / description helpers (Neo4j-Browser readability) ────────────────
+
+def _short_first_author(authors) -> str:
+    """Return surname of first author, or '' if unknown."""
+    if not authors:
+        return ""
+    if isinstance(authors, str):
+        first = authors.split(",")[0].strip()
+    else:
+        first = str(authors[0]) if authors else ""
+    if not first:
+        return ""
+    parts = first.split()
+    return parts[-1] if parts else first
+
+
+def _compute_node_caption(props: dict) -> str:
+    """
+    Build a short, human-readable label for a Paper or Cluster node.
+
+    Examples (Paper):
+      "Smith 2020 — Causal Graphs and..."
+      "Pearl 2009 — Causality"
+      "[untitled] — abc123" (worst case)
+
+    Examples (Cluster):
+      "L2-cluster: 12 papers"
+    """
+    if props.get("node_type") in ("cluster", "Cluster"):
+        size  = props.get("size") or props.get("members") or 0
+        level = props.get("level", "?")
+        return f"L{level}-cluster · {size} papers" if size else f"L{level}-cluster"
+
+    title  = (props.get("title") or "").strip()
+    year   = props.get("year")
+    surname = _short_first_author(props.get("authors"))
+
+    short_title = title[:60] + ("…" if len(title) > 60 else "")
+    parts = []
+    if surname:
+        parts.append(surname)
+    if year:
+        parts.append(str(year))
+    prefix = " ".join(parts)
+    if not short_title:
+        return prefix or (props.get("paper_id") or "[paper]")
+    return f"{prefix} — {short_title}".strip(" —") if prefix else short_title
+
+
+# Friendly relationship-type descriptions for tooltips
+_REL_DESCRIPTIONS = {
+    "SEM_SIMILARITY":   "semantic similarity",
+    "SEM_MEMBER":       "cluster membership",
+    "SEM_CLUSTER_SIM":  "between-cluster similarity",
+    "SEM_SHORTCUT":     "small-world shortcut",
+    "CIT_CITATION":     "cites",
+    "CIT_BIB_COUPLING": "bibliographic coupling",
+    "CAUSAL_INFLUENCE": "causal influence",
+}
+
+
+def _compute_edge_description(rel_type: str, props: dict) -> str:
+    """Short description for an edge: 'cites · w=0.42'."""
+    base = _REL_DESCRIPTIONS.get(rel_type, rel_type.lower())
+    weight = props.get("weight")
+    if weight is None:
+        weight = props.get("similarity")
+    if weight is not None:
+        try:
+            return f"{base} · {float(weight):.2f}"
+        except (TypeError, ValueError):
+            pass
+    return base
+
+
 class Neo4jBackend:
     """
     Neo4j-backed graph storage.
@@ -364,6 +439,9 @@ class Neo4jBackend:
         props = {k: v for k, v in attrs.items()
                  if v is not None and not isinstance(v, (np.ndarray, np.generic))}
         props[id_field] = node_id
+        # Add a human-readable caption so Neo4j Browser shows something
+        # meaningful instead of the raw ID hash.
+        props["display_label"] = _compute_node_caption(props)
 
         self._write(
             f"MERGE (n:{label} {{{id_field}: $nid}}) SET n += $props",
@@ -408,6 +486,8 @@ class Neo4jBackend:
         rel_type = _rel_type_for(layer, etype)
         props = {k: v for k, v in attrs.items()
                  if v is not None and not isinstance(v, (np.ndarray, np.generic))}
+        # Human-readable description that the Neo4j Browser shows on hover
+        props["description"] = _compute_edge_description(rel_type, props)
         self._write(
             f"MATCH (a) WHERE a.paper_id = $u OR a.node_id = $u "
             f"MATCH (b) WHERE b.paper_id = $v OR b.node_id = $v "
@@ -507,9 +587,11 @@ class Neo4jBackend:
                      if v is not None and not isinstance(v, (np.ndarray, np.generic))}
             if node_type == "paper":
                 props["paper_id"] = nid
+                props["display_label"] = _compute_node_caption(props)
                 papers.append(props)
             else:
                 props["node_id"] = nid
+                props["display_label"] = _compute_node_caption(props)
                 clusters.append(props)
 
         with self._driver.session(database=self._database) as session:
@@ -538,6 +620,7 @@ class Neo4jBackend:
             rel_type = _rel_type_for(layer, etype)
             props = {k: val for k, val in attrs.items()
                      if val is not None and not isinstance(val, (np.ndarray, np.generic))}
+            props["description"] = _compute_edge_description(rel_type, props)
             entry = {"_u": u, "_v": v, "_props": props}
             by_type.setdefault(rel_type, []).append(entry)
 

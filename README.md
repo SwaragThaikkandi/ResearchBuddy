@@ -1,6 +1,6 @@
 # ResearchBuddy
 
-> **v2.1.0** — GROBID PDF parsing (figures/tables/equations + local citation network) · Neo4j graph backend · VRAM-aware embedder · Adaptive learned scoring · Temporal decay · Cold-start intelligence · Full-text embeddings via CORE · Hierarchical Small World Network + Causal DAG + LLM-powered Reasoning & Creative Modes
+> **v2.2.0** — Auto-launch Docker services (Neo4j + GROBID) · Readable Neo4j Browser captions + bundled stylesheet · GROBID PDF parsing (figures/tables/equations + local citation network) · Neo4j graph backend · VRAM-aware embedder · Adaptive learned scoring · Temporal decay · Cold-start intelligence · Full-text embeddings via CORE · Hierarchical Small World Network + Causal DAG + LLM-powered Reasoning & Creative Modes
 
 A **graph-based literature search assistant** that learns your research interests from your own PDFs and actively finds new papers for you — like a smart colleague who reads everything and brings you only what matters.
 
@@ -77,7 +77,17 @@ set CORE_API_KEY=your_key_here      # Windows
 
 ### Optional: Neo4j graph database
 
-By default, ResearchBuddy stores the research graph in memory using NetworkX (same as always). For **persistent graph storage**, **faster multi-hop traversals**, and the ability to **explore your graph in Neo4j Browser**, you can optionally use Neo4j as the backend:
+By default, ResearchBuddy stores the research graph in memory using NetworkX (same as always). For **persistent graph storage**, **faster multi-hop traversals**, and the ability to **explore your graph in Neo4j Browser**, you can optionally use Neo4j as the backend.
+
+**Easiest path (recommended):** just install Docker, then run `researchbuddy`. On startup it will detect that Neo4j isn't running and offer to launch it for you:
+
+```
+Neo4j not running. Start it via Docker now? (y/n/never) [y]:
+```
+
+Answer `y` and ResearchBuddy will pull the image (one-time, ~600 MB), start the container, wait for it to become healthy, and configure itself to use it. Your answer is remembered — say `never` and you won't be asked again. The same prompt also offers to start GROBID. To skip these prompts on a given run, pass `--no-services`.
+
+**Manual setup (if you don't want Docker auto-launch):**
 
 ```bash
 # Install the Neo4j driver
@@ -112,6 +122,23 @@ When Neo4j is enabled, you get:
 If Neo4j is unavailable (server down, not installed), ResearchBuddy automatically falls back to NetworkX with a warning message. No data is lost.
 
 The menu header shows which backend is active: `[Neo4j]` or `[NetworkX]`.
+
+#### Making the Neo4j Browser graph readable
+
+By default Neo4j Browser displays nodes as coloured circles labelled with their internal ID — not very useful. ResearchBuddy bundles a stylesheet that:
+
+- Labels each Paper with `Author Year — short title` (e.g. *Smith 2020 — Causal Graphs*)
+- Labels each Cluster with its level + member count (e.g. *L2-cluster · 12 papers*)
+- Colour-codes edges by type (citations = teal, semantic = orange, causal = green, …)
+- Sizes edges by their weight so important relationships stand out
+
+To use it:
+
+1. From ResearchBuddy's main menu choose **option 12 — "Browse graph in Neo4j"**. ResearchBuddy will open the Browser at a useful starter query and print the path to the bundled `.grass` file.
+2. In the Browser, click the cog icon (bottom-left) → **Document Settings**.
+3. Drag the printed `.grass` file onto the *Graph Stylesheet* area. Done — every subsequent query renders with the readable styling.
+
+The same menu also prints a few useful starter Cypher queries you can paste in (citation chains, top semantic neighbours of a paper, cluster membership, etc.).
 
 ### Recommended: GROBID for academic-PDF parsing
 
