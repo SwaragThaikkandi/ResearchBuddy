@@ -24,14 +24,65 @@ from researchbuddy.core.pdf_processor import extract_from_folder, ExtractedPaper
 # Save / Load -----------------------------------------------------------------
 
 def save(graph: ResearchGraph, path: Path = STATE_FILE) -> None:
+    """
+    Persist the graph to disk.
+
+    Includes a defensive guard: if the snapshot we're about to write has
+    *fewer* edges than the existing on-disk pickle (and the on-disk pickle
+    isn't empty), refuse to overwrite. This prevents silent data loss when
+    a buggy backend migration leaves the in-memory graph in a regressed
+    state (the exact bug that wiped a user's 13k-edge graph). The fresh
+    snapshot is still saved to history/ so nothing is lost — only the
+    canonical pickle is protected.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Flush any pending writes to the backend before persisting
     if hasattr(graph, "_backend"):
         graph._backend.sync()
+
+    new_edges = _total_edges(graph)
+    old_edges = _on_disk_edge_count(path)
+
+    if old_edges > 0 and new_edges < old_edges:
+        logger.warning(
+            "Refusing to overwrite %s: in-memory graph has %d edges but "
+            "the existing pickle has %d. This usually means a backend "
+            "migration regressed the graph state. Saving the new state to "
+            "history/ instead — the canonical pickle is unchanged. Use "
+            "menu option 13 -> 8 to restore from a healthy snapshot.",
+            path.name, new_edges, old_edges,
+        )
+        _save_history_snapshot(graph)
+        return
+
     with open(path, "wb") as f:
         pickle.dump(graph, f, protocol=pickle.HIGHEST_PROTOCOL)
     _save_history_snapshot(graph)
-    logger.info("Graph saved -> %s", path)
+    logger.info("Graph saved -> %s (%d edges)", path, new_edges)
+
+
+def _total_edges(graph) -> int:
+    """Sum of edges across all 4 graph layers, or 0 on failure."""
+    try:
+        from researchbuddy.core.graph_backend import (
+            LAYER_SEMANTIC, LAYER_CITATION, LAYER_COMBINED, LAYER_CAUSAL,
+        )
+        b = graph._backend
+        return sum(b.edge_count(L) for L in
+                   (LAYER_SEMANTIC, LAYER_CITATION, LAYER_COMBINED, LAYER_CAUSAL))
+    except Exception:
+        return 0
+
+
+def _on_disk_edge_count(path: Path) -> int:
+    """Peek at the existing pickle to count its edges. Returns 0 on any error."""
+    if not path.exists():
+        return 0
+    try:
+        with open(path, "rb") as f:
+            existing = pickle.load(f)
+        return _total_edges(existing)
+    except Exception:
+        return 0
 
 
 def _save_history_snapshot(graph: ResearchGraph) -> None:

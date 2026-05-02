@@ -124,3 +124,116 @@ def test_migration_replaces_stale_layer_completely():
     _migrate_to_backend(g, target)
     # All source edges should be present
     assert target.edge_count(LAYER_SEMANTIC) == g._backend.edge_count(LAYER_SEMANTIC)
+
+
+# ── save() edge-regression guard ─────────────────────────────────────────────
+
+def test_save_proceeds_on_first_save(tmp_path):
+    """When the canonical pickle doesn't exist yet, save unconditionally."""
+    from researchbuddy.core.state_manager import save
+
+    g = HierarchicalResearchGraph()
+    _populate_graph_with_edges(g)
+    pickle_path = tmp_path / "graph.pkl"
+    history_dir = tmp_path / "history"
+
+    import researchbuddy.core.state_manager as sm
+    orig_history = sm.HISTORY_DIR
+    sm.HISTORY_DIR = history_dir
+    try:
+        save(g, path=pickle_path)
+        assert pickle_path.exists()
+    finally:
+        sm.HISTORY_DIR = orig_history
+
+
+def test_save_proceeds_when_new_state_has_more_edges(tmp_path):
+    """A normal incremental save (more edges than before) just works."""
+    from researchbuddy.core.state_manager import save, _total_edges
+
+    g_small = HierarchicalResearchGraph()
+    g_small._backend.add_node("a", LAYER_SEMANTIC, node_type="paper",
+                              paper_id="a", title="A")
+    g_small._backend.add_node("b", LAYER_SEMANTIC, node_type="paper",
+                              paper_id="b", title="B")
+    g_small._backend.add_edge("a", "b", LAYER_SEMANTIC, etype="semantic", weight=0.5)
+
+    pickle_path = tmp_path / "graph.pkl"
+
+    import researchbuddy.core.state_manager as sm
+    orig_history = sm.HISTORY_DIR
+    sm.HISTORY_DIR = tmp_path / "history"
+    try:
+        save(g_small, path=pickle_path)
+        small_edges = _total_edges(g_small)
+
+        g_big = HierarchicalResearchGraph()
+        _populate_graph_with_edges(g_big)
+        save(g_big, path=pickle_path)
+
+        # Should have overwritten with the bigger graph
+        import pickle as _pickle
+        with open(pickle_path, "rb") as f:
+            loaded = _pickle.load(f)
+        assert _total_edges(loaded) > small_edges
+    finally:
+        sm.HISTORY_DIR = orig_history
+
+
+def test_save_refuses_to_overwrite_with_regressed_state(tmp_path):
+    """
+    The exact regression we hit in production: a healthy pickle exists,
+    then save() is called with a graph that has fewer edges. Refuse to
+    overwrite — preserve the user's data.
+    """
+    from researchbuddy.core.state_manager import save, _total_edges
+
+    g_healthy = HierarchicalResearchGraph()
+    _populate_graph_with_edges(g_healthy)
+
+    pickle_path = tmp_path / "graph.pkl"
+
+    import researchbuddy.core.state_manager as sm
+    orig_history = sm.HISTORY_DIR
+    sm.HISTORY_DIR = tmp_path / "history"
+    try:
+        save(g_healthy, path=pickle_path)
+        healthy_edges = _total_edges(g_healthy)
+
+        # Now an "empty" graph attempts to save
+        g_empty = HierarchicalResearchGraph()
+        save(g_empty, path=pickle_path)
+
+        # Pickle on disk must STILL be the healthy one
+        import pickle as _pickle
+        with open(pickle_path, "rb") as f:
+            loaded = _pickle.load(f)
+        assert _total_edges(loaded) == healthy_edges, \
+            "save() should refuse to overwrite with a regressed graph"
+
+        # And the empty state should still appear in history (so we don't
+        # lose any forensic evidence of what was attempted)
+        snaps = list((tmp_path / "history").glob("graph_*.pkl"))
+        assert len(snaps) >= 2  # one for the healthy save, one for the rejected
+    finally:
+        sm.HISTORY_DIR = orig_history
+
+
+def test_save_allows_legitimate_partial_state(tmp_path):
+    """
+    Edge case: when there's nothing on disk yet, even an empty graph is
+    allowed (otherwise we'd block fresh-start saves).
+    """
+    from researchbuddy.core.state_manager import save
+
+    pickle_path = tmp_path / "graph.pkl"
+
+    import researchbuddy.core.state_manager as sm
+    orig_history = sm.HISTORY_DIR
+    sm.HISTORY_DIR = tmp_path / "history"
+    try:
+        g_empty = HierarchicalResearchGraph()
+        save(g_empty, path=pickle_path)
+        assert pickle_path.exists()
+    finally:
+        sm.HISTORY_DIR = orig_history

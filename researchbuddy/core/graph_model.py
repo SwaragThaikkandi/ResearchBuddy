@@ -1505,17 +1505,32 @@ class HierarchicalResearchGraph:
         """
         Convert Neo4j backend to NetworkX before pickling, since the Neo4j
         driver contains unpicklable connection-pool objects.
+
+        Defensive: if the snapshot ends up with nodes but zero edges, log a
+        warning. This pattern is the fingerprint of a backend in a broken
+        state (e.g. failed migration) — the caller's save() guard will then
+        refuse to overwrite a healthy on-disk pickle.
         """
         state = self.__dict__.copy()
         backend = state.get("_backend")
         if backend is not None and not isinstance(backend, NetworkXBackend):
-            # Snapshot all layers into a fresh NetworkXBackend
             nx_backend = NetworkXBackend()
+            total_nodes = 0
+            total_edges = 0
             for layer in ALL_LAYERS:
                 G = backend.to_networkx(layer)
                 if G.number_of_nodes() > 0:
                     nx_backend.set_from_networkx(layer, G)
+                    total_nodes += G.number_of_nodes()
+                    total_edges += G.number_of_edges()
             state["_backend"] = nx_backend
+            if total_nodes > 0 and total_edges == 0:
+                logger.warning(
+                    "Snapshotting backend that has %d nodes but 0 edges. "
+                    "This usually means the backend's data is incomplete. "
+                    "Save will be guarded against overwriting a healthy "
+                    "on-disk pickle.", total_nodes,
+                )
         return state
 
     def __setstate__(self, state: dict):

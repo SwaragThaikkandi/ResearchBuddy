@@ -989,6 +989,7 @@ def manage_services() -> None:
         print_info("  [5] Reset auto-launch preferences (will ask again next run)")
         print_info("  [6] Test Neo4j connection (bolt + auth)")
         print_info("  [7] Set Neo4j password for this session")
+        print_info("  [8] Restore graph from a history snapshot")
         print_info("  [b] Back to main menu")
 
         choice = ask("Choose", "b").strip().lower()
@@ -1053,8 +1054,83 @@ def manage_services() -> None:
                 )
             else:
                 print_warn(f"Still failing: {res.reason}")
+        elif choice == "8":
+            _restore_from_snapshot()
         else:
             print_warn("Unknown option.")
+
+
+def _restore_from_snapshot() -> None:
+    """
+    Walk through history snapshots in ~/.researchbuddy/history, show the user
+    the most recent ones with edge counts, and let them pick one to copy
+    over the canonical pickle.
+    """
+    import pickle
+    from pathlib import Path
+    from researchbuddy.core.state_manager import _total_edges
+    from researchbuddy.config import HISTORY_DIR, STATE_FILE
+
+    snaps = sorted(Path(HISTORY_DIR).glob("graph_*.pkl"), reverse=True)
+    if not snaps:
+        print_warn(f"No history snapshots found in {HISTORY_DIR}.")
+        return
+
+    # Show the most recent 20 with their edge counts so user picks the
+    # last healthy one.
+    print_info(f"Found {len(snaps)} snapshots. Most recent 20 (newest first):")
+    candidates: list[tuple[int, Path, int]] = []
+    for i, snap in enumerate(snaps[:20]):
+        try:
+            with open(snap, "rb") as f:
+                g = pickle.load(f)
+            edges = _total_edges(g)
+            n_papers = len(getattr(g, "_papers", {}))
+        except Exception as e:
+            edges, n_papers = -1, -1
+            print_info(f"  [{i+1:>2}]  {snap.name}  (could not read: {e})")
+            continue
+        flag = " <-- looks healthy" if edges > 0 else " <-- empty"
+        print_info(f"  [{i+1:>2}]  {snap.name}  papers={n_papers}  edges={edges}{flag}")
+        candidates.append((i + 1, snap, edges))
+
+    if not candidates:
+        print_warn("Could not read any snapshots.")
+        return
+
+    sel = ask("Pick a number to restore (or blank to cancel)", "").strip()
+    if not sel:
+        print_info("Cancelled.")
+        return
+    try:
+        idx = int(sel)
+    except ValueError:
+        print_warn("Invalid selection.")
+        return
+    chosen = next((c for c in candidates if c[0] == idx), None)
+    if chosen is None:
+        print_warn("Selection out of range.")
+        return
+
+    _, snap_path, edges = chosen
+    confirm = ask(
+        f"Overwrite {STATE_FILE.name} with {snap_path.name} ({edges} edges)? (y/n)",
+        "n",
+    ).strip().lower()
+    if not confirm.startswith("y"):
+        print_info("Cancelled.")
+        return
+
+    import shutil
+    backup = STATE_FILE.with_suffix(".pkl.before-restore")
+    if STATE_FILE.exists():
+        shutil.copy2(STATE_FILE, backup)
+        print_info(f"Backed up current pickle to {backup.name}")
+    shutil.copy2(snap_path, STATE_FILE)
+    print_success(
+        f"Restored {snap_path.name} -> {STATE_FILE.name}. "
+        "Quit and re-launch ResearchBuddy to load the restored graph."
+    )
 
 
 # ── Main menu ─────────────────────────────────────────────────────────────────
