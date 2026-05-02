@@ -152,19 +152,38 @@ By default, ResearchBuddy parses PDFs with `pdfplumber`. That works, but `pdfplu
 - **Cleaner embeddings** — section-aware chunking instead of dumb word splits
 - **Far better titles** — no more "Microsoft Word - draft.docx" garbage
 
-Run GROBID as a Docker container. There are two flavours:
+Run GROBID as a Docker container. Pick the flavour that matches your hardware:
 
+| Flavour | Image | RAM | Speed | Accuracy | Best for |
+|---|---|---|---|---|---|
+| **GPU (best)** | `grobid/grobid:0.8.1` + `--gpus all` | ~3 GB VRAM | ~0.3 s / page | Highest (DL) | NVIDIA GPU + nvidia-container-toolkit |
+| **Full (CPU)** | `lfoppiano/grobid:0.8.1` | ~1.5 GB | ~3–5 s / page | Highest (DL) | Modern CPU, no GPU |
+| **CRF (lite)** | `grobid/grobid:0.8.1-crf` | ~700 MB | ~0.5–1 s / page | Slightly lower | Slow CPU / minimal RAM |
+
+**GPU (recommended if you have an NVIDIA card):**
 ```bash
-# Recommended for most users — full image with deep-learning models
-# (~1.5 GB RAM, slower first PDF on CPU)
-docker run -d --name grobid -p 8070:8070 lfoppiano/grobid:0.8.1
+# Prereq: install NVIDIA Container Toolkit
+# https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+docker run -d --gpus all --name grobid -p 8070:8070 \
+  --init --ulimit core=0 \
+  grobid/grobid:0.8.1
+```
 
-# Lighter alternative — CRF-only, no deep learning
-# (~700 MB RAM, ~3-5x faster on CPU, slightly less accurate)
+The GPU version uses GROBID's DeLFT (BERT-based) models with CUDA acceleration. Header parsing, citation parsing, and segmentation all run roughly **10× faster** than CPU. A 30-page paper goes from ~90 s on CPU → ~10 s on GPU. GROBID coexists fine with ResearchBuddy's embedding model on the same GPU as long as you have ≥ 6 GB VRAM total — the DeLFT models load once and stay resident.
+
+**Full CPU (no GPU available):**
+```bash
+docker run -d --name grobid -p 8070:8070 lfoppiano/grobid:0.8.1
+```
+
+**CRF lite (slow CPU / RAM-constrained):**
+```bash
 docker run -d --name grobid -p 8070:8070 grobid/grobid:0.8.1-crf
 ```
 
 That's it — no further configuration needed. If GROBID is reachable at `http://localhost:8070`, ResearchBuddy will use it.
+
+> **Note:** the auto-launch prompt (option `y` at startup) currently spins up the full CPU image (`lfoppiano/grobid:0.8.1`). For GPU, start the container manually with the command above before running `researchbuddy` — ResearchBuddy will detect the existing container and use it.
 
 **First-PDF cold start:** the first time GROBID handles a PDF after startup, it loads its ML models (~30 seconds on CPU). ResearchBuddy sends a tiny warmup request the moment it detects GROBID is alive, so by the time your real PDFs arrive the models are already loaded.
 
