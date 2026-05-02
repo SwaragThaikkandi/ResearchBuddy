@@ -86,27 +86,62 @@ def load(path: Path = STATE_FILE) -> Optional[HierarchicalResearchGraph]:
 
 
 def _migrate_to_backend(graph: HierarchicalResearchGraph, backend) -> None:
-    """Migrate graph data from NetworkX backend to a new backend (e.g. Neo4j)."""
+    """
+    Migrate graph data from the in-memory NetworkX backend to `backend`
+    (typically Neo4j).
+
+    The local pickle is the source of truth for graph structure. Neo4j is
+    a derived materialisation — so we re-migrate whenever the pickle has
+    more edges than Neo4j currently does. This covers:
+
+      * Fresh Neo4j (empty)              → migrate
+      * Previous migration was partial   → re-migrate (e.g. APOC bug left
+                                            nodes but no edges)
+      * Both sides match                  → skip
+      * Both empty                        → skip
+    """
     from researchbuddy.core.graph_backend import (
         LAYER_SEMANTIC, LAYER_CITATION, LAYER_COMBINED, LAYER_CAUSAL,
     )
 
-    # Check if Neo4j already has data
-    if backend.node_count(LAYER_SEMANTIC) > 0:
-        logger.info("Neo4j backend already has data, using existing graph.")
+    layers = (LAYER_SEMANTIC, LAYER_CITATION, LAYER_COMBINED, LAYER_CAUSAL)
+    old_backend = graph._backend
+
+    # Compare per-layer edge counts: pickle (source) vs new backend (target).
+    pickle_edges = {L: old_backend.to_networkx(L).number_of_edges() for L in layers}
+    backend_edges = {L: backend.edge_count(L) for L in layers}
+
+    pickle_total = sum(pickle_edges.values())
+    backend_total = sum(backend_edges.values())
+
+    if pickle_total == 0 and backend_total == 0:
+        # Nothing to do either way — both sides empty
         graph._backend = backend
         return
 
-    logger.info("Migrating graph to Neo4j backend ...")
-    old_backend = graph._backend
+    if backend_total >= pickle_total and backend_total > 0:
+        # Backend already has the data (or more — e.g. external edits).
+        logger.info(
+            "Neo4j backend already has %d edges (pickle: %d) - using existing graph.",
+            backend_total, pickle_total,
+        )
+        graph._backend = backend
+        return
 
-    # Transfer each layer
-    for layer, attr_name in [
-        (LAYER_SEMANTIC, "semantic"),
-        (LAYER_CITATION, "citation"),
-        (LAYER_COMBINED, "combined"),
-        (LAYER_CAUSAL, "causal"),
-    ]:
+    if backend_total > 0:
+        logger.info(
+            "Neo4j backend has %d edges but pickle has %d - re-migrating "
+            "to bring Neo4j up to date.",
+            backend_total, pickle_total,
+        )
+    else:
+        logger.info(
+            "Migrating graph to Neo4j backend (%d total edges) ...",
+            pickle_total,
+        )
+
+    # Transfer each layer (set_from_networkx clears the layer first)
+    for layer in layers:
         G = old_backend.to_networkx(layer)
         if G.number_of_nodes() > 0:
             backend.set_from_networkx(layer, G)
