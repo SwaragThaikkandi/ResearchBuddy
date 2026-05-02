@@ -146,11 +146,13 @@ By default, ResearchBuddy parses PDFs with `pdfplumber`. That works, but `pdfplu
 
 [**GROBID**](https://grobid.readthedocs.io/) is a machine-learning library purpose-built for scientific PDFs. When ResearchBuddy detects a running GROBID instance, it switches to it automatically. You get:
 
-- **Clean structured output** — title, abstract, sections, figures, tables, equations parsed separately
-- **Reference extraction from the PDF itself** — every cited paper's authors, title, year, and DOI parsed locally
-- **Citation graph without API calls** — the bibliography is matched against the rest of your library before CrossRef/OpenAlex is touched, dramatically reducing rate-limit risk and capturing references the APIs miss
-- **Cleaner embeddings** — section-aware chunking instead of dumb word splits
-- **Far better titles** — no more "Microsoft Word - draft.docx" garbage
+- **Section-aware structure** — every section is classified as `introduction`, `related_work`, `methods`, `experiments`, `results`, `discussion`, `conclusion`, `limitations`, etc. Section numbers (`3.2`) are preserved. Downstream queries can target specific section types.
+- **In-text citation contexts** — every `[12]` in the body is mapped to its specific reference, with the *enclosing paragraph and section type* captured. This means we know not just *that* a paper cites Pearl 2009, but that it cites it *in its methods section, in the paragraph about confounder selection*. Used for stronger citation-edge confidence (body-cited > bibliography-only) and richer downstream queries.
+- **Reference extraction from the PDF itself** — every cited paper's authors, title, year, and DOI parsed locally; bibliography matched against your library before any external API call, dramatically reducing rate-limit risk.
+- **Structured tables** — preserves rows × cells (not just flat cell text), so each table is a real grid you can query.
+- **Equations, figure & table captions** parsed separately.
+- **Cleaner embeddings** — section-aware chunking instead of dumb word splits.
+- **Far better titles** — no more "Microsoft Word - draft.docx" garbage.
 
 Run GROBID as a Docker container. Pick the flavour that matches your hardware:
 

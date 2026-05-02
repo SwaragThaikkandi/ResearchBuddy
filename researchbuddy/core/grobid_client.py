@@ -29,7 +29,7 @@ from typing import Optional
 import requests
 
 from researchbuddy.core.pdf_processor import (
-    ExtractedPaper, Section, Figure, Table, Reference,
+    ExtractedPaper, Section, Figure, Table, Reference, CitationContext,
     _stable_id, _to_chunks, _fix_ligatures,
 )
 
@@ -158,8 +158,79 @@ def _parse_header(root: ET.Element) -> tuple[str, str, str]:
     return title, abstract, doi
 
 
+# ── Section type classifier ──────────────────────────────────────────────────
+#
+# GROBID rarely emits <div type="..."> — it leaves classification to us.
+# We use a keyword-priority table over the *normalised* heading text, picking
+# the first rule that matches. Order matters: "related work" must beat
+# "results", "introduction" must beat "discussion" (which appears in some
+# intro paragraphs), etc.
+#
+# This is intentionally simple: a regex-list classifier wins over an
+# ML model here because (a) headings are short, formulaic and well-known,
+# (b) we never want a misclassified section silently affecting downstream
+# scoring, and (c) it's trivial to extend.
+
+_SECTION_TYPE_RULES: list[tuple[str, list[str]]] = [
+    # (section_type, list of substring patterns to match inside the heading)
+    ("abstract",         ["abstract"]),
+    ("related_work",     ["related work", "literature review", "prior work",
+                          "previous work"]),
+    ("background",       ["background", "preliminaries", "preliminar"]),
+    ("introduction",     ["introduction", "intro"]),
+    ("methods",          ["method", "approach", "model", "algorithm",
+                          "framework", "architecture", "technique",
+                          "implementation"]),
+    ("experiments",      ["experiment", "experimental setup", "setup",
+                          "evaluation", "evaluation setup",
+                          "evaluation methodology"]),
+    ("results",          ["result", "finding", "performance", "ablation"]),
+    ("discussion",       ["discussion", "analysis"]),
+    ("limitations",      ["limitation", "threat to validity",
+                          "future work"]),
+    ("conclusion",       ["conclusion", "conclud", "summary", "closing"]),
+    ("acknowledgements", ["acknowledg", "thanks", "funding"]),
+    ("appendix",         ["appendix", "supplementary", "supplement"]),
+]
+
+# Strip leading numbering like "3.2.", "IV.", "(a)" when classifying
+# The numbering token MUST be followed by a separator (period/space/colon/end),
+# otherwise we'd misinterpret the leading "L" of "Limitations" as a Roman
+# numeral and strip it.
+_LEADING_NUM_RE = re.compile(
+    r"^\s*(?:\d+(?:\.\d+)*|[IVXLCDM]+|\([a-z]\))(?=[\s\.\):]|$)\s*[\.\):]?\s*"
+)
+
+
+def _classify_section(heading: str) -> str:
+    """Map a raw heading like '3.2 Experimental Setup' to 'experiments'."""
+    if not heading:
+        return "other"
+    h = _LEADING_NUM_RE.sub("", heading).lower().strip()
+    for stype, keywords in _SECTION_TYPE_RULES:
+        for kw in keywords:
+            if kw in h:
+                return stype
+    return "other"
+
+
+_SECTION_NUMBER_RE = re.compile(
+    r"^\s*((?:\d+(?:\.\d+)*|[IVXLCDM]+))(?=[\s\.\):]|$)"
+)
+
+
+def _extract_section_number(heading: str) -> str:
+    """Pull '3.2' out of '3.2 Experimental Setup' (best effort)."""
+    m = _SECTION_NUMBER_RE.match(heading or "")
+    if not m:
+        return ""
+    return m.group(1).rstrip(".")
+
+
 def _parse_sections(root: ET.Element) -> list[Section]:
-    """Pull body sections (<div>) with their <head>."""
+    """
+    Pull body sections (<div>) with their <head>, classifying each by type.
+    """
     out: list[Section] = []
     body = root.find(f".//{TEI_NS}text/{TEI_NS}body")
     if body is None:
@@ -167,6 +238,15 @@ def _parse_sections(root: ET.Element) -> list[Section]:
     for div in body.findall(f"{TEI_NS}div"):
         head_elem = div.find(f"{TEI_NS}head")
         heading = _text(head_elem) if head_elem is not None else ""
+        # Section number — prefer GROBID's `n` attribute, fall back to parsing
+        number = (head_elem.get("n", "") if head_elem is not None else "") \
+                 or _extract_section_number(heading)
+        # Section type via heuristic
+        # GROBID may also set <div type="..."> directly — use it when available
+        div_type_attr = (div.get("type") or "").strip().lower()
+        section_type = div_type_attr if div_type_attr in {
+            r[0] for r in _SECTION_TYPE_RULES
+        } else _classify_section(heading)
         # Concatenate <p> contents only (skip the head)
         para_texts: list[str] = []
         for p in div.findall(f"{TEI_NS}p"):
@@ -175,7 +255,10 @@ def _parse_sections(root: ET.Element) -> list[Section]:
                 para_texts.append(t)
         body_text = "\n\n".join(para_texts).strip()
         if heading or body_text:
-            out.append(Section(heading=heading, text=body_text))
+            out.append(Section(
+                heading=heading, text=body_text,
+                section_type=section_type, number=number,
+            ))
     return out
 
 
@@ -197,17 +280,18 @@ def _parse_figures(root: ET.Element) -> tuple[list[Figure], list[Table]]:
         fig_desc = fig.find(f"{TEI_NS}figDesc")
         caption = _text(fig_desc) if fig_desc is not None else ""
         if is_table:
-            tbl_text = ""
+            rows: list[list[str]] = []
+            cells_flat: list[str] = []
             tbl_elem = fig.find(f"{TEI_NS}table")
             if tbl_elem is not None:
-                # Flatten cell text
-                cells: list[str] = []
-                for cell in tbl_elem.iter(f"{TEI_NS}cell"):
-                    t = _text(cell)
-                    if t:
-                        cells.append(t)
-                tbl_text = " | ".join(cells)
-            tabs.append(Table(label=label, caption=caption, text=tbl_text))
+                for row in tbl_elem.findall(f"{TEI_NS}row"):
+                    row_cells = [_text(c) for c in row.findall(f"{TEI_NS}cell")]
+                    rows.append(row_cells)
+                    cells_flat.extend(c for c in row_cells if c)
+            tbl_text = " | ".join(cells_flat)
+            tabs.append(Table(
+                label=label, caption=caption, text=tbl_text, rows=rows,
+            ))
         else:
             figs.append(Figure(label=label, caption=caption))
     return figs, tabs
@@ -223,15 +307,22 @@ def _parse_equations(root: ET.Element) -> list[str]:
     return out
 
 
-def _parse_references(root: ET.Element) -> list[Reference]:
+def _parse_references(root: ET.Element) -> tuple[list[Reference], dict[str, int]]:
     """
     Pull bibliography from <text>/<back>/<div>/<listBibl>/<biblStruct>.
 
     Important: scope to <listBibl> only — there are biblStruct elements in
     <teiHeader>/<sourceDesc> that describe the paper itself (its own DOI,
     journal, etc.) and must NOT be returned as references.
+
+    Returns (references, ref_id_to_index) so a later pass over the body
+    can attach citation contexts to the right Reference object.
+    GROBID gives each <biblStruct> an `xml:id="b0"` … and <ref target="#b0">
+    points back to it.
     """
     out: list[Reference] = []
+    id_to_index: dict[str, int] = {}
+    XML_ID = "{http://www.w3.org/XML/1998/namespace}id"
     for list_bibl in root.iter(f"{TEI_NS}listBibl"):
         for bibl in list_bibl.findall(f"{TEI_NS}biblStruct"):
             title_elem = bibl.find(f".//{TEI_NS}title[@type='main']")
@@ -262,10 +353,57 @@ def _parse_references(root: ET.Element) -> list[Reference]:
                 doi = _scan_doi(_text(bibl))
             if title or doi or authors:
                 raw = f"{', '.join(authors)} ({year}). {title}".strip(" .")
-                out.append(Reference(
+                ref = Reference(
                     raw=raw, title=title, doi=doi, year=year, authors=authors,
+                )
+                # Track the GROBID xml:id ("b0", "b1", ...) -> index in `out`
+                xml_id = bibl.get(XML_ID, "")
+                if xml_id:
+                    id_to_index[xml_id] = len(out)
+                out.append(ref)
+    return out, id_to_index
+
+
+def _parse_citation_contexts(
+    root: ET.Element,
+    references: list[Reference],
+    id_to_index: dict[str, int],
+) -> None:
+    """
+    Walk every <ref type="bibr" target="#bN"/> in the body, capture its
+    enclosing paragraph + section context, and attach the result to the
+    matching Reference object's `contexts` list.
+
+    Mutates `references` in place.
+    """
+    body = root.find(f".//{TEI_NS}text/{TEI_NS}body")
+    if body is None:
+        return
+    for div in body.findall(f"{TEI_NS}div"):
+        head_elem = div.find(f"{TEI_NS}head")
+        section_heading = _text(head_elem) if head_elem is not None else ""
+        section_type = _classify_section(section_heading)
+        for p in div.findall(f"{TEI_NS}p"):
+            # Skip paragraphs without any bibr refs at all
+            bibrs = [r for r in p.iter(f"{TEI_NS}ref")
+                     if r.get("type") == "bibr"]
+            if not bibrs:
+                continue
+            paragraph_text = _text(p)
+            # Trim very long paragraphs to keep memory + pickle size bounded
+            snippet = paragraph_text if len(paragraph_text) <= 600 \
+                else paragraph_text[:600].rsplit(" ", 1)[0] + "…"
+            for ref_elem in bibrs:
+                target = (ref_elem.get("target") or "").lstrip("#")
+                idx = id_to_index.get(target)
+                if idx is None or idx >= len(references):
+                    continue
+                references[idx].contexts.append(CitationContext(
+                    ref_index=target,
+                    section_type=section_type,
+                    section_heading=section_heading,
+                    snippet=snippet,
                 ))
-    return out
 
 
 def _full_text_from_sections(sections: list[Section]) -> str:
@@ -344,7 +482,10 @@ def extract(
     sections = _parse_sections(root)
     figs, tabs = _parse_figures(root)
     equations = _parse_equations(root)
-    refs = _parse_references(root)
+    refs, ref_id_to_index = _parse_references(root)
+    # Walk the body for in-text <ref type="bibr"> markers and attach a
+    # CitationContext (section type + paragraph snippet) to each Reference.
+    _parse_citation_contexts(root, refs, ref_id_to_index)
 
     full_text = _full_text_from_sections(sections)
 

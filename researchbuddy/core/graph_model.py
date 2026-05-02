@@ -84,6 +84,7 @@ class PaperMeta:
     last_shown: float               = 0.0
     # ── GROBID-derived structured fields (empty when pdfplumber fallback) ──
     local_refs: list[dict]          = field(default_factory=list)  # parsed references from PDF
+    section_index: list[dict]       = field(default_factory=list)  # [{type,heading,number,n_words}]
     figure_captions: list[str]      = field(default_factory=list)  # figure captions
     table_captions: list[str]       = field(default_factory=list)  # table captions
     equations: list[str]            = field(default_factory=list)  # math formulae
@@ -713,13 +714,37 @@ class HierarchicalResearchGraph:
                     if matched_id and matched_id != meta.paper_id:
                         ref_ids.add(matched_id)
 
+            # Split refs into "verified" (actually cited in the body, GROBID
+            # found a <ref type="bibr"> pointing at them) vs "bibliography
+            # only" (listed in references but never cited inline). Body-cited
+            # refs are far stronger evidence.
+            verified_ids: set[str] = set()
+            for r in local:
+                if not r.get("contexts"):
+                    continue
+                doi = (r.get("doi") or "").lower().strip()
+                if doi and doi in ref_ids:
+                    verified_ids.add(doi)
+                    continue
+                t = (r.get("title") or "").strip()
+                if t:
+                    matched = title_index.get(self._normalise_title(t))
+                    if matched and matched in ref_ids:
+                        verified_ids.add(matched)
+
             if ref_ids:
                 self._refs[meta.paper_id] = ref_ids
                 # Record this as a per-source result so confidence scoring
-                # knows where it came from.
+                # knows where it came from. The 'verified' subset (refs we
+                # actually saw cited in-text) gets recorded as a separate,
+                # stronger source so cross-validation weighs it higher.
                 self._ref_sources.setdefault(meta.paper_id, []).append(
                     RefResult(source="grobid_local", ref_ids=set(ref_ids))
                 )
+                if verified_ids:
+                    self._ref_sources[meta.paper_id].append(
+                        RefResult(source="grobid_intext", ref_ids=verified_ids)
+                    )
                 n_populated += 1
 
         if verbose and n_populated:

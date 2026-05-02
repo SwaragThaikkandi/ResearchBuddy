@@ -32,6 +32,13 @@ class Section:
     """A logical section parsed from the document (intro, methods, results, …)."""
     heading: str
     text: str
+    # Classified section type. Heuristic mapping over the heading text.
+    # One of: "abstract", "introduction", "related_work", "background",
+    # "methods", "experiments", "results", "discussion", "conclusion",
+    # "limitations", "acknowledgements", "appendix", "other"
+    section_type: str = "other"
+    # Original `n` attribute from <head n="3.2">3.2. Methods</head>, when given
+    number: str = ""
 
 
 @dataclass
@@ -44,7 +51,24 @@ class Figure:
 class Table:
     label: str             # e.g. "Table 1"
     caption: str
-    text: str = ""         # flattened table contents (cell-joined)
+    text: str = ""         # backwards-compat flattened cells
+    rows: list[list[str]] = field(default_factory=list)   # structured rows
+
+
+@dataclass
+class CitationContext:
+    """
+    A single in-text citation marker located within the paper. Captures
+    *where* a reference was cited (section type + sentence-ish snippet),
+    not just *that* it was cited. This makes downstream tasks far richer:
+      * "show me papers that cite Pearl 2009 in their methods"
+      * citation classification (supportive vs contrastive vs methodological)
+      * co-citation by paragraph
+    """
+    ref_index: str             # GROBID's #b0, #b1, ... target id
+    section_type: str          # the containing section's classified type
+    section_heading: str       # the literal heading text
+    snippet: str               # paragraph text around the citation marker
 
 
 @dataclass
@@ -54,6 +78,8 @@ class Reference:
     doi: str = ""
     year: str = ""
     authors: list[str] = field(default_factory=list)
+    # Where in the citing paper this reference was cited
+    contexts: list[CitationContext] = field(default_factory=list)
 
 
 @dataclass

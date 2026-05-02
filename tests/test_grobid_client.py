@@ -17,7 +17,8 @@ from researchbuddy.core import grobid_client
 from researchbuddy.core.grobid_client import (
     is_available, extract,
     _parse_header, _parse_sections, _parse_figures,
-    _parse_equations, _parse_references,
+    _parse_equations, _parse_references, _parse_citation_contexts,
+    _classify_section, _extract_section_number,
     _full_text_from_sections,
 )
 
@@ -45,14 +46,21 @@ SAMPLE_TEI = """<?xml version="1.0" encoding="UTF-8"?>
   <text>
     <body>
       <div>
-        <head>1. Introduction</head>
-        <p>Recent work has highlighted the challenges of confounding.</p>
+        <head n="1">1. Introduction</head>
+        <p>Recent work has highlighted the challenges of confounding,
+           building on Pearl <ref type="bibr" target="#b0"/>.</p>
         <p>Here we develop a regularised estimator.</p>
       </div>
       <div>
-        <head>2. Methods</head>
-        <p>Let X be the covariate vector.</p>
+        <head n="2">2. Methods</head>
+        <p>Let X be the covariate vector. We use double machine learning
+           <ref type="bibr" target="#b1"/> with a Pearl-style adjustment
+           <ref type="bibr" target="#b0"/>.</p>
         <formula>E[Y|do(X)] = sum_z p(z) E[Y|X,Z=z]</formula>
+      </div>
+      <div>
+        <head n="3">3. Related Work</head>
+        <p>Earlier studies are surveyed by <ref type="bibr" target="#b0"/>.</p>
       </div>
       <figure>
         <label>1</label>
@@ -133,11 +141,57 @@ def test_parse_header_handles_missing_header():
 
 def test_parse_sections_returns_headed_paragraphs(root):
     secs = _parse_sections(root)
-    assert len(secs) == 2
+    assert len(secs) == 3
     assert secs[0].heading.startswith("1. Introduction")
     assert "regularised estimator" in secs[0].text
     assert secs[1].heading.startswith("2. Methods")
     assert "covariate" in secs[1].text
+    assert secs[2].heading.startswith("3. Related Work")
+
+
+def test_parse_sections_attaches_section_type(root):
+    secs = _parse_sections(root)
+    types = [s.section_type for s in secs]
+    assert types == ["introduction", "methods", "related_work"]
+
+
+def test_parse_sections_attaches_section_number(root):
+    secs = _parse_sections(root)
+    assert secs[0].number == "1"
+    assert secs[1].number == "2"
+    assert secs[2].number == "3"
+
+
+# ── Section type classifier (unit tests) ──────────────────────────────────────
+
+@pytest.mark.parametrize("heading,expected", [
+    ("1. Introduction",            "introduction"),
+    ("2 Methods",                  "methods"),
+    ("3.2 Experimental Setup",     "experiments"),
+    ("4. Results",                 "results"),
+    ("5. Discussion and Analysis", "discussion"),
+    ("6. Conclusion",              "conclusion"),
+    ("Related Work",               "related_work"),
+    ("II. Background",             "background"),
+    ("Limitations",                "limitations"),
+    ("Acknowledgements",           "acknowledgements"),
+    ("Appendix A: Proofs",         "appendix"),
+    ("References",                 "other"),     # not in our taxonomy
+    ("Foobar Section",             "other"),
+    ("",                           "other"),
+])
+def test_classify_section(heading, expected):
+    assert _classify_section(heading) == expected
+
+
+@pytest.mark.parametrize("heading,expected", [
+    ("3.2 Experimental Setup", "3.2"),
+    ("II. Background",         "II"),
+    ("4. Results",             "4"),
+    ("Introduction",           ""),  # no leading number
+])
+def test_extract_section_number(heading, expected):
+    assert _extract_section_number(heading) == expected
 
 
 def test_full_text_collation(root):
@@ -156,8 +210,16 @@ def test_parse_figures_separates_figures_and_tables(root):
     assert len(tabs) == 1
     assert "Convergence rate" in figs[0].caption
     assert "Comparison" in tabs[0].caption
-    # Table cells should be flattened
+    # Backwards-compat flattened text still works
     assert "Method" in tabs[0].text and "0.12" in tabs[0].text
+
+
+def test_parse_tables_preserves_rows(root):
+    """Structured row/cell layout must be preserved alongside the flat text."""
+    _, tabs = _parse_figures(root)
+    assert len(tabs[0].rows) == 2
+    assert tabs[0].rows[0] == ["Method", "RMSE"]
+    assert tabs[0].rows[1] == ["Ours", "0.12"]
 
 
 # ── Equations ─────────────────────────────────────────────────────────────────
@@ -171,7 +233,7 @@ def test_parse_equations(root):
 # ── References ────────────────────────────────────────────────────────────────
 
 def test_parse_references_extracts_doi_and_authors(root):
-    refs = _parse_references(root)
+    refs, id_map = _parse_references(root)
     assert len(refs) == 2
     assert refs[0].title == "A Pearl-style estimator"
     assert refs[0].doi == "10.5678/pearl.2023"
@@ -182,6 +244,47 @@ def test_parse_references_extracts_doi_and_authors(root):
     assert refs[1].doi == ""
     assert refs[1].title == "Double machine learning"
     assert refs[1].year == "2018"
+
+    # The id map is needed by _parse_citation_contexts
+    assert id_map == {"b0": 0, "b1": 1}
+
+
+# ── In-text citation contexts ────────────────────────────────────────────────
+
+def test_parse_citation_contexts_attaches_section_type_and_snippet(root):
+    refs, id_map = _parse_references(root)
+    _parse_citation_contexts(root, refs, id_map)
+
+    # b0 (Pearl) cited in: introduction, methods, related_work — 3 contexts
+    pearl = refs[0]
+    assert len(pearl.contexts) == 3
+    types = sorted(c.section_type for c in pearl.contexts)
+    assert types == ["introduction", "methods", "related_work"]
+
+    # b1 (Chernozhukov) cited only in methods
+    cherno = refs[1]
+    assert len(cherno.contexts) == 1
+    assert cherno.contexts[0].section_type == "methods"
+
+    # Snippets should contain the surrounding paragraph text
+    assert any("regularised estimator" not in c.snippet  # not in same paragraph
+               for c in pearl.contexts)
+    assert any("Pearl-style adjustment" in c.snippet for c in pearl.contexts)
+
+
+def test_parse_citation_contexts_handles_no_targets_gracefully():
+    """References with no matching xml:ids in the body produce no contexts."""
+    minimal = """<?xml version="1.0" encoding="UTF-8"?>
+    <TEI xmlns="http://www.tei-c.org/ns/1.0">
+      <teiHeader/>
+      <text><body>
+        <div><head>1. Intro</head><p>No citations here.</p></div>
+      </body></text>
+    </TEI>"""
+    root = ET.fromstring(minimal)
+    refs, id_map = _parse_references(root)  # empty
+    _parse_citation_contexts(root, refs, id_map)
+    assert refs == []
 
 
 # ── Availability probe ────────────────────────────────────────────────────────
@@ -224,15 +327,23 @@ def test_extract_end_to_end_with_mocked_grobid(tmp_path: pathlib.Path):
     assert ep.parser == "grobid"
     assert "Causal Inference" in ep.title
     assert ep.doi == "10.1234/example.2024.001"
-    assert len(ep.sections) == 2
+    assert len(ep.sections) == 3
+    assert [s.section_type for s in ep.sections] == [
+        "introduction", "methods", "related_work",
+    ]
     assert len(ep.figures) == 1
     assert len(ep.tables) == 1
+    assert ep.tables[0].rows == [["Method", "RMSE"], ["Ours", "0.12"]]
     assert len(ep.equations) == 1
     assert len(ep.references) == 2
     # First chunk should be the abstract; subsequent chunks the section text
     assert ep.chunks[0].startswith("We propose")
     # Reference DOIs survive the extraction
     assert any(r.doi == "10.5678/pearl.2023" for r in ep.references)
+    # Citation contexts are attached and section-aware
+    pearl_ref = next(r for r in ep.references if r.doi == "10.5678/pearl.2023")
+    assert len(pearl_ref.contexts) == 3
+    assert any(c.section_type == "methods" for c in pearl_ref.contexts)
 
 
 def test_extract_raises_GrobidTimeout_on_read_timeout(tmp_path: pathlib.Path):

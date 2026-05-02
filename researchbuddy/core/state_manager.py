@@ -252,7 +252,8 @@ def import_pdf_folder(graph: HierarchicalResearchGraph, folder: str | Path) -> i
         )
         # Carry over GROBID-derived structured fields when present.
         # These let fetch_citations() build the citation network from the
-        # PDFs themselves before any external API call.
+        # PDFs themselves before any external API call, and let the
+        # reasoner answer section-targeted queries.
         if getattr(ep, "references", None):
             meta.local_refs = [
                 {
@@ -261,8 +262,29 @@ def import_pdf_folder(graph: HierarchicalResearchGraph, folder: str | Path) -> i
                     "year":  r.year,
                     "authors": list(r.authors),
                     "raw":   r.raw,
+                    # Each context: {section_type, section_heading, snippet}
+                    "contexts": [
+                        {
+                            "section_type":    c.section_type,
+                            "section_heading": c.section_heading,
+                            "snippet":         c.snippet,
+                        }
+                        for c in r.contexts
+                    ],
                 }
                 for r in ep.references if (r.title or r.doi)
+            ]
+        if getattr(ep, "sections", None):
+            # Compact: only the type + heading (full text is already in chunks).
+            # Useful for downstream queries like "summarise the methods".
+            meta.section_index = [
+                {
+                    "type":    s.section_type,
+                    "heading": s.heading,
+                    "number":  s.number,
+                    "n_words": len(s.text.split()),
+                }
+                for s in ep.sections
             ]
         if getattr(ep, "figures", None):
             meta.figure_captions = [
