@@ -164,3 +164,52 @@ def test_service_alive_returns_false_on_connection_error():
     with patch("researchbuddy.core.services.requests.get") as mock_get:
         mock_get.side_effect = requests.ConnectionError("refused")
         assert svc._service_alive(svc.GROBID_SPEC) is False
+
+
+# ── Neo4j bolt probe ─────────────────────────────────────────────────────────
+
+def test_probe_neo4j_bolt_succeeds():
+    """When verify_connectivity returns cleanly, we report ok."""
+    fake_driver = MagicMock()
+    fake_driver.verify_connectivity.return_value = None
+    with patch("neo4j.GraphDatabase.driver", return_value=fake_driver):
+        res = svc.probe_neo4j_bolt(password="anything")
+        assert res.ok is True
+        assert res.reason == ""
+        fake_driver.close.assert_called_once()
+
+
+def test_probe_neo4j_bolt_reports_auth_failure_specifically():
+    fake_driver = MagicMock()
+    fake_driver.verify_connectivity.side_effect = Exception("Unauthorized: invalid credentials")
+    with patch("neo4j.GraphDatabase.driver", return_value=fake_driver):
+        res = svc.probe_neo4j_bolt(password="wrong")
+        assert res.ok is False
+        assert "auth" in res.reason.lower()
+        assert "RESEARCHBUDDY_NEO4J_PASSWORD" in res.reason
+
+
+def test_probe_neo4j_bolt_reports_other_errors_with_message():
+    fake_driver = MagicMock()
+    fake_driver.verify_connectivity.side_effect = Exception("ServiceUnavailable: cannot reach 7687")
+    with patch("neo4j.GraphDatabase.driver", return_value=fake_driver):
+        res = svc.probe_neo4j_bolt(password="x")
+        assert res.ok is False
+        assert "ServiceUnavailable" in res.reason
+
+
+def test_probe_neo4j_bolt_handles_missing_driver(monkeypatch):
+    """If neo4j package is somehow unavailable, we report it cleanly."""
+    import sys
+    # Simulate ImportError on `import neo4j`
+    real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __builtins__.__import__
+
+    def raising_import(name, *a, **kw):
+        if name == "neo4j":
+            raise ImportError("simulated")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr("builtins.__import__", raising_import)
+    res = svc.probe_neo4j_bolt(password="x")
+    assert res.ok is False
+    assert "neo4j Python driver" in res.reason

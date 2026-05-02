@@ -196,6 +196,54 @@ def _service_alive(spec: ServiceSpec, timeout: float = 2.0) -> bool:
         return False
 
 
+# ── Neo4j bolt probe ──────────────────────────────────────────────────────────
+
+@dataclass
+class Neo4jProbeResult:
+    """Outcome of trying to actually connect to Neo4j via the bolt driver."""
+    ok: bool
+    reason: str = ""   # "" on success, otherwise a one-line diagnostic
+
+
+def probe_neo4j_bolt(
+    uri: str = "bolt://localhost:7687",
+    user: str = "neo4j",
+    password: str = "researchbuddy",
+    timeout: float = 3.0,
+) -> Neo4jProbeResult:
+    """
+    Try to authenticate against Neo4j over bolt. Returns a structured result
+    so callers (status banner, manage-services menu) can show actionable info
+    instead of a generic 'down' / 'connection failed'.
+    """
+    try:
+        import neo4j as _neo4j
+    except ImportError:
+        return Neo4jProbeResult(
+            ok=False,
+            reason="neo4j Python driver not installed (pip install neo4j)",
+        )
+
+    try:
+        driver = _neo4j.GraphDatabase.driver(
+            uri, auth=(user, password),
+            connection_timeout=timeout,
+        )
+        try:
+            driver.verify_connectivity()
+            return Neo4jProbeResult(ok=True)
+        finally:
+            driver.close()
+    except Exception as e:
+        msg = str(e).lower()
+        if "auth" in msg or "unauthorized" in msg or "credentials" in msg:
+            return Neo4jProbeResult(
+                ok=False,
+                reason=f"auth failed (set RESEARCHBUDDY_NEO4J_PASSWORD; tried '{password}')",
+            )
+        return Neo4jProbeResult(ok=False, reason=str(e)[:140])
+
+
 def _wait_until_alive(spec: ServiceSpec, total_seconds: int) -> bool:
     """Poll the health endpoint until it returns true or we time out."""
     deadline = time.monotonic() + total_seconds

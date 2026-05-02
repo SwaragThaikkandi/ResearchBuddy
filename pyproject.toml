@@ -34,12 +34,15 @@ dependencies = [
     "keybert>=0.7.0",
     "matplotlib>=3.7.0",
     "scipy>=1.9.0",
+    # Neo4j driver is now a hard dep — pure Python, ~2 MB, makes the
+    # optional Neo4j backend "just work" when the user starts a server.
+    "neo4j>=5.0",
 ]
 
 [project.optional-dependencies]
-neo4j = [
-    "neo4j>=5.0",
-]
+# Kept for backwards compatibility — installs nothing extra now that the
+# driver is a hard dependency.
+neo4j = []
 test = [
     "pytest>=7.0",
 ]

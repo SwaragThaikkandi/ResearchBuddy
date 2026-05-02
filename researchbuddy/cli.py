@@ -987,6 +987,8 @@ def manage_services() -> None:
         print_info("  [3] Start GROBID")
         print_info("  [4] Stop GROBID")
         print_info("  [5] Reset auto-launch preferences (will ask again next run)")
+        print_info("  [6] Test Neo4j connection (bolt + auth)")
+        print_info("  [7] Set Neo4j password for this session")
         print_info("  [b] Back to main menu")
 
         choice = ask("Choose", "b").strip().lower()
@@ -1024,6 +1026,33 @@ def manage_services() -> None:
         elif choice == "5":
             svc.save_prefs({})
             print_success("Auto-launch preferences cleared.")
+        elif choice == "6":
+            password = os.environ.get("RESEARCHBUDDY_NEO4J_PASSWORD", "researchbuddy")
+            print_info(f"Probing bolt://localhost:7687 as user 'neo4j' with the configured password ...")
+            res = svc.probe_neo4j_bolt(password=password)
+            if res.ok:
+                print_success("Connection ok — Neo4j is usable as a backend.")
+                print_info("Re-launch ResearchBuddy to switch the active backend to Neo4j.")
+            else:
+                print_warn(f"Connection failed: {res.reason}")
+        elif choice == "7":
+            new_pw = ask("New Neo4j password (leave blank to cancel)", "")
+            if not new_pw:
+                print_info("Cancelled.")
+                continue
+            os.environ["RESEARCHBUDDY_NEO4J_PASSWORD"] = new_pw
+            os.environ.setdefault("RESEARCHBUDDY_NEO4J_ENABLED", "true")
+            # Reload config so the next backend creation sees the new value
+            import importlib, researchbuddy.config as _cfg_mod
+            importlib.reload(_cfg_mod)
+            res = svc.probe_neo4j_bolt(password=new_pw)
+            if res.ok:
+                print_success(
+                    "Password accepted. Re-launch ResearchBuddy to use Neo4j "
+                    "as the active backend."
+                )
+            else:
+                print_warn(f"Still failing: {res.reason}")
         else:
             print_warn("Unknown option.")
 
@@ -1183,19 +1212,38 @@ def _print_service_status() -> None:
     """
     One-line status for each optional service. Prints unconditionally so the
     user always knows what's plugged in without reading container logs.
+
+    For Neo4j, we don't just check the HTTP endpoint — we also do a bolt
+    auth probe, since 'http reachable' does not imply 'usable as backend'.
+    Returns nothing; emits a follow-up actionable line if bolt failed.
     """
-    neo4j_alive  = svc._service_alive(svc.NEO4J_SPEC)
     grobid_alive = svc._service_alive(svc.GROBID_SPEC)
     docker_ok    = svc.docker_available()
 
-    def status(label: str, alive: bool) -> str:
+    # Neo4j: bolt probe (the one that actually matters for the backend)
+    neo4j_password = os.environ.get("RESEARCHBUDDY_NEO4J_PASSWORD", "researchbuddy")
+    bolt = svc.probe_neo4j_bolt(password=neo4j_password)
+    http_alive = svc._service_alive(svc.NEO4J_SPEC)
+
+    def status(label: str, alive: bool, extra: str = "") -> str:
         if HAS_RICH:
             mark = "[green]ok[/]" if alive else "[red]down[/]"
         else:
             mark = "ok" if alive else "down"
-        return f"{label}: {mark}"
+        return f"{label}: {mark}{extra}"
 
-    parts = [status("Neo4j", neo4j_alive), status("GROBID", grobid_alive)]
+    if bolt.ok:
+        neo4j_part = status("Neo4j", True)
+    elif http_alive:
+        # HTTP works, bolt doesn't — that's a real story worth telling
+        if HAS_RICH:
+            neo4j_part = "Neo4j: [yellow]http only[/]"
+        else:
+            neo4j_part = "Neo4j: http only"
+    else:
+        neo4j_part = status("Neo4j", False)
+
+    parts = [neo4j_part, status("GROBID", grobid_alive)]
     if not docker_ok:
         parts.append("Docker: [yellow]not detected[/]" if HAS_RICH else "Docker: not detected")
     line = "  Services -- " + "  |  ".join(parts)
@@ -1203,6 +1251,13 @@ def _print_service_status() -> None:
         console.print(line)
     else:
         print(line)
+
+    # If Neo4j is half-up, print a clear next step
+    if http_alive and not bolt.ok:
+        if HAS_RICH:
+            console.print(f"  [yellow]→ Neo4j bolt: {bolt.reason}[/]")
+        else:
+            print(f"  -> Neo4j bolt: {bolt.reason}")
 
 
 def _ensure_services_at_startup() -> None:
