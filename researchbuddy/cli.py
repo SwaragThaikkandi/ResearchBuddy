@@ -1,6 +1,6 @@
 ﻿#!/usr/bin/env python3
 """
-ResearchBuddy CLI â€” interactive literature search session.
+ResearchBuddy CLI - interactive literature search session.
 
 Usage (after pip install):
     researchbuddy                         # load saved graph and start session
@@ -174,7 +174,7 @@ def rating_session(graph: HierarchicalResearchGraph, results: list[tuple[PaperMe
         elif rating >= 4:
             print_info(f"      Moderate relevance (weight={rating}).")
         else:
-            print_warn(f"      Low relevance â€” will be used as negative example.")
+            print_warn(f"      Low relevance - will be used as negative example.")
 
     if rated_any:
         print_info("\n[graph] Rebuilding hierarchy with new ratings ...")
@@ -481,7 +481,7 @@ def display_query_result(result: QueryResult, graph: HierarchicalResearchGraph):
 
 
 def query_session(graph: HierarchicalResearchGraph):
-    """Interactive reasoning loop â€” the 'prefrontal cortex'."""
+    """Interactive reasoning loop - the 'prefrontal cortex'."""
     if not graph.all_papers():
         print_warn("No papers in your graph yet. Add PDFs (option 3) first.")
         return
@@ -516,14 +516,14 @@ def query_session(graph: HierarchicalResearchGraph):
             )
             if rating >= 7:
                 print_success(
-                    "Network updated â€” edges strengthened between relevant "
+                    "Network updated - edges strengthened between relevant "
                     "papers. Future results will lean this way."
                 )
             elif rating >= 4:
                 print_info("Noted. Moderate interest recorded.")
             else:
                 print_info(
-                    "Network updated â€” relevance dampened for these papers."
+                    "Network updated - relevance dampened for these papers."
                 )
             save(graph)
 
@@ -534,7 +534,7 @@ def query_session(graph: HierarchicalResearchGraph):
 
 def creative_session(graph: HierarchicalResearchGraph):
     """
-    Interactive argumentation loop â€” the 'Creative Cortex'.
+    Interactive argumentation loop - the 'Creative Cortex'.
 
     Generates argument paragraphs synthesising the literature and learns
     from user correctness / usefulness ratings via a StyleProfile.
@@ -551,7 +551,7 @@ def creative_session(graph: HierarchicalResearchGraph):
     reasoner = Reasoner(top_k=cfg.QUERY_TOP_K)
     arguer   = Arguer()
 
-    print_header("Creative Mode â€” Argumentation Engine")
+    print_header("Creative Mode - Argumentation Engine")
     print_info(
         "Ask a research question; the system will generate argument paragraphs\n"
         "that synthesise your literature using citation relationships.\n"
@@ -635,14 +635,14 @@ def creative_session(graph: HierarchicalResearchGraph):
                 combined = (correctness + usefulness) / 2
                 if combined >= 7:
                     print_success(
-                        "  Excellent! Style profile updated â€” "
+                        "  Excellent! Style profile updated - "
                         f"{para.arg_type} arguments boosted."
                     )
                 elif combined >= 4:
                     print_info("  Noted. Moderate preference recorded.")
                 else:
                     print_warn(
-                        f"  Low rating recorded â€” {para.arg_type} arguments "
+                        f"  Low rating recorded - {para.arg_type} arguments "
                         "will be deprioritised."
                     )
 
@@ -669,7 +669,7 @@ def creative_session(graph: HierarchicalResearchGraph):
 
 def audit_edges(graph: HierarchicalResearchGraph):
     """Show low-confidence edges and structural anomalies for user review."""
-    print_header("Edge Audit â€” Graph Reliability")
+    print_header("Edge Audit - Graph Reliability")
 
     # â”€â”€ 1. Low-confidence citation edges â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     low_conf_edges = []
@@ -938,7 +938,7 @@ def browse_in_neo4j(graph: HierarchicalResearchGraph) -> None:
     if grass_path.exists():
         print_success(f"     {grass_path}")
     else:
-        print_warn("     (stylesheet not bundled — re-install with `pip install -e .`)")
+        print_warn("     (stylesheet not bundled - re-install with `pip install -e .`)")
 
     print()
     print_info("Useful starter queries (paste into the Browser):")
@@ -956,6 +956,78 @@ def browse_in_neo4j(graph: HierarchicalResearchGraph) -> None:
     print_info("    RETURN c, p LIMIT 100")
 
 
+# ── Service management (on-demand) ────────────────────────────────────────────
+
+def manage_services() -> None:
+    """
+    Interactive service control: start / stop Neo4j and GROBID, reset the
+    'never' preference, show current status.
+    """
+    print_header("Service Management")
+    if not svc.docker_available():
+        print_warn(
+            "Docker is not detected. Install Docker Desktop and ensure it's "
+            "running, then return to this menu."
+        )
+        return
+
+    while True:
+        # Live status each iteration
+        n_alive = svc._service_alive(svc.NEO4J_SPEC)
+        g_alive = svc._service_alive(svc.GROBID_SPEC)
+        prefs = svc.load_prefs()
+        print()
+        print_info(f"  Neo4j:  {'running' if n_alive else 'stopped'}  "
+                   f"(auto-launch pref: {prefs.get('neo4j_auto_launch', 'ask')})")
+        print_info(f"  GROBID: {'running' if g_alive else 'stopped'}  "
+                   f"(auto-launch pref: {prefs.get('grobid_auto_launch', 'ask')})")
+        print()
+        print_info("  [1] Start Neo4j")
+        print_info("  [2] Stop Neo4j")
+        print_info("  [3] Start GROBID")
+        print_info("  [4] Stop GROBID")
+        print_info("  [5] Reset auto-launch preferences (will ask again next run)")
+        print_info("  [b] Back to main menu")
+
+        choice = ask("Choose", "b").strip().lower()
+
+        if choice == "b":
+            return
+        if choice == "1":
+            res = svc.ensure_running(svc.NEO4J_SPEC)
+            if res.already_running:
+                print_info("Neo4j already running.")
+            elif res.started:
+                print_success("Neo4j is up at http://localhost:7474")
+                os.environ.setdefault("RESEARCHBUDDY_NEO4J_ENABLED", "true")
+                os.environ.setdefault("RESEARCHBUDDY_NEO4J_PASSWORD", "researchbuddy")
+            else:
+                print_warn(f"Could not start Neo4j: {res.error}")
+        elif choice == "2":
+            if svc.stop_service(svc.NEO4J_SPEC):
+                print_success("Neo4j stopped.")
+            else:
+                print_warn("Could not stop Neo4j (already stopped or container missing).")
+        elif choice == "3":
+            res = svc.ensure_running(svc.GROBID_SPEC)
+            if res.already_running:
+                print_info("GROBID already running.")
+            elif res.started:
+                print_success("GROBID is up at http://localhost:8070")
+            else:
+                print_warn(f"Could not start GROBID: {res.error}")
+        elif choice == "4":
+            if svc.stop_service(svc.GROBID_SPEC):
+                print_success("GROBID stopped.")
+            else:
+                print_warn("Could not stop GROBID (already stopped or container missing).")
+        elif choice == "5":
+            svc.save_prefs({})
+            print_success("Auto-launch preferences cleared.")
+        else:
+            print_warn("Unknown option.")
+
+
 # ── Main menu ─────────────────────────────────────────────────────────────────
 
 def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
@@ -967,11 +1039,12 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
         "5": "Resolve Semantic Scholar IDs for seed papers",
         "6": "Rebuild hierarchy & regenerate all graph PDFs",
         "7": "Query your research network (Reasoning Mode)",
-        "8": "Creative Mode â€” generate & rate argument paragraphs",
+        "8": "Creative Mode - generate & rate argument paragraphs",
         "9": "LLM status & setup",
         "10": "Audit graph edges (low-confidence & anomalies)",
         "11": "Quality & reliability report",
         "12": "Browse graph in Neo4j (open Browser + load style)",
+        "13": "Manage services (Neo4j / GROBID)",
         "q": "Save & quit",
     }
     while True:
@@ -996,7 +1069,9 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
         print()
         for key, desc in options.items():
             if HAS_RICH:
-                console.print(f"  [cyan][{key}][/] {desc}")
+                # Escape the brackets so Rich doesn't treat e.g. "[q]" as
+                # markup for an (unknown) tag and silently strip it.
+                console.print(rf"  [cyan]\[{key}][/] {desc}")
             else:
                 print(f"  [{key}] {desc}")
         print()
@@ -1040,6 +1115,8 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
             quality_report_session(graph)
         elif choice == "12":
             browse_in_neo4j(graph)
+        elif choice == "13":
+            manage_services()
         else:
             print_warn("Unknown option.")
 
@@ -1102,6 +1179,32 @@ def _validate_cli_args(args: argparse.Namespace) -> None:
         raise SystemExit("Error: --n-recommendations must be at least 1")
 
 
+def _print_service_status() -> None:
+    """
+    One-line status for each optional service. Prints unconditionally so the
+    user always knows what's plugged in without reading container logs.
+    """
+    neo4j_alive  = svc._service_alive(svc.NEO4J_SPEC)
+    grobid_alive = svc._service_alive(svc.GROBID_SPEC)
+    docker_ok    = svc.docker_available()
+
+    def status(label: str, alive: bool) -> str:
+        if HAS_RICH:
+            mark = "[green]ok[/]" if alive else "[red]down[/]"
+        else:
+            mark = "ok" if alive else "down"
+        return f"{label}: {mark}"
+
+    parts = [status("Neo4j", neo4j_alive), status("GROBID", grobid_alive)]
+    if not docker_ok:
+        parts.append("Docker: [yellow]not detected[/]" if HAS_RICH else "Docker: not detected")
+    line = "  Services -- " + "  |  ".join(parts)
+    if HAS_RICH:
+        console.print(line)
+    else:
+        print(line)
+
+
 def _ensure_services_at_startup() -> None:
     """
     Detect Neo4j and GROBID. If either is missing, ask the user once whether
@@ -1111,7 +1214,13 @@ def _ensure_services_at_startup() -> None:
     without the user having to export anything.
     """
     if not svc.docker_available():
-        return  # silent: nothing to offer
+        # Tell the user why we didn't ask, instead of silently skipping.
+        print_warn(
+            "Docker not detected -- can't auto-launch Neo4j / GROBID. "
+            "Install Docker Desktop and re-run, or use option 13 from the "
+            "main menu later."
+        )
+        return
 
     prefs = svc.load_prefs()
 
@@ -1147,7 +1256,7 @@ def _ensure_services_at_startup() -> None:
             import importlib, researchbuddy.config as _cfg_mod
             importlib.reload(_cfg_mod)
     else:
-        # Already running externally — just enable the integration
+        # Already running externally - just enable the integration
         os.environ.setdefault("RESEARCHBUDDY_NEO4J_ENABLED", "true")
 
     # ── GROBID ────────────────────────────────────────────────────────────
@@ -1227,6 +1336,8 @@ def main():
             _ensure_services_at_startup()
         except Exception as e:
             logger.debug("Service auto-launch skipped: %s", e)
+    # Always show one-line status so the user knows what's connected.
+    _print_service_status()
 
     if args.reset and cfg.STATE_FILE.exists():
         cfg.STATE_FILE.unlink()
