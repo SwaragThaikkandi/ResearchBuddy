@@ -810,11 +810,21 @@ def create_backend() -> GraphBackend:
         )
         return NetworkXBackend()
     except Exception as e:
-        logger.warning(
-            "Neo4j connection failed: %s. "
-            "Falling back to NetworkX (in-memory) backend. "
-            "For persistent graph storage, install and start Neo4j: "
-            "https://neo4j.com/download/",
-            e,
-        )
+        msg = str(e).lower()
+        # Authentication errors are by far the most common cause —
+        # surface a focused, actionable message.
+        if "auth" in msg or "unauthorized" in msg or "credentials" in msg:
+            logger.warning(
+                "Neo4j is running at %s but authentication failed (%s). "
+                "Set RESEARCHBUDDY_NEO4J_PASSWORD to the password you "
+                "configured on the server (default for our auto-launched "
+                "container is 'researchbuddy'). Falling back to NetworkX.",
+                uri, e,
+            )
+        else:
+            logger.warning(
+                "Neo4j connection to %s failed: %s. "
+                "Falling back to NetworkX (in-memory) backend.",
+                uri, e,
+            )
         return NetworkXBackend()

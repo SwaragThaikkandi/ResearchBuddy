@@ -1223,9 +1223,13 @@ def _ensure_services_at_startup() -> None:
         return
 
     prefs = svc.load_prefs()
+    use_neo4j = False    # set to True once we decide a Neo4j endpoint is usable
 
     # ── Neo4j ─────────────────────────────────────────────────────────────
-    if not svc._service_alive(svc.NEO4J_SPEC):
+    if svc._service_alive(svc.NEO4J_SPEC):
+        # Already running (Desktop, manual `docker run`, or a previous session)
+        use_neo4j = True
+    else:
         choice = prefs.get("neo4j_auto_launch")
         if choice is None:
             ans = ask(
@@ -1245,19 +1249,21 @@ def _ensure_services_at_startup() -> None:
             res = svc.ensure_running(svc.NEO4J_SPEC)
             if res.already_running:
                 print_info("Neo4j already running.")
+                use_neo4j = True
             elif res.started:
                 print_success("Neo4j is up at http://localhost:7474")
+                use_neo4j = True
             else:
                 print_warn(f"Could not start Neo4j: {res.error}")
-            # Configure ResearchBuddy to use it (env vars feed config.py)
-            os.environ.setdefault("RESEARCHBUDDY_NEO4J_ENABLED", "true")
-            os.environ.setdefault("RESEARCHBUDDY_NEO4J_PASSWORD", "researchbuddy")
-            # Reload config so the new env vars take effect this session
-            import importlib, researchbuddy.config as _cfg_mod
-            importlib.reload(_cfg_mod)
-    else:
-        # Already running externally - just enable the integration
+
+    # Configure ResearchBuddy to talk to Neo4j: this MUST happen in both
+    # "started fresh" and "already running" paths, and the config module
+    # must be reloaded so create_backend() sees the updated values.
+    if use_neo4j:
         os.environ.setdefault("RESEARCHBUDDY_NEO4J_ENABLED", "true")
+        os.environ.setdefault("RESEARCHBUDDY_NEO4J_PASSWORD", "researchbuddy")
+        import importlib, researchbuddy.config as _cfg_mod
+        importlib.reload(_cfg_mod)
 
     # ── GROBID ────────────────────────────────────────────────────────────
     if not svc._service_alive(svc.GROBID_SPEC):
