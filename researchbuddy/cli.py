@@ -135,49 +135,178 @@ def display_results(results: list[tuple[PaperMeta, float, str]]):
 
 # â”€â”€ Rating workflow â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-def rating_session(graph: HierarchicalResearchGraph, results: list[tuple[PaperMeta, float, str]]):
+def _ingest_pdf_for_rated_paper(
+    graph: HierarchicalResearchGraph,
+    meta: PaperMeta,
+    pdf_path: str,
+) -> bool:
+    """
+    Upgrade a freshly-rated paper from "abstract embedding only" to a full
+    GROBID-parsed node — section embeddings, parsed local references,
+    figures, tables, equations.
+
+    The paper_id stays the same so the rating travels with the upgrade.
+    Returns True on a successful ingest.
+    """
+    from pathlib import Path
+    from researchbuddy.core.pdf_processor import extract_from_pdf
+
+    p = Path(pdf_path).expanduser().resolve()
+    if not p.exists() or not p.is_file():
+        print_warn(f"File not found: {p}")
+        return False
+    if p.suffix.lower() != ".pdf":
+        print_warn(f"Not a PDF: {p.name}")
+        return False
+
+    print_info(f"  Extracting {p.name} (GROBID -> pdfplumber fallback) ...")
+    try:
+        ep = extract_from_pdf(p)
+    except Exception as e:
+        print_warn(f"  Extraction failed: {e}")
+        return False
+    if ep is None:
+        print_warn("  Extractor returned no content.")
+        return False
+
+    # Update meta with richer fields, preferring GROBID-parsed values when
+    # they're better than what we had from the search API.
+    meta.filepath = str(p)
+    if ep.doi and not getattr(meta, "doi", ""):
+        meta.doi = ep.doi
+    if ep.title and len(ep.title) > len(meta.title or ""):
+        meta.title = ep.title
+    if ep.abstract and (not meta.abstract or len(ep.abstract) > len(meta.abstract)):
+        meta.abstract = ep.abstract
+
+    # Carry GROBID structured fields onto the meta (same logic as
+    # state_manager.import_pdf_folder)
+    if getattr(ep, "references", None):
+        meta.local_refs = [
+            {
+                "title": r.title,
+                "doi":   (r.doi or "").lower(),
+                "year":  r.year,
+                "authors": list(r.authors),
+                "raw":   r.raw,
+                "contexts": [
+                    {"section_type": c.section_type,
+                     "section_heading": c.section_heading,
+                     "snippet": c.snippet}
+                    for c in r.contexts
+                ],
+            }
+            for r in ep.references if (r.title or r.doi)
+        ]
+    if getattr(ep, "sections", None):
+        meta.section_index = [
+            {"type": s.section_type, "heading": s.heading,
+             "number": s.number, "n_words": len(s.text.split())}
+            for s in ep.sections
+        ]
+    if getattr(ep, "figures", None):
+        meta.figure_captions = [
+            (f"{f.label}: {f.caption}".strip(": ").strip())
+            for f in ep.figures if (f.label or f.caption)
+        ]
+    if getattr(ep, "tables", None):
+        meta.table_captions = [
+            (f"{t.label}: {t.caption}".strip(": ").strip())
+            for t in ep.tables if (t.label or t.caption)
+        ]
+    if getattr(ep, "equations", None):
+        meta.equations = list(ep.equations)
+
+    # Re-embed with the full text + per-section embeddings (replaces the
+    # abstract-only embedding installed when the rating was first taken).
+    if ep.chunks:
+        graph.embed_paper(meta, ep.chunks)
+    if getattr(ep, "sections", None):
+        graph.embed_paper_sections(meta, ep.sections)
+
+    n_secs = len(meta.section_embeddings)
+    n_refs = len(meta.local_refs)
+    parser = getattr(ep, "parser", "pdfplumber")
+    print_success(
+        f"  Ingested via {parser}: "
+        f"{n_secs} section embeddings, {n_refs} parsed references."
+    )
+    return True
+
+
+def rating_session(graph: HierarchicalResearchGraph,
+                   results: list[tuple[PaperMeta, float, str]]):
+    """
+    One-at-a-time review loop. After rating each paper, the user is asked
+    whether they have the PDF locally. If yes, the paper is upgraded from
+    abstract-only to a full GROBID-parsed graph node.
+
+    This is what makes the graph actually grow with content (not just
+    titles + abstracts) — a rating without a PDF still counts, but a
+    rating WITH a PDF adds dimensionality to the recommender.
+    """
     if not results:
         return
-    print_header("Rate Papers")
-    print_info("Rate 1-10 (0 or Enter = skip, q = done).  * = exploratory paper.")
-    print()
+
+    print_header("Review Suggestions")
+    print_info(
+        "For each suggestion: rate 1-10  (s=skip, q=stop)\n"
+        "  After a rating you'll be asked for the PDF. Providing the PDF\n"
+        "  ingests its sections + references so the graph actually grows."
+    )
 
     rated_any = False
-    for i, (meta, _, label) in enumerate(results, start=1):
-        tag = "[*] " if label == "explore" else "    "
+    upgraded_any = False
+    for i, (meta, score, label) in enumerate(results, start=1):
+        print()
+        print_header(f"Suggestion {i} of {len(results)}")
+        display_paper(i, meta, score, label)
         if HAS_RICH:
-            console.print(f"  [{i}] {tag}[bold]{meta.title[:80]}[/]")
-        else:
-            print(f"  [{i}] {tag}{meta.title[:80]}")
+            console.print()
 
-        raw = ask("      Rating", "0")
-        if raw.lower() == "q":
+        raw = ask("Rating (1-10, s=skip, q=stop)", "s").strip().lower()
+        if raw == "q":
             break
+        if raw in ("", "s", "0"):
+            continue
         try:
             rating = int(raw)
         except ValueError:
-            rating = 0
-        if rating == 0:
+            print_warn("Not a number — skipping.")
             continue
         rating = max(1, min(10, rating))
 
         meta.times_shown += 1
         meta.last_shown   = time.time()
-        if meta.paper_id not in [p.paper_id for p in graph.all_papers()]:
+        # Ensure the paper exists in the graph (with abstract-only emb)
+        if meta.paper_id not in {p.paper_id for p in graph.all_papers()}:
             graph.embed_abstract(meta)
             graph.add_paper(meta, meta.embedding)
         graph.rate_paper(meta.paper_id, float(rating))
         rated_any = True
 
         if rating >= 7:
-            print_success(f"      Highly relevant (weight={rating}).")
+            print_success(f"  Rated {rating}/10 — strong positive example.")
         elif rating >= 4:
-            print_info(f"      Moderate relevance (weight={rating}).")
+            print_info(f"  Rated {rating}/10 — moderate signal.")
         else:
-            print_warn(f"      Low relevance - will be used as negative example.")
+            print_warn(f"  Rated {rating}/10 — used as negative example.")
 
+        # ── Offer to ingest the PDF ───────────────────────────────────────
+        pdf_path = ask(
+            "  PDF path to ingest as full graph node (Enter to skip)", "",
+        ).strip()
+        if pdf_path:
+            if _ingest_pdf_for_rated_paper(graph, meta, pdf_path):
+                upgraded_any = True
+
+    # ── End-of-session housekeeping ───────────────────────────────────────
     if rated_any:
-        print_info("\n[graph] Rebuilding hierarchy with new ratings ...")
+        print()
+        if upgraded_any:
+            print_info("[graph] Rebuilding hierarchy with new content ...")
+        else:
+            print_info("[graph] Rebuilding hierarchy with new ratings ...")
         graph.rebuild_hierarchy()
         if graph.learn_signal_weights():
             print_success("[graph] Signal weights updated from your rating history.")

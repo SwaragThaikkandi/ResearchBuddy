@@ -68,7 +68,12 @@ SNF_KNN              = 10      # k for KNN-kernel in SNF diffusion
 SNF_ITER             = 15      # diffusion iterations
 
 # ── Recommendations ────────────────────────────────────────────────────────────
-N_RECOMMENDATIONS    = 10
+# One-at-a-time by design: after each suggestion the user is asked to rate
+# AND (optionally) supply the PDF. Providing the PDF triggers a full GROBID
+# extraction so the rated paper enters the corpus as a real graph node with
+# section embeddings + parsed references — that's how the graph actually
+# grows over time. Override with --n-recommendations N for batch mode.
+N_RECOMMENDATIONS    = _env_int("RESEARCHBUDDY_N_RECOMMENDATIONS", 1, min_value=1)
 EXPLORATION_RATIO    = 0.25    # fraction of suggestions that are exploratory
 MIN_NOVELTY_DISTANCE = 0.30    # min distance from graph for "explore" papers
 

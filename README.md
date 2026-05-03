@@ -679,7 +679,7 @@ Persistent defaults live in `researchbuddy/config.py`. All can be overridden via
 | `EMBEDDING_PRECISION` | `auto` | `auto` / `fp16` / `fp32` / `bf16`. Auto picks fp16 on <12 GB VRAM |
 | `FUSION_ALPHA` | 0.6 | Semantic stream weight in SNF (1-alpha = citation weight) |
 | `SIMILARITY_THRESHOLD` | 0.45 | Min cosine sim to draw a semantic edge |
-| `N_RECOMMENDATIONS` | 10 | Papers shown per search session |
+| `N_RECOMMENDATIONS` | 1 | Papers shown per search session. After each rating you're prompted for the PDF — providing it triggers a full GROBID extraction so the paper enters the corpus as a real graph node (with section embeddings + parsed references), not just an abstract-level stub. Override via `RESEARCHBUDDY_N_RECOMMENDATIONS` or `--n-recommendations` for batch review. |
 | `EXPLORATION_RATIO` | 0.25 | Base exploration fraction (adaptive system adjusts this) |
 
 ### Hierarchy
