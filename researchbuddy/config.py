@@ -76,6 +76,13 @@ MIN_NOVELTY_DISTANCE = 0.30    # min distance from graph for "explore" papers
 WEIGHT_LEARNING_MIN_RATINGS = 8   # minimum rated papers before learning kicks in
 WEIGHT_LEARNING_REGULARIZATION = 0.1  # L2 regularization strength
 
+# Section types that get their own scoring dimension (4 highest-signal ones).
+# A user-preference context vector is built per section, and each candidate
+# paper gets a signal = cos(user_section_ctx, candidate_section_emb). Weight
+# learning then discovers which sections matter most to *this* user.
+# Order is the canonical signal order for the extended weight vector.
+SCORED_SECTION_TYPES = ["methods", "results", "discussion", "introduction"]
+
 # ── Temporal decay ────────────────────────────────────────────────────────────
 RATING_HALF_LIFE_DAYS  = 90    # rating influence halves every 90 days
 RATING_DECAY_FLOOR     = 0.25  # minimum decay factor (never fully forget)

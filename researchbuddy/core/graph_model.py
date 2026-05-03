@@ -36,7 +36,7 @@ from researchbuddy.config import (
     QUERY_FEEDBACK_WEIGHT,
     RATING_HALF_LIFE_DAYS, RATING_DECAY_FLOOR,
     WEIGHT_LEARNING_MIN_RATINGS, WEIGHT_LEARNING_REGULARIZATION,
-    COLD_START_THRESHOLD,
+    COLD_START_THRESHOLD, SCORED_SECTION_TYPES,
 )
 from researchbuddy.core.embedder import embed, cosine_similarity, mean_pool
 from researchbuddy.core.hierarchy import (
@@ -154,9 +154,21 @@ class HierarchicalResearchGraph:
         self._style_profile: Optional[StyleProfile]            = None
 
         # ── Learned scoring weights ─────────────────────────────────────────
-        # 7 signal weights: [context, niche, area, citation, snf, pub_quality, recency]
-        self._default_signal_weights = np.array([3.0, 2.0, 1.0, 2.0, 1.5, 0.5, 0.3])
+        # Signal weights: 7 base + one per scored section type. Layout:
+        #   [context, niche, area, citation, snf, pub_quality, recency,
+        #    sec[methods], sec[results], sec[discussion], sec[introduction]]
+        # Section weights start moderate; weight learning will tune them per
+        # user. Methods > results > discussion > intro is the empirically
+        # most-useful default ordering for finding similar prior art.
+        _sec_defaults = [1.2, 0.8, 0.6, 0.5][: len(SCORED_SECTION_TYPES)]
+        self._default_signal_weights = np.array(
+            [3.0, 2.0, 1.0, 2.0, 1.5, 0.5, 0.3] + _sec_defaults
+        )
         self._learned_signal_weights: Optional[np.ndarray] = None
+        # Cache of per-section user-context vectors (one per SCORED_SECTION_TYPES).
+        # None entries mean "no rated paper has that section embedded yet".
+        self._section_context_vecs: dict[str, Optional[np.ndarray]] = {}
+        self._section_context_dirty: bool = True
 
         # ── Hyper-parameters ──────────────────────────────────────────────
         self.alpha = alpha
@@ -717,6 +729,9 @@ class HierarchicalResearchGraph:
             if self._backend.has_node(paper_id, layer):
                 self._backend.set_node_attr(paper_id, "weight",
                                             meta.effective_weight, layer)
+        # User preferences just changed — invalidate the per-section context
+        # vectors so the next score recomputes them.
+        self._section_context_dirty = True
         self._invalidate()
 
     # ── Fetch citations ────────────────────────────────────────────────────────
@@ -993,12 +1008,76 @@ class HierarchicalResearchGraph:
                     ", ".join(f"{w:.2f}" for w in weights))
         return True
 
+    def _build_section_context_vectors(self) -> None:
+        """
+        Build one user-preference vector per SCORED_SECTION_TYPES by mean-
+        pooling the section embeddings of rated papers, weighted by
+        rating × temporal decay. This captures *what kind of methods (or
+        results, or discussion, …) does this user like*.
+
+        Cache lives in self._section_context_vecs and is invalidated on
+        rating changes via self._section_context_dirty.
+        """
+        self._section_context_vecs = {}
+        rated = [m for m in self._papers.values()
+                 if m.user_rating is not None]
+        for stype in SCORED_SECTION_TYPES:
+            vecs: list[np.ndarray] = []
+            weights: list[float] = []
+            for m in rated:
+                sec_emb = (getattr(m, "section_embeddings", None) or {}).get(stype)
+                if sec_emb is None:
+                    continue
+                # Only positive examples shape the user's "I like this" vector.
+                # Negatives just attenuate it via exclusion. (Could subtract,
+                # but mean-pool of likes is more robust with sparse data.)
+                if m.user_rating < 5:
+                    continue
+                vecs.append(sec_emb)
+                weights.append(float(m.user_rating) * float(m.temporal_decay_factor))
+            if vecs:
+                self._section_context_vecs[stype] = mean_pool(vecs, weights)
+            else:
+                self._section_context_vecs[stype] = None
+        self._section_context_dirty = False
+
+    def _section_signals(self, meta: PaperMeta) -> np.ndarray:
+        """
+        Per-section similarity signals. Returns an array of length
+        len(SCORED_SECTION_TYPES); each entry is cos(user_section_ctx,
+        candidate_section_emb) or 0 if either side is missing.
+        """
+        out = np.zeros(len(SCORED_SECTION_TYPES))
+        if self._section_context_dirty:
+            self._build_section_context_vectors()
+        cand_secs = getattr(meta, "section_embeddings", None) or {}
+        for i, stype in enumerate(SCORED_SECTION_TYPES):
+            ctx = self._section_context_vecs.get(stype)
+            cand = cand_secs.get(stype)
+            if ctx is not None and cand is not None:
+                out[i] = float(cosine_similarity(ctx, cand))
+        return out
+
     def _extract_signals(self, meta: PaperMeta) -> Optional[np.ndarray]:
-        """Extract the 7 raw signal values for a paper (for weight learning)."""
+        """
+        Extract raw signal values for a paper (for scoring + weight learning).
+
+        Returns 7 + len(SCORED_SECTION_TYPES) signals:
+          [0] global context similarity
+          [1] niche similarity (max)
+          [2] area similarity (max)
+          [3] citation coupling
+          [4] SNF fused adjacency
+          [5] publication quality
+          [6] recency
+          [7..N] per-section similarity (one per SCORED_SECTION_TYPES)
+        """
         if meta.embedding is None:
             return None
 
-        signals = np.zeros(7)
+        n_base = 7
+        n_total = n_base + len(SCORED_SECTION_TYPES)
+        signals = np.zeros(n_total)
 
         # 1. Global context similarity
         ctx = self.context_vector()
@@ -1041,6 +1120,9 @@ class HierarchicalResearchGraph:
             import datetime
             age = max(0, datetime.datetime.now().year - meta.year)
             signals[6] = max(0.0, 1.0 - age / 20.0)
+
+        # 8..N. Per-section similarity (Phase 2)
+        signals[n_base:] = self._section_signals(meta)
 
         return signals
 
@@ -1743,10 +1825,39 @@ class HierarchicalResearchGraph:
         if not hasattr(self, "_reliability_history"):
             self._reliability_history: list = []
         # v1.0.0 — learned signal weights + temporal decay + adaptive exploration
+        # v2.3.0 — extended with per-section signals (one weight per
+        #          SCORED_SECTION_TYPES entry).
+        n_sec = len(SCORED_SECTION_TYPES)
+        n_total = 7 + n_sec
         if not hasattr(self, "_default_signal_weights"):
-            self._default_signal_weights = np.array([3.0, 2.0, 1.0, 2.0, 1.5, 0.5, 0.3])
+            _sec_defaults = [1.2, 0.8, 0.6, 0.5][: n_sec]
+            self._default_signal_weights = np.array(
+                [3.0, 2.0, 1.0, 2.0, 1.5, 0.5, 0.3] + _sec_defaults
+            )
+        elif len(self._default_signal_weights) < n_total:
+            # Old 7-dim weights — extend with section defaults
+            _sec_defaults = [1.2, 0.8, 0.6, 0.5][: n_sec]
+            old = list(self._default_signal_weights)
+            self._default_signal_weights = np.array(
+                old + _sec_defaults[len(old) - 7:]
+            )
         if not hasattr(self, "_learned_signal_weights"):
             self._learned_signal_weights = None
+        elif (self._learned_signal_weights is not None
+              and len(self._learned_signal_weights) < n_total):
+            # Old 7-dim learned weights — invalidate so they get re-learned
+            # with the new feature set on the next call to learn_signal_weights().
+            logger.info(
+                "Discarding old %d-dim learned weights "
+                "(new schema has %d signals); will re-learn on next rating.",
+                len(self._learned_signal_weights), n_total,
+            )
+            self._learned_signal_weights = None
+        # v2.3.0 — per-section context cache
+        if not hasattr(self, "_section_context_vecs"):
+            self._section_context_vecs = {}
+        if not hasattr(self, "_section_context_dirty"):
+            self._section_context_dirty = True
         for meta in self._papers.values():
             if not hasattr(meta, "venue"):
                 meta.venue = ""

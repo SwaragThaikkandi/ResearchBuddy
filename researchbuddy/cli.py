@@ -249,7 +249,10 @@ def show_stats(graph: HierarchicalResearchGraph):
         print_info("    Add more papers for full multi-signal fusion.")
     elif graph._learned_signal_weights is not None:
         w = graph._learned_signal_weights
-        labels = ["context", "niche", "area", "citation", "snf", "pub_qual", "recency"]
+        base_labels = ["context", "niche", "area", "citation", "snf", "pub_qual", "recency"]
+        # Per-section labels (only present in v2.3.0+ learned weights)
+        sec_labels = [f"sec[{s[:4]}]" for s in cfg.SCORED_SECTION_TYPES]
+        labels = (base_labels + sec_labels)[: len(w)]
         w_str = "  ".join(f"{l}={v:.1f}" for l, v in zip(labels, w))
         print_success(f"\n  Scoring: LEARNED weights from your ratings")
         print_info(f"    {w_str}")
