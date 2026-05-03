@@ -86,3 +86,13 @@ relationship.CAUSAL_INFLUENCE {
   shaft-width: 3px;
   caption: '{description}';
 }
+
+/* Section-typed similarity (papers' methods <-> methods, etc.).
+ * The section name is in the relationship's `section` property so the
+ * caption renders e.g. "methods sim · 0.78" — colour-coded soft purple
+ * to keep them visually distinct from generic semantic edges. */
+relationship.SEC_SIMILARITY {
+  color: #BA68C8;
+  shaft-width: 1.5px;
+  caption: '{description}';
+}

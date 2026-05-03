@@ -240,6 +240,18 @@ class TestGraphPropertySetters:
         g.G_semantic = new
         assert g._backend.edge_count(LAYER_SEMANTIC) == 1
 
+    def test_section_sim_setter_writes_to_backend(self):
+        """The new G_section_sim layer must also dispatch through setter."""
+        from researchbuddy.core.graph_model import HierarchicalResearchGraph
+        from researchbuddy.core.graph_backend import LAYER_SECTION_SIM
+        g = HierarchicalResearchGraph()
+        new = nx.DiGraph()
+        new.add_node("a", paper_id="a", title="A", node_type="paper")
+        new.add_node("b", paper_id="b", title="B", node_type="paper")
+        new.add_edge("a", "b", weight=0.81, etype="methods", section="methods")
+        g.G_section_sim = new
+        assert g._backend.edge_count(LAYER_SECTION_SIM) == 1
+
     def test_setter_writes_to_arbitrary_backend(self):
         """
         The setter must dispatch to whatever backend is active — not just

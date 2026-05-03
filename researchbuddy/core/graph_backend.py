@@ -20,11 +20,16 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # Layer names used throughout
-LAYER_SEMANTIC = "semantic"
-LAYER_CITATION = "citation"
-LAYER_COMBINED = "combined"
-LAYER_CAUSAL   = "causal"
-ALL_LAYERS = (LAYER_SEMANTIC, LAYER_CITATION, LAYER_COMBINED, LAYER_CAUSAL)
+LAYER_SEMANTIC     = "semantic"
+LAYER_CITATION     = "citation"
+LAYER_COMBINED     = "combined"
+LAYER_CAUSAL       = "causal"
+# Per-section similarity edges (papers' methods sections to other papers'
+# methods sections, etc.). Each edge has a `section` property describing
+# which section type the comparison was made on.
+LAYER_SECTION_SIM  = "section_sim"
+ALL_LAYERS = (LAYER_SEMANTIC, LAYER_CITATION, LAYER_COMBINED,
+              LAYER_CAUSAL, LAYER_SECTION_SIM)
 
 
 # ── Protocol ──────────────────────────────────────────────────────────────────
@@ -86,18 +91,19 @@ class NetworkXBackend:
 
     def __init__(self) -> None:
         self._graphs: dict[str, nx.DiGraph] = {
-            LAYER_SEMANTIC: nx.DiGraph(),
-            LAYER_CITATION: nx.DiGraph(),
-            LAYER_COMBINED: nx.DiGraph(),
-            LAYER_CAUSAL:   nx.DiGraph(),
+            layer: nx.DiGraph() for layer in ALL_LAYERS
         }
+
+    def _g(self, layer: str) -> nx.DiGraph:
+        # Lazily create a layer if a new one was added since this backend
+        # was constructed (e.g. unpickled from before LAYER_SECTION_SIM).
+        if layer not in self._graphs:
+            self._graphs[layer] = nx.DiGraph()
+        return self._graphs[layer]
 
     @property
     def backend_name(self) -> str:
         return "NetworkX"
-
-    def _g(self, layer: str) -> nx.DiGraph:
-        return self._graphs[layer]
 
     # ── Node operations ──────────────────────────────────────────────────
 
@@ -238,6 +244,12 @@ _NEO4J_REL_TYPES = {
     LAYER_CAUSAL: {
         "_default": "CAUSAL_INFLUENCE",
     },
+    # All section-similarity edges share one rel type so we don't explode
+    # the schema; the specific section ("methods", "results", ...) is on
+    # the relationship's `section` property.
+    LAYER_SECTION_SIM: {
+        "_default": "SEC_SIMILARITY",
+    },
 }
 
 # For the combined layer, we query both SEM_* and CIT_* relationship types
@@ -324,12 +336,17 @@ _REL_DESCRIPTIONS = {
     "CIT_CITATION":     "cites",
     "CIT_BIB_COUPLING": "bibliographic coupling",
     "CAUSAL_INFLUENCE": "causal influence",
+    "SEC_SIMILARITY":   "section similarity",
 }
 
 
 def _compute_edge_description(rel_type: str, props: dict) -> str:
     """Short description for an edge: 'cites · w=0.42'."""
     base = _REL_DESCRIPTIONS.get(rel_type, rel_type.lower())
+    # Section-similarity edges encode the section in the props
+    section = props.get("section")
+    if section:
+        base = f"{section} sim"
     weight = props.get("weight")
     if weight is None:
         weight = props.get("similarity")

@@ -53,7 +53,8 @@ from researchbuddy.core.reasoner import QueryInteraction
 from researchbuddy.core.arguer import ArgumentInteraction, StyleProfile
 from researchbuddy.core.graph_backend import (
     GraphBackend, NetworkXBackend, create_backend,
-    LAYER_SEMANTIC, LAYER_CITATION, LAYER_COMBINED, LAYER_CAUSAL, ALL_LAYERS,
+    LAYER_SEMANTIC, LAYER_CITATION, LAYER_COMBINED, LAYER_CAUSAL,
+    LAYER_SECTION_SIM, ALL_LAYERS,
 )
 
 import logging
@@ -76,6 +77,12 @@ class PaperMeta:
     s2_id: str                      = ""
     arxiv_id: str                   = ""
     embedding: Optional[np.ndarray] = field(default=None, repr=False)
+    # Per-section embeddings keyed by section_type (introduction, methods,
+    # results, discussion, ...). Populated when GROBID parsed a paper into
+    # typed sections; empty for pdfplumber-only or pre-GROBID papers.
+    # These power the section-similarity graph layer for "papers whose
+    # methods are similar to mine" style queries / scoring dimensions.
+    section_embeddings: dict[str, np.ndarray] = field(default_factory=dict, repr=False)
     venue: str                      = ""
     is_peer_reviewed: Optional[bool]= None   # None=unknown, True=journal/conf, False=preprint
     user_rating: Optional[float]    = None
@@ -193,6 +200,14 @@ class HierarchicalResearchGraph:
     def G_causal(self, value: nx.DiGraph) -> None:
         self._backend.set_from_networkx(LAYER_CAUSAL, value)
 
+    @property
+    def G_section_sim(self) -> nx.DiGraph:
+        return self._backend.to_networkx(LAYER_SECTION_SIM)
+
+    @G_section_sim.setter
+    def G_section_sim(self, value: nx.DiGraph) -> None:
+        self._backend.set_from_networkx(LAYER_SECTION_SIM, value)
+
     # ── Add paper ─────────────────────────────────────────────────────────────
 
     def add_paper(self, meta: PaperMeta, embedding: Optional[np.ndarray] = None) -> bool:
@@ -223,6 +238,48 @@ class HierarchicalResearchGraph:
         text = meta.abstract or meta.title
         if text:
             meta.embedding = embed(text)
+
+    def embed_paper_sections(self, meta: PaperMeta, sections) -> None:
+        """
+        Build per-section embeddings from a list of pdf_processor.Section
+        objects (heading + text + section_type). Each section *type* gets
+        one mean-pooled vector; multiple sections of the same type are
+        concatenated first.
+
+        Skipped silently if no usable sections exist (e.g. pdfplumber path).
+        """
+        if not sections:
+            return
+        from researchbuddy.core.pdf_processor import _to_chunks
+
+        # Group section bodies by classified type
+        by_type: dict[str, list[str]] = {}
+        for s in sections:
+            stype = getattr(s, "section_type", "") or "other"
+            text = (getattr(s, "text", "") or "").strip()
+            if text and len(text) >= 80 and stype != "other":
+                by_type.setdefault(stype, []).append(text)
+        if not by_type:
+            return
+
+        section_embs: dict[str, np.ndarray] = {}
+        for stype, texts in by_type.items():
+            combined = "\n\n".join(texts)
+            chunks = _to_chunks(combined, chunk_size=300, overlap=60)
+            # cap per-section chunk count to keep embedding bounded
+            chunks = chunks[:8]
+            if not chunks:
+                continue
+            try:
+                vecs = embed(chunks)
+                section_embs[stype] = mean_pool(list(vecs))
+            except Exception as e:
+                logger.debug(
+                    "Could not embed section '%s' for paper %s: %s",
+                    stype, meta.paper_id, e,
+                )
+        if section_embs:
+            meta.section_embeddings = section_embs
 
     def reembed_all_papers(self) -> None:
         """
@@ -405,8 +462,77 @@ class HierarchicalResearchGraph:
             self.G_causal = nx.DiGraph()
             self._edge_anomalies = []
 
+        # ── 7. Section-typed similarity layer ─────────────────────────────
+        # Per-section comparisons (papers' methods → other papers' methods,
+        # results → results, ...). Only papers with section_embeddings
+        # populated by GROBID participate. Adds rich extra dimensions for
+        # the recommender without disturbing the existing semantic layer.
+        try:
+            self._build_section_similarity_layer()
+        except Exception as e:
+            logger.warning("Section-similarity layer skipped: %s", e)
+
         self._record_reliability_snapshot()
         self._context_dirty = True
+
+    def _build_section_similarity_layer(
+        self, threshold: float = 0.55,
+    ) -> None:
+        """
+        For each section type that at least 2 papers have an embedding for,
+        compute pairwise cosine similarity and add edges (above `threshold`)
+        to the LAYER_SECTION_SIM layer. Each edge is tagged with its
+        section type so it can be filtered downstream.
+        """
+        # Group section_embeddings by section type
+        by_type: dict[str, list[tuple[str, np.ndarray]]] = {}
+        for meta in self._papers.values():
+            secs = getattr(meta, "section_embeddings", None) or {}
+            for stype, emb in secs.items():
+                if emb is not None:
+                    by_type.setdefault(stype, []).append((meta.paper_id, emb))
+
+        if not by_type:
+            # Nothing to do — fine, just clear the layer to be consistent
+            self._backend.set_from_networkx(LAYER_SECTION_SIM, nx.DiGraph())
+            return
+
+        G = nx.DiGraph()
+        # Ensure all participating paper nodes exist
+        all_ids = {pid for items in by_type.values() for pid, _ in items}
+        for pid in all_ids:
+            G.add_node(pid, node_type="paper",
+                       paper_id=pid,
+                       title=self._papers[pid].title if pid in self._papers else "")
+
+        edge_count_by_section: dict[str, int] = {}
+        for stype, items in by_type.items():
+            if len(items) < 2:
+                continue
+            ids_s = [pid for pid, _ in items]
+            mat   = np.stack([emb for _, emb in items])
+            sim   = mat @ mat.T   # vectors are L2-normalised
+            np.fill_diagonal(sim, -1.0)
+
+            edges_added = 0
+            for i in range(len(ids_s)):
+                # Vectorised: pull all j > i above threshold
+                for j in range(i + 1, len(ids_s)):
+                    s = float(sim[i, j])
+                    if s >= threshold:
+                        u, v = ids_s[i], ids_s[j]
+                        # Undirected: add both directions for symmetric queries
+                        G.add_edge(u, v, weight=s, etype=stype, section=stype)
+                        G.add_edge(v, u, weight=s, etype=stype, section=stype)
+                        edges_added += 1
+            edge_count_by_section[stype] = edges_added
+
+        self.G_section_sim = G   # uses property setter -> writes to backend
+        if edge_count_by_section:
+            summary = ", ".join(
+                f"{s}={n}" for s, n in sorted(edge_count_by_section.items())
+            )
+            logger.info("Section-similarity edges: %s", summary)
 
     def _build_fused_matrix(self, ids: list[str], embs: list[np.ndarray], s2_ids: list[str]):
         n = len(ids)
@@ -1628,6 +1754,20 @@ class HierarchicalResearchGraph:
                 meta.is_peer_reviewed = None
             if not hasattr(meta, "rated_at"):
                 meta.rated_at = time.time() if meta.user_rating is not None else 0.0
+            # v2.3.0 — per-section embeddings introduced
+            if not hasattr(meta, "section_embeddings"):
+                meta.section_embeddings = {}
+            # v2.1.0 — GROBID structured fields
+            if not hasattr(meta, "local_refs"):
+                meta.local_refs = []
+            if not hasattr(meta, "section_index"):
+                meta.section_index = []
+            if not hasattr(meta, "figure_captions"):
+                meta.figure_captions = []
+            if not hasattr(meta, "table_captions"):
+                meta.table_captions = []
+            if not hasattr(meta, "equations"):
+                meta.equations = []
         # v0.2.0 used n_levels; v0.3.0 uses alpha only
         if not hasattr(self, "alpha"):
             self.alpha = FUSION_ALPHA

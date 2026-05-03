@@ -398,6 +398,11 @@ def import_pdf_folder(graph: HierarchicalResearchGraph, folder: str | Path) -> i
             meta.equations = list(ep.equations)
 
         graph.embed_paper(meta, ep.chunks)
+        # When GROBID parsed the paper into typed sections, also build the
+        # per-section embeddings so the section-similarity layer can compare
+        # this paper's methods/results/etc. to other papers' equivalents.
+        if getattr(ep, "sections", None):
+            graph.embed_paper_sections(meta, ep.sections)
 
         if graph.add_paper(meta):
             added += 1
