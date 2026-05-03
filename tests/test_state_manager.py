@@ -182,7 +182,7 @@ def test_save_proceeds_when_new_state_has_more_edges(tmp_path):
         sm.HISTORY_DIR = orig_history
 
 
-def test_save_refuses_to_overwrite_with_regressed_state(tmp_path):
+def test_save_refuses_to_overwrite_with_regressed_state(tmp_path, monkeypatch):
     """
     The exact regression we hit in production: a healthy pickle exists,
     then save() is called with a graph that has fewer edges. Refuse to
@@ -196,6 +196,9 @@ def test_save_refuses_to_overwrite_with_regressed_state(tmp_path):
     pickle_path = tmp_path / "graph.pkl"
 
     import researchbuddy.core.state_manager as sm
+    # Force pickle retention on so the "history snapshot" assertion below
+    # is meaningful regardless of the dev's RESEARCHBUDDY_HISTORY_KEEP env.
+    monkeypatch.setattr(sm, "STATE_HISTORY_KEEP", 5)
     orig_history = sm.HISTORY_DIR
     sm.HISTORY_DIR = tmp_path / "history"
     try:
@@ -243,7 +246,7 @@ def test_save_allows_legitimate_partial_state(tmp_path):
 
 # ── Lightweight evolution log + pickle retention ─────────────────────────────
 
-def test_save_appends_evolution_jsonl(tmp_path):
+def test_save_appends_evolution_jsonl(tmp_path, monkeypatch):
     """Every save should append one line to history/evolution.jsonl."""
     import json
     from researchbuddy.core.state_manager import save
@@ -253,6 +256,9 @@ def test_save_appends_evolution_jsonl(tmp_path):
     pickle_path = tmp_path / "graph.pkl"
 
     import researchbuddy.core.state_manager as sm
+    # Independent of dev env: this test checks the JSONL log specifically,
+    # which is written regardless of pickle retention setting.
+    monkeypatch.setattr(sm, "STATE_HISTORY_KEEP", 0)
     orig_history = sm.HISTORY_DIR
     sm.HISTORY_DIR = tmp_path / "history"
     try:

@@ -220,6 +220,61 @@ class TestNetworkXBackendProperties:
         backend.close()  # should not raise
 
 
+# ── HierarchicalResearchGraph property setters write through to the backend ──
+
+class TestGraphPropertySetters:
+    """
+    Regression test for a real bug: G_semantic.setter (and friends) were
+    silently no-op when the active backend was Neo4j — meaning
+    rebuild_hierarchy() never restored edges for Neo4j users.
+    """
+
+    def test_setter_writes_to_networkx_backend(self):
+        from researchbuddy.core.graph_model import HierarchicalResearchGraph
+        g = HierarchicalResearchGraph()
+        new = nx.DiGraph()
+        new.add_node("a", paper_id="a", title="A", node_type="paper")
+        new.add_node("b", paper_id="b", title="B", node_type="paper")
+        new.add_edge("a", "b", weight=0.7, etype="semantic")
+
+        g.G_semantic = new
+        assert g._backend.edge_count(LAYER_SEMANTIC) == 1
+
+    def test_setter_writes_to_arbitrary_backend(self):
+        """
+        The setter must dispatch to whatever backend is active — not just
+        NetworkXBackend. We use a fake backend to assert this without
+        needing a real Neo4j instance.
+        """
+        from researchbuddy.core.graph_model import HierarchicalResearchGraph
+
+        class FakeBackend(NetworkXBackend):
+            """Subclass of NetworkXBackend so it satisfies isinstance checks
+            elsewhere; we just record set_from_networkx calls."""
+            def __init__(self):
+                super().__init__()
+                self.calls: list[tuple[str, int]] = []
+            def set_from_networkx(self, layer, G):
+                self.calls.append((layer, G.number_of_edges()))
+                super().set_from_networkx(layer, G)
+
+        # Build via the official constructor, then swap out the backend
+        g = HierarchicalResearchGraph()
+        fake = FakeBackend()
+        g._backend = fake
+
+        new = nx.DiGraph()
+        new.add_node("x", paper_id="x", title="X", node_type="paper")
+        new.add_node("y", paper_id="y", title="Y", node_type="paper")
+        new.add_edge("x", "y", weight=0.9, etype="citation")
+
+        g.G_citation = new
+
+        # The setter should have been routed through the active backend
+        assert (LAYER_CITATION, 1) in fake.calls
+        assert fake.edge_count(LAYER_CITATION) == 1
+
+
 # ── Caption / description helpers (for Neo4j Browser readability) ────────────
 
 class TestCaptionHelpers:

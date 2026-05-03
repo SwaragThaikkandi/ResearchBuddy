@@ -164,8 +164,10 @@ class HierarchicalResearchGraph:
 
     @G_semantic.setter
     def G_semantic(self, value: nx.DiGraph) -> None:
-        if isinstance(self._backend, NetworkXBackend):
-            self._backend.set_from_networkx(LAYER_SEMANTIC, value)
+        # Write-through to whichever backend is active. Earlier code only
+        # wrote to NetworkXBackend, which meant rebuild_hierarchy() silently
+        # did nothing on Neo4j — the user's primary route to recovery.
+        self._backend.set_from_networkx(LAYER_SEMANTIC, value)
 
     @property
     def G_citation(self) -> nx.DiGraph:
@@ -173,8 +175,7 @@ class HierarchicalResearchGraph:
 
     @G_citation.setter
     def G_citation(self, value: nx.DiGraph) -> None:
-        if isinstance(self._backend, NetworkXBackend):
-            self._backend.set_from_networkx(LAYER_CITATION, value)
+        self._backend.set_from_networkx(LAYER_CITATION, value)
 
     @property
     def G(self) -> nx.DiGraph:
@@ -182,8 +183,7 @@ class HierarchicalResearchGraph:
 
     @G.setter
     def G(self, value: nx.DiGraph) -> None:
-        if isinstance(self._backend, NetworkXBackend):
-            self._backend.set_from_networkx(LAYER_COMBINED, value)
+        self._backend.set_from_networkx(LAYER_COMBINED, value)
 
     @property
     def G_causal(self) -> nx.DiGraph:
@@ -191,8 +191,7 @@ class HierarchicalResearchGraph:
 
     @G_causal.setter
     def G_causal(self, value: nx.DiGraph) -> None:
-        if isinstance(self._backend, NetworkXBackend):
-            self._backend.set_from_networkx(LAYER_CAUSAL, value)
+        self._backend.set_from_networkx(LAYER_CAUSAL, value)
 
     # ── Add paper ─────────────────────────────────────────────────────────────
 
