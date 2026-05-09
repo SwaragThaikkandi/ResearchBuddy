@@ -723,6 +723,8 @@ Persistent defaults live in `researchbuddy/config.py`. All can be overridden via
 |----------|---------|-------------|
 | `S2_SEARCH_QUERIES` | 6 | Number of Semantic Scholar text-search queries |
 | `ARXIV_SEARCH_QUERIES` | 2 | Number of ArXiv queries |
+| `OPENALEX_SEARCH_QUERIES` | 4 | Number of OpenAlex queries (250M+ works, no key, topic-aware). Set `OPENALEX_MAILTO=you@example.com` env var for the polite pool / faster routing. |
+| `CROSSREF_SEARCH_QUERIES` | 2 | Number of CrossRef queries (publishers' DOI registry). Set `CROSSREF_MAILTO=you@example.com` env var. |
 | `CORE_FULL_TEXT` | `True` | Fetch full paper text from CORE |
 
 ---

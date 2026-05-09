@@ -28,6 +28,8 @@ from researchbuddy.config import (
     S2_SEARCH_URL, S2_REC_URL, S2_PAPER_URL,
     ARXIV_SEARCH_URL, MAX_SEARCH_RESULTS, REQUEST_TIMEOUT, REQUEST_DELAY,
     S2_SEARCH_QUERIES, S2_SEARCH_LIMIT, ARXIV_SEARCH_QUERIES, ARXIV_SEARCH_LIMIT,
+    OPENALEX_URL, OPENALEX_SEARCH_QUERIES, OPENALEX_SEARCH_LIMIT,
+    CROSSREF_API_URL, CROSSREF_SEARCH_QUERIES, CROSSREF_SEARCH_LIMIT,
     COLD_START_THRESHOLD,
 )
 from researchbuddy.core.graph_model import PaperMeta, ResearchGraph
@@ -398,7 +400,196 @@ def search_arxiv(query: str, limit: int = MAX_SEARCH_RESULTS) -> list[PaperMeta]
     return results
 
 
-# â"€â"€ LLM-enhanced search helpers â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+# ── OpenAlex ──────────────────────────────────────────────────────────────────
+#
+# OpenAlex (https://openalex.org) is a free, no-key aggregator of 250M+
+# scholarly works. Massively higher recall than S2 for older / non-CS work,
+# no rate-limit pain, and topic-aware (`primary_topic`, `concepts`).
+# Politeness: provide an email via OPENALEX_MAILTO env var to enter the
+# "polite pool" with faster routing.
+
+_OPENALEX_MAILTO = os.getenv("OPENALEX_MAILTO", "").strip()
+
+
+def _openalex_inverted_to_text(inv: dict) -> str:
+    """OpenAlex returns abstracts as inverted indexes (word -> [positions]).
+    Reconstruct the original abstract text."""
+    if not inv or not isinstance(inv, dict):
+        return ""
+    placed: list[tuple[int, str]] = []
+    for word, positions in inv.items():
+        for p in positions:
+            placed.append((p, word))
+    placed.sort()
+    return " ".join(w for _, w in placed)
+
+
+def _openalex_to_meta(item: dict) -> Optional[PaperMeta]:
+    title = (item.get("display_name") or "").strip()
+    if not title:
+        return None
+    doi_url = item.get("doi") or ""           # full URL form: https://doi.org/...
+    doi = doi_url.replace("https://doi.org/", "").lower() if doi_url else ""
+    year = item.get("publication_year")
+    abstract = _openalex_inverted_to_text(item.get("abstract_inverted_index") or {})
+
+    authors = []
+    for ship in (item.get("authorships") or [])[:10]:
+        a = ship.get("author") or {}
+        name = (a.get("display_name") or "").strip()
+        if name:
+            authors.append(name)
+
+    venue_obj = (
+        (item.get("primary_location") or {}).get("source")
+        or item.get("host_venue") or {}
+    )
+    venue_name = (venue_obj.get("display_name") or "").strip()
+    venue_type = (venue_obj.get("type") or "").lower()
+    is_peer_reviewed: Optional[bool]
+    if venue_type in ("journal", "book", "conference"):
+        is_peer_reviewed = True
+    elif venue_type in ("repository", "preprint"):
+        is_peer_reviewed = False
+    else:
+        is_peer_reviewed = None
+
+    paper_id = ResearchGraph.make_id(title, doi=doi)
+    return PaperMeta(
+        paper_id = paper_id,
+        title    = title[:250],
+        abstract = (abstract or "")[:2000],
+        authors  = authors[:10],
+        year     = year,
+        url      = doi_url or item.get("id", ""),
+        doi      = doi,
+        venue    = venue_name[:200],
+        is_peer_reviewed = is_peer_reviewed,
+        source   = "discovered",
+    )
+
+
+def search_openalex(query: str, limit: int = OPENALEX_SEARCH_LIMIT) -> list[PaperMeta]:
+    """
+    OpenAlex /works text search. No key needed. Returns up to `limit`
+    PaperMeta objects (deduped at the caller via DOI).
+    """
+    params: dict = {
+        "search":   query,
+        "per-page": min(int(limit), 200),
+        # Bias toward results with abstracts (better embeddings downstream)
+        "filter":   "has_abstract:true",
+    }
+    if _OPENALEX_MAILTO:
+        params["mailto"] = _OPENALEX_MAILTO
+
+    data = _get(OPENALEX_URL, params)
+    if not data or not isinstance(data, dict):
+        return []
+
+    results: list[PaperMeta] = []
+    for item in data.get("results", []):
+        m = _openalex_to_meta(item)
+        if m:
+            results.append(m)
+    time.sleep(REQUEST_DELAY)
+    return results
+
+
+# ── CrossRef ──────────────────────────────────────────────────────────────────
+#
+# CrossRef (https://api.crossref.org) is the publishers' DOI registry.
+# Smaller search than OpenAlex but complementary — abstracts are sometimes
+# present where OpenAlex's are missing, and the venue / ISSN data is
+# authoritative. No key required, "polite" pool via mailto.
+
+_CROSSREF_MAILTO = os.getenv("CROSSREF_MAILTO", _OPENALEX_MAILTO).strip()
+
+
+def _crossref_to_meta(item: dict) -> Optional[PaperMeta]:
+    titles = item.get("title") or []
+    if not titles:
+        return None
+    title = (titles[0] or "").strip()
+    if not title:
+        return None
+
+    doi = (item.get("DOI") or "").lower()
+    abstract_html = item.get("abstract") or ""
+    # CrossRef returns JATS-tagged abstract; strip tags pragmatically
+    abstract = re.sub(r"<[^>]+>", "", abstract_html)
+    abstract = re.sub(r"\s+", " ", abstract).strip()
+
+    authors: list[str] = []
+    for a in (item.get("author") or [])[:10]:
+        name = " ".join(filter(None, [a.get("given"), a.get("family")])).strip()
+        if name:
+            authors.append(name)
+
+    # Prefer "issued" -> "published-online" -> "published-print"
+    year = None
+    for key in ("issued", "published-online", "published-print"):
+        parts = (item.get(key) or {}).get("date-parts") or []
+        if parts and parts[0]:
+            try:
+                year = int(parts[0][0])
+                break
+            except (TypeError, ValueError):
+                pass
+
+    container = item.get("container-title") or []
+    venue_name = container[0] if container else ""
+    item_type = (item.get("type") or "").lower()
+    if item_type in ("journal-article", "book-chapter", "proceedings-article"):
+        is_peer_reviewed: Optional[bool] = True
+    elif item_type in ("posted-content",):
+        is_peer_reviewed = False
+    else:
+        is_peer_reviewed = None
+
+    paper_id = ResearchGraph.make_id(title, doi=doi)
+    url = item.get("URL") or (f"https://doi.org/{doi}" if doi else "")
+    return PaperMeta(
+        paper_id = paper_id,
+        title    = title[:250],
+        abstract = abstract[:2000],
+        authors  = authors[:10],
+        year     = year,
+        url      = url,
+        doi      = doi,
+        venue    = (venue_name or "")[:200],
+        is_peer_reviewed = is_peer_reviewed,
+        source   = "discovered",
+    )
+
+
+def search_crossref(query: str, limit: int = CROSSREF_SEARCH_LIMIT) -> list[PaperMeta]:
+    """
+    CrossRef /works text search. Returns up to `limit` PaperMeta objects.
+    """
+    params: dict = {
+        "query":  query,
+        "rows":   min(int(limit), 100),
+        # Restrict to types we can actually score (journals, books, proceedings)
+        "filter": "type:journal-article,type:book-chapter,type:proceedings-article",
+    }
+    if _CROSSREF_MAILTO:
+        params["mailto"] = _CROSSREF_MAILTO
+
+    data = _get(CROSSREF_API_URL, params)
+    if not data or not isinstance(data, dict):
+        return []
+    msg = data.get("message") or {}
+    results: list[PaperMeta] = []
+    for item in msg.get("items", []):
+        m = _crossref_to_meta(item)
+        if m:
+            results.append(m)
+    time.sleep(REQUEST_DELAY)
+    return results
+
+
+# ── LLM-enhanced search helpers ───────────────────────────────────────────────
 
 def _generate_hyde_abstract(query: str) -> Optional[str]:
     """
@@ -732,6 +923,19 @@ def find_candidates(
         logger.info("Cold-start mode: expanded search queries (S2=%d, ArXiv=%d)",
                      s2_cap, arxiv_cap)
 
+    # Budget knobs for the new sources too — expand under cold-start so
+    # OpenAlex (the highest-recall source) does the heavy lifting when the
+    # graph is thin.
+    openalex_cap = OPENALEX_SEARCH_QUERIES
+    crossref_cap = CROSSREF_SEARCH_QUERIES
+    if is_cold_start:
+        openalex_cap = min(openalex_cap + 3, len(queries))
+        crossref_cap = min(crossref_cap + 1, len(queries))
+        logger.info(
+            "Cold-start: expanded multi-source budget (OpenAlex=%d, CrossRef=%d)",
+            openalex_cap, crossref_cap,
+        )
+
     for q in queries[:s2_cap]:
         logger.info(f"S2 search: '{q[:60]}' ...")
         add(search_semantic_scholar(q, limit=S2_SEARCH_LIMIT))
@@ -739,6 +943,24 @@ def find_candidates(
     for q in queries[:arxiv_cap]:
         logger.info(f"ArXiv search: '{q[:60]}' ...")
         add(search_arxiv(q, limit=ARXIV_SEARCH_LIMIT))
+
+    # OpenAlex — biggest catalogue, most reliable, no rate-limit pain.
+    # Run this *after* S2/ArXiv so dedup catches cross-source overlap.
+    for q in queries[:openalex_cap]:
+        logger.info(f"OpenAlex search: '{q[:60]}' ...")
+        try:
+            add(search_openalex(q, limit=OPENALEX_SEARCH_LIMIT))
+        except Exception as e:
+            logger.debug("OpenAlex query failed (%s)", e)
+
+    # CrossRef — fills DOI / venue gaps from OpenAlex. Smaller budget by
+    # default; abstract presence is hit-or-miss.
+    for q in queries[:crossref_cap]:
+        logger.info(f"CrossRef search: '{q[:60]}' ...")
+        try:
+            add(search_crossref(q, limit=CROSSREF_SEARCH_LIMIT))
+        except Exception as e:
+            logger.debug("CrossRef query failed (%s)", e)
 
     # â"€â"€ LLM reranking â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
     if query and all_candidates:

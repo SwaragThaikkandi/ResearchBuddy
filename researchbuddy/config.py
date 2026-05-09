@@ -120,6 +120,17 @@ S2_SEARCH_QUERIES    = 6       # number of S2 text-search queries
 S2_SEARCH_LIMIT      = 20      # results per S2 query
 ARXIV_SEARCH_QUERIES = 2       # number of ArXiv queries
 ARXIV_SEARCH_LIMIT   = 10      # results per ArXiv query
+# OpenAlex — 250M+ works, no key required, topic-aware, fast. Primary
+# replacement for S2 when S2 throttles. Polite pool: provide an email via
+# OPENALEX_MAILTO env var to get faster responses (recommended).
+OPENALEX_SEARCH_QUERIES = _env_int("RESEARCHBUDDY_OPENALEX_QUERIES", 4, min_value=0)
+OPENALEX_SEARCH_LIMIT   = _env_int("RESEARCHBUDDY_OPENALEX_LIMIT", 25, min_value=1)
+# CrossRef — 150M works, no key, complementary coverage (publishers'
+# perspective vs OpenAlex's aggregator perspective). Returns rich
+# bibliographic metadata + abstracts where available.
+CROSSREF_SEARCH_QUERIES = _env_int("RESEARCHBUDDY_CROSSREF_QUERIES", 2, min_value=0)
+CROSSREF_SEARCH_LIMIT   = _env_int("RESEARCHBUDDY_CROSSREF_LIMIT", 15, min_value=1)
+CROSSREF_API_URL        = "https://api.crossref.org/works"
 
 # Reproducibility / reliability
 DETERMINISTIC_MODE   = True    # stable query expansion/rerank + deterministic tie-breaks
