@@ -95,6 +95,11 @@ class PaperMeta:
     figure_captions: list[str]      = field(default_factory=list)  # figure captions
     table_captions: list[str]       = field(default_factory=list)  # table captions
     equations: list[str]            = field(default_factory=list)  # math formulae
+    # kind = "paper" (default, anything from search/PDF import) | "essay" |
+    # "note" | "question" | "outline" | "draft" — anything user-authored.
+    # Thought nodes get distinct visualisation + strong implicit weight on
+    # the user-context vector so the graph aligns with the user's thinking.
+    kind: str                       = "paper"
 
     @property
     def effective_weight(self) -> float:
@@ -292,6 +297,186 @@ class HierarchicalResearchGraph:
                 )
         if section_embs:
             meta.section_embeddings = section_embs
+
+    # ── User-content ingestion ("thought" nodes) ──────────────────────────────
+
+    @staticmethod
+    def _parse_markdown_sections(text: str) -> dict[str, str]:
+        """
+        Cheap Markdown section splitter. Returns {section_type: combined_text}
+        keyed by our existing classifier (introduction / methods / ...).
+        Sections share a key when their headings classify the same way
+        (e.g. "## Methods" and "## 3.2 Algorithmic Setup" both -> methods).
+
+        Headings recognised:
+          * '#'-prefix (Markdown ATX) at any level
+          * 'Setext' style (=== / --- underlines) — transformed in advance
+        """
+        from researchbuddy.core.grobid_client import _classify_section
+        # Setext -> ATX
+        text = re.sub(r"^(.+)\n=+\s*$", r"# \1", text, flags=re.M)
+        text = re.sub(r"^(.+)\n-+\s*$", r"## \1", text, flags=re.M)
+
+        lines = text.splitlines()
+        sections: dict[str, list[str]] = {}
+        current_key = "other"
+        buf: list[str] = []
+        head_re = re.compile(r"^\s*#{1,6}\s+(.+?)\s*$")
+
+        def _flush():
+            body = "\n".join(buf).strip()
+            if body:
+                sections.setdefault(current_key, []).append(body)
+            buf.clear()
+
+        for ln in lines:
+            m = head_re.match(ln)
+            if m:
+                _flush()
+                current_key = _classify_section(m.group(1))
+            else:
+                buf.append(ln)
+        _flush()
+        # Collapse the per-type lists into joined strings
+        return {
+            stype: "\n\n".join(parts).strip()
+            for stype, parts in sections.items()
+            if "\n\n".join(parts).strip()
+        }
+
+    def add_thought_from_text(
+        self,
+        text: str,
+        title: str,
+        kind: str = "essay",
+        author: str = "you",
+        weight: float = 9.0,
+        section_text_map: Optional[dict[str, str]] = None,
+        parse_markdown: bool = True,
+    ) -> Optional[PaperMeta]:
+        """
+        Add a chunk of the user's own writing as a graph node.
+
+        kind ∈ {essay, note, question, outline, draft}.
+
+        If `section_text_map` is given (or `parse_markdown=True` and the
+        text contains Markdown headings), per-section embeddings are
+        computed too — that puts the thought into the section_sim layer
+        alongside real papers.
+
+        The new node gets `effective_weight=weight` (default 9, treated
+        like a strongly-rated paper) so it strongly anchors the user's
+        context vector. The recommender will then pull papers whose
+        embeddings align with the user's thinking.
+
+        Returns the new PaperMeta, or None if `text` is too short / empty.
+        """
+        from researchbuddy.core.pdf_processor import _to_chunks
+
+        text = (text or "").strip()
+        if len(text) < 80:
+            logger.warning("Thought text too short (<80 chars); skipping.")
+            return None
+        title = (title or "").strip() or "untitled thought"
+
+        # Stable id: hash of title+kind+text — same input → same node
+        digest = hashlib.sha1(
+            f"thought::{kind}::{title}::{text[:2000]}".encode("utf-8")
+        ).hexdigest()[:12]
+        paper_id = f"thought_{digest}"
+
+        meta = PaperMeta(
+            paper_id = paper_id,
+            title    = title[:250],
+            abstract = text[:1000],   # short summary slot
+            authors  = [author] if author else [],
+            source   = "thought",
+            kind     = kind,
+        )
+
+        # Whole-text embedding via chunked mean pool
+        chunks = _to_chunks(text, chunk_size=300, overlap=60)
+        chunks = chunks[:32]
+        if chunks:
+            self.embed_paper(meta, chunks)
+
+        # Per-section embeddings: prefer explicit map, else parse markdown
+        sec_map: dict[str, str] = {}
+        if section_text_map:
+            sec_map = {k: v for k, v in section_text_map.items() if v and k}
+        elif parse_markdown:
+            sec_map = self._parse_markdown_sections(text)
+
+        if sec_map:
+            # Build pseudo-Section objects so we can reuse embed_paper_sections
+            from researchbuddy.core.pdf_processor import Section
+            secs = [
+                Section(heading=stype.title(), text=body, section_type=stype)
+                for stype, body in sec_map.items()
+                if stype != "other"
+            ]
+            if secs:
+                self.embed_paper_sections(meta, secs)
+                meta.section_index = [
+                    {"type": s.section_type, "heading": s.heading,
+                     "number": "", "n_words": len(s.text.split())}
+                    for s in secs
+                ]
+
+        # Synthetic implicit rating to anchor user context strongly
+        meta.user_rating = float(weight)
+        meta.rated_at    = time.time()
+
+        added = self.add_paper(meta)
+        if not added:
+            # Already exists — refresh the rating so re-uploads still
+            # invalidate caches.
+            existing = self._papers.get(meta.paper_id)
+            if existing is not None:
+                existing.user_rating = float(weight)
+                existing.rated_at    = time.time()
+                self._section_context_dirty = True
+                self._invalidate()
+            return existing
+
+        # Fresh add: trigger context invalidation
+        self._section_context_dirty = True
+        self._invalidate()
+        return meta
+
+    def add_thought_from_file(
+        self,
+        path: str | Path,
+        kind: str = "essay",
+        author: str = "you",
+        weight: float = 9.0,
+    ) -> Optional[PaperMeta]:
+        """Convenience: read a .txt / .md file and call add_thought_from_text."""
+        p = Path(path).expanduser()
+        if not p.exists() or not p.is_file():
+            logger.warning("Thought file not found: %s", p)
+            return None
+        try:
+            text = p.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            text = p.read_text(encoding="latin-1", errors="replace")
+        # Title: first '#' heading, else filename stem
+        title = ""
+        for line in text.splitlines():
+            m = re.match(r"^\s*#\s+(.+?)\s*$", line)
+            if m:
+                title = m.group(1).strip()
+                break
+        if not title:
+            title = p.stem.replace("_", " ")
+        return self.add_thought_from_text(
+            text, title=title, kind=kind, author=author, weight=weight,
+            parse_markdown=p.suffix.lower() in (".md", ".markdown"),
+        )
+
+    def thoughts(self) -> list[PaperMeta]:
+        """All user-authored content nodes (kind != 'paper')."""
+        return [m for m in self._papers.values() if m.source == "thought"]
 
     def reembed_all_papers(self) -> None:
         """
@@ -1879,6 +2064,9 @@ class HierarchicalResearchGraph:
                 meta.table_captions = []
             if not hasattr(meta, "equations"):
                 meta.equations = []
+            # v2.4.0 — user-content nodes
+            if not hasattr(meta, "kind"):
+                meta.kind = "paper"
         # v0.2.0 used n_levels; v0.3.0 uses alpha only
         if not hasattr(self, "alpha"):
             self.alpha = FUSION_ALPHA

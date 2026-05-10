@@ -1088,6 +1088,114 @@ def browse_in_neo4j(graph: HierarchicalResearchGraph) -> None:
     print_info("    RETURN c, p LIMIT 100")
 
 
+# ── User-content upload ──────────────────────────────────────────────────────
+
+def upload_thought_session(graph: HierarchicalResearchGraph) -> None:
+    """
+    Let the user feed their own writing into the graph as a 'thought'
+    node. Anchors the user-context vector strongly, so subsequent
+    recommendations align with the user's thinking — not just with what
+    they've already read.
+    """
+    print_header("Upload Your Own Writing")
+    print_info(
+        "Add your essays, notes, draft sections, research questions, or\n"
+        "outlines. Each one becomes a strongly-weighted node and re-shapes\n"
+        "future suggestions toward how YOU think.\n"
+    )
+    print_info("  [1] Paste text inline")
+    print_info("  [2] Read from a .txt / .md file")
+    print_info("  [3] Read from a PDF (full GROBID extraction, tagged as 'draft')")
+    print_info("  [b] Back")
+
+    sub = ask("Choose", "1").strip().lower()
+    if sub == "b":
+        return
+
+    kinds = ("essay", "note", "question", "outline", "draft")
+    kind = ask(
+        f"Kind ({'/'.join(kinds)})", "essay",
+    ).strip().lower()
+    if kind not in kinds:
+        print_warn(f"Unknown kind {kind!r} — defaulting to 'essay'.")
+        kind = "essay"
+
+    if sub == "1":
+        title = ask("Title", "untitled thought").strip()
+        print_info(
+            "Paste / type your text. End input with a single line containing 'END'."
+        )
+        lines: list[str] = []
+        while True:
+            try:
+                line = input()
+            except EOFError:
+                break
+            if line.strip() == "END":
+                break
+            lines.append(line)
+        text = "\n".join(lines)
+        meta = graph.add_thought_from_text(text, title=title, kind=kind)
+    elif sub == "2":
+        path = ask("Path to .txt / .md file", "").strip()
+        if not path:
+            print_info("Cancelled.")
+            return
+        meta = graph.add_thought_from_file(path, kind=kind)
+    elif sub == "3":
+        from pathlib import Path
+        path = ask("Path to your draft PDF", "").strip()
+        if not path:
+            print_info("Cancelled.")
+            return
+        # Reuse the rated-paper ingest helper, then retag as draft thought.
+        # Build a fresh meta so the kind/source land correctly.
+        from researchbuddy.core.pdf_processor import extract_from_pdf
+        p = Path(path).expanduser().resolve()
+        if not p.exists() or p.suffix.lower() != ".pdf":
+            print_warn(f"Not a PDF: {p}")
+            return
+        ep = extract_from_pdf(p)
+        if ep is None:
+            print_warn("Extraction failed.")
+            return
+        # Concatenate all section text and run through add_thought_from_text
+        # so it gets section_embeddings *and* the strong implicit weight.
+        joined = "\n\n".join(s.text for s in ep.sections if s.text) \
+                 or ep.full_text or ep.abstract
+        # Build explicit section_text_map from GROBID's classification
+        section_text_map = {}
+        for s in ep.sections:
+            if s.section_type and s.section_type != "other" and s.text:
+                section_text_map.setdefault(s.section_type, []).append(s.text)
+        section_text_map = {
+            k: "\n\n".join(v) for k, v in section_text_map.items()
+        }
+        meta = graph.add_thought_from_text(
+            joined, title=ep.title or p.stem,
+            kind="draft", section_text_map=section_text_map,
+        )
+        if meta is not None:
+            meta.filepath = str(p)
+            if ep.doi and not meta.doi:
+                meta.doi = ep.doi
+    else:
+        print_warn("Unknown option.")
+        return
+
+    if meta is None:
+        print_warn("Could not add thought (text too short or empty).")
+        return
+
+    n_secs = len(getattr(meta, "section_embeddings", {}) or {})
+    print_success(
+        f"Added {kind} '{meta.title[:60]}' "
+        f"(paper_id={meta.paper_id}, {n_secs} section embeddings, "
+        f"weight={meta.user_rating:.0f})."
+    )
+    print_info("Run option 6 (Rebuild hierarchy) to refresh the graph layers.")
+
+
 # ── Service management (on-demand) ────────────────────────────────────────────
 
 def manage_services() -> None:
@@ -1316,6 +1424,7 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
         "11": "Quality & reliability report",
         "12": "Browse graph in Neo4j (open Browser + load style)",
         "13": "Manage services (Neo4j / GROBID)",
+        "14": "Upload my own writing / thoughts (essay, note, draft, ...)",
         "q": "Save & quit",
     }
     while True:
@@ -1388,6 +1497,9 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
             browse_in_neo4j(graph)
         elif choice == "13":
             manage_services()
+        elif choice == "14":
+            upload_thought_session(graph)
+            save(graph)
         else:
             print_warn("Unknown option.")
 

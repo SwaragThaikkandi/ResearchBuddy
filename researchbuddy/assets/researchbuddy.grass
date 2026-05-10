@@ -33,6 +33,16 @@ node.Cluster {
   caption: '{display_label}';
 }
 
+/* User-authored content (essays, notes, drafts, ...). Carries the
+ * extra :Thought label, so this rule overrides node.Paper for them.
+ * Distinct warm orange so they stand out from real papers. */
+node.Thought {
+  color: #FFB300;
+  border-color: #F57C00;
+  diameter: 75px;
+  caption: '{display_label}';
+}
+
 relationship {
   color: #A5ABB6;
   shaft-width: 1.5px;

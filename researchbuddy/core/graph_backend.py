@@ -482,12 +482,18 @@ class Neo4jBackend:
         props = {k: v for k, v in attrs.items()
                  if v is not None and not isinstance(v, (np.ndarray, np.generic))}
         props[id_field] = node_id
-        # Add a human-readable caption so Neo4j Browser shows something
-        # meaningful instead of the raw ID hash.
         props["display_label"] = _compute_node_caption(props)
 
+        # Tag user-authored content with an extra :Thought label so the
+        # Browser stylesheet can colour it differently.
+        is_thought = (props.get("source") == "thought") or \
+                     (props.get("kind") and props.get("kind") != "paper")
+        thought_clause = ":Thought" if is_thought else ""
+
         self._write(
-            f"MERGE (n:{label} {{{id_field}: $nid}}) SET n += $props",
+            f"MERGE (n:{label} {{{id_field}: $nid}}) "
+            f"SET n += $props"
+            + (f", n:Thought" if is_thought else ""),
             nid=node_id, props=props,
         )
         self._invalidate_cache(layer)
@@ -623,6 +629,7 @@ class Neo4jBackend:
         if not nodes:
             return
         papers = []
+        thoughts = []   # papers with :Thought label too
         clusters = []
         for nid, attrs in nodes:
             node_type = attrs.get("node_type", "paper")
@@ -631,7 +638,11 @@ class Neo4jBackend:
             if node_type == "paper":
                 props["paper_id"] = nid
                 props["display_label"] = _compute_node_caption(props)
-                papers.append(props)
+                if props.get("source") == "thought" or \
+                   (props.get("kind") and props.get("kind") != "paper"):
+                    thoughts.append(props)
+                else:
+                    papers.append(props)
             else:
                 props["node_id"] = nid
                 props["display_label"] = _compute_node_caption(props)
@@ -643,6 +654,13 @@ class Neo4jBackend:
                     "UNWIND $batch AS p "
                     "MERGE (n:Paper {paper_id: p.paper_id}) SET n += p",
                     batch=papers,
+                )
+            if thoughts:
+                session.run(
+                    "UNWIND $batch AS p "
+                    "MERGE (n:Paper {paper_id: p.paper_id}) "
+                    "SET n += p, n:Thought",
+                    batch=thoughts,
                 )
             if clusters:
                 session.run(
