@@ -61,6 +61,30 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+# ── KeyBERT singleton (avoids re-loading all-MiniLM-L6-v2 on every search) ──
+# Lazy-loaded; reuses the embedder if its dim matches MiniLM (384).
+_keybert_singleton = None
+_keybert_load_failed = False
+
+
+def _get_cached_keybert():
+    """Return a cached KeyBERT instance, or None if it can't be loaded.
+    Re-loading was the source of the 'huggingface HEAD' spam on every search."""
+    global _keybert_singleton, _keybert_load_failed
+    if _keybert_singleton is not None:
+        return _keybert_singleton
+    if _keybert_load_failed:
+        return None
+    try:
+        from keybert import KeyBERT
+        _keybert_singleton = KeyBERT()
+        return _keybert_singleton
+    except Exception as e:
+        logger.debug("KeyBERT unavailable: %s", e)
+        _keybert_load_failed = True
+        return None
+
+
 # ── Paper data model ───────────────────────────────────────────────────────────
 
 @dataclass
@@ -1515,33 +1539,52 @@ class HierarchicalResearchGraph:
             scored.append((c, rel, novel))
 
         # ── Adaptive exploration ratio ────────────────────────────────────
+        # When n == 1 the single slot must go to a focused-relevance pick.
+        # Earlier code used max(1, int(n*ratio)) → at n=1 the EXPLORE bucket
+        # ate the only slot and produced wildly off-topic suggestions.
         adaptive_ratio = self._adaptive_exploration_ratio(exploration_ratio)
-        n_explore  = max(1, int(n * adaptive_ratio))
-        n_relevant = n - n_explore
+        if n <= 1:
+            n_explore  = 0
+            n_relevant = n
+        else:
+            n_explore  = max(1, int(n * adaptive_ratio))
+            n_relevant = n - n_explore
 
-        by_rel = sorted(scored, key=lambda x: (-x[1], x[0].paper_id))
+        # Hard relevance floor on the focused (non-explore) bucket. Anything
+        # below this is dropped — better an empty result set than a 1993
+        # ALA Choice book review for a neuroscience query.
+        REL_FLOOR = 0.30
+        # Floor on the explore bucket too — pure novelty without a minimum
+        # topical anchor turns into noise.
+        EXPLORE_REL_FLOOR = 0.25
+
+        by_rel = sorted(
+            [s for s in scored if s[1] >= REL_FLOOR],
+            key=lambda x: (-x[1], x[0].paper_id),
+        )
 
         # ── Strategic exploration: prefer papers in coverage gaps ─────────
         gap_centroids = self._find_coverage_gaps()
         if gap_centroids:
-            # Score exploratory candidates by proximity to gaps, not just raw novelty
             def gap_explore_score(s):
                 meta, rel, nov = s
                 if meta.embedding is None or nov < MIN_NOVELTY_DISTANCE:
                     return -1.0
-                if rel <= 0.12:
+                if rel < EXPLORE_REL_FLOOR:
                     return -1.0
                 gap_sims = [float(cosine_similarity(meta.embedding, gc))
                             for gc in gap_centroids]
                 gap_affinity = max(gap_sims) if gap_sims else 0.0
-                # Blend novelty with gap affinity: explore gaps, not random far-off papers
-                return nov * 0.4 + gap_affinity * 0.6
+                # Blend novelty with gap affinity AND relevance — pure
+                # novelty without topical proximity = noise.
+                return nov * 0.3 + gap_affinity * 0.5 + rel * 0.2
 
             by_novel = sorted(scored, key=lambda x: -gap_explore_score(x))
             by_novel = [s for s in by_novel if gap_explore_score(s) > 0]
         else:
             by_novel = sorted(
-                [s for s in scored if s[1] > 0.12 and s[2] >= MIN_NOVELTY_DISTANCE],
+                [s for s in scored
+                 if s[1] >= EXPLORE_REL_FLOOR and s[2] >= MIN_NOVELTY_DISTANCE],
                 key=lambda x: (-x[2], x[0].paper_id),
             )
 
@@ -1654,8 +1697,10 @@ class HierarchicalResearchGraph:
             return []
         combined = " ".join(m.title + " " + m.abstract for m in seed[:10])
         try:
-            from keybert import KeyBERT
-            kws = KeyBERT().extract_keywords(
+            kb = _get_cached_keybert()
+            if kb is None:
+                raise RuntimeError("keybert not available")
+            kws = kb.extract_keywords(
                 combined, keyphrase_ngram_range=(1, 3),
                 stop_words="english", top_n=n,
             )

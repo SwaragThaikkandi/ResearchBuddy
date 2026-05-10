@@ -505,6 +505,22 @@ def search_openalex(query: str, limit: int = OPENALEX_SEARCH_LIMIT) -> list[Pape
 
 _CROSSREF_MAILTO = os.getenv("CROSSREF_MAILTO", _OPENALEX_MAILTO).strip()
 
+# Known noise DOIs / containers — these *are* registered as journal-article
+# in CrossRef but are not research papers (book reviews, library buying
+# guides, ads, errata). Drop them at parse time so they never reach ranking.
+_CROSSREF_DOI_BLACKLIST_PREFIXES = (
+    "10.5860/choice.",          # ALA "Choice" library book reviews
+    "10.5860/crln.",            # College & Research Libraries News briefs
+)
+_CROSSREF_VENUE_BLACKLIST_KEYWORDS = (
+    "choice reviews",
+    "library journal",
+    "publishers weekly",
+)
+_CROSSREF_TYPE_ACCEPT = {
+    "journal-article", "book-chapter", "proceedings-article", "posted-content",
+}
+
 
 def _crossref_to_meta(item: dict) -> Optional[PaperMeta]:
     titles = item.get("title") or []
@@ -515,6 +531,18 @@ def _crossref_to_meta(item: dict) -> Optional[PaperMeta]:
         return None
 
     doi = (item.get("DOI") or "").lower()
+
+    # ── Filter known noise: book reviews, library guides, ads ─────────────
+    if doi and any(doi.startswith(p) for p in _CROSSREF_DOI_BLACKLIST_PREFIXES):
+        return None
+    item_type_pre = (item.get("type") or "").lower()
+    if item_type_pre and item_type_pre not in _CROSSREF_TYPE_ACCEPT:
+        return None
+    container_pre = item.get("container-title") or []
+    venue_pre = (container_pre[0] if container_pre else "").lower()
+    if any(kw in venue_pre for kw in _CROSSREF_VENUE_BLACKLIST_KEYWORDS):
+        return None
+
     abstract_html = item.get("abstract") or ""
     # CrossRef returns JATS-tagged abstract; strip tags pragmatically
     abstract = re.sub(r"<[^>]+>", "", abstract_html)
