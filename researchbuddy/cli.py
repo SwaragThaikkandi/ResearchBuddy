@@ -34,6 +34,7 @@ from researchbuddy.core.state_manager import save, load, import_pdf_folder, reso
 from researchbuddy.core.searcher      import find_candidates
 from researchbuddy.core.reasoner      import Reasoner, QueryResult
 from researchbuddy.core import services as svc
+from researchbuddy.core import audit
 
 try:
     from rich.console import Console
@@ -149,87 +150,24 @@ def _ingest_pdf_for_rated_paper(
     Returns True on a successful ingest.
     """
     from pathlib import Path
-    from researchbuddy.core.pdf_processor import extract_from_pdf
+    from researchbuddy.core.ingest import ingest_pdf_into_meta, IngestError
 
     p = Path(pdf_path).expanduser().resolve()
-    if not p.exists() or not p.is_file():
-        print_warn(f"File not found: {p}")
-        return False
-    if p.suffix.lower() != ".pdf":
-        print_warn(f"Not a PDF: {p.name}")
-        return False
-
     print_info(f"  Extracting {p.name} (GROBID -> pdfplumber fallback) ...")
     try:
-        ep = extract_from_pdf(p)
-    except Exception as e:
-        print_warn(f"  Extraction failed: {e}")
-        return False
-    if ep is None:
-        print_warn("  Extractor returned no content.")
+        info = ingest_pdf_into_meta(graph, meta, p)
+    except IngestError as e:
+        print_warn(f"  {e}")
         return False
 
-    # Update meta with richer fields, preferring GROBID-parsed values when
-    # they're better than what we had from the search API.
-    meta.filepath = str(p)
-    if ep.doi and not getattr(meta, "doi", ""):
-        meta.doi = ep.doi
-    if ep.title and len(ep.title) > len(meta.title or ""):
-        meta.title = ep.title
-    if ep.abstract and (not meta.abstract or len(ep.abstract) > len(meta.abstract)):
-        meta.abstract = ep.abstract
-
-    # Carry GROBID structured fields onto the meta (same logic as
-    # state_manager.import_pdf_folder)
-    if getattr(ep, "references", None):
-        meta.local_refs = [
-            {
-                "title": r.title,
-                "doi":   (r.doi or "").lower(),
-                "year":  r.year,
-                "authors": list(r.authors),
-                "raw":   r.raw,
-                "contexts": [
-                    {"section_type": c.section_type,
-                     "section_heading": c.section_heading,
-                     "snippet": c.snippet}
-                    for c in r.contexts
-                ],
-            }
-            for r in ep.references if (r.title or r.doi)
-        ]
-    if getattr(ep, "sections", None):
-        meta.section_index = [
-            {"type": s.section_type, "heading": s.heading,
-             "number": s.number, "n_words": len(s.text.split())}
-            for s in ep.sections
-        ]
-    if getattr(ep, "figures", None):
-        meta.figure_captions = [
-            (f"{f.label}: {f.caption}".strip(": ").strip())
-            for f in ep.figures if (f.label or f.caption)
-        ]
-    if getattr(ep, "tables", None):
-        meta.table_captions = [
-            (f"{t.label}: {t.caption}".strip(": ").strip())
-            for t in ep.tables if (t.label or t.caption)
-        ]
-    if getattr(ep, "equations", None):
-        meta.equations = list(ep.equations)
-
-    # Re-embed with the full text + per-section embeddings (replaces the
-    # abstract-only embedding installed when the rating was first taken).
-    if ep.chunks:
-        graph.embed_paper(meta, ep.chunks)
-    if getattr(ep, "sections", None):
-        graph.embed_paper_sections(meta, ep.sections)
-
-    n_secs = len(meta.section_embeddings)
-    n_refs = len(meta.local_refs)
-    parser = getattr(ep, "parser", "pdfplumber")
     print_success(
-        f"  Ingested via {parser}: "
-        f"{n_secs} section embeddings, {n_refs} parsed references."
+        f"  Ingested via {info['parser']}: "
+        f"{info['n_sections']} section embeddings, "
+        f"{info['n_refs']} parsed references."
+    )
+    audit.log_event(
+        "fulltext", paper_id=meta.paper_id, title=meta.title[:200],
+        doi=meta.doi, provider="user-supplied", license="", url="",
     )
     return True
 
@@ -268,6 +206,9 @@ def rating_session(graph: HierarchicalResearchGraph,
         if raw == "q":
             break
         if raw in ("", "s", "0"):
+            audit.log_event("screen", paper_id=meta.paper_id,
+                            title=meta.title[:200], doi=meta.doi,
+                            rating=None, decision="skipped")
             continue
         try:
             rating = int(raw)
@@ -275,6 +216,10 @@ def rating_session(graph: HierarchicalResearchGraph,
             print_warn("Not a number — skipping.")
             continue
         rating = max(1, min(10, rating))
+        audit.log_event("screen", paper_id=meta.paper_id,
+                        title=meta.title[:200], doi=meta.doi,
+                        rating=rating,
+                        decision=audit.screen_decision(float(rating)))
 
         meta.times_shown += 1
         meta.last_shown   = time.time()
@@ -418,6 +363,8 @@ def search_session(graph: HierarchicalResearchGraph, plot: bool = True):
     candidates, hyde_embedding = find_candidates(
         graph, extra_keywords=extra, query=query
     )
+    audit.log_event("search", query=query or "", keywords=extra,
+                    n_results=len(candidates))
     if not candidates:
         print_warn("No results returned. Check your internet connection.")
         return
@@ -1407,6 +1354,248 @@ def _restore_from_snapshot() -> None:
     )
 
 
+# ── Open-Access harvest session ───────────────────────────────────────────────
+
+def harvest_session(graph: HierarchicalResearchGraph) -> None:
+    """
+    Auto-fetch legal open-access full texts for graph papers that lack one
+    (arXiv -> Unpaywall -> OpenAlex -> Europe PMC). Each success upgrades an
+    abstract-only node into a full node with section embeddings and parsed
+    references — the graph feeds itself, no manual PDF hunting.
+    """
+    from researchbuddy.core import oa_harvester as oh
+
+    print_header("Open-Access Full-Text Harvest")
+    print_info(
+        "Fetches PDFs ONLY from legal open-access locations (Unpaywall,\n"
+        "OpenAlex, arXiv, Europe PMC). Paywalled papers are skipped — never\n"
+        "circumvented. License + provenance are recorded for every download."
+    )
+    if not cfg.UNPAYWALL_EMAIL:
+        print_warn(
+            "Tip: set OPENALEX_MAILTO=you@example.com to unlock Unpaywall\n"
+            "  (the single best OA resolver) and faster OpenAlex responses."
+        )
+
+    todo = oh.harvestable_papers(graph)
+    if not todo:
+        print_warn("Nothing to harvest — every paper either has a local file "
+                   "or lacks a DOI/arXiv id.")
+        return
+    print_info(f"\n{len(todo)} paper(s) could gain full text "
+               f"(rated papers first).")
+    raw = ask(f"How many to try this run? (max {len(todo)})",
+              str(min(len(todo), cfg.HARVEST_MAX_PER_RUN))).strip()
+    try:
+        n = max(1, min(int(raw), len(todo)))
+    except ValueError:
+        n = min(len(todo), cfg.HARVEST_MAX_PER_RUN)
+
+    report = oh.harvest(graph, papers=todo, max_papers=n, progress=print_info)
+
+    print()
+    print_success(
+        f"Harvest done: {report.ingested} ingested / "
+        f"{report.downloaded} downloaded / {report.checked} checked."
+    )
+    if report.no_oa:
+        print_info(f"  {report.no_oa} paper(s) have no legal OA copy "
+                   "(skipped; try again later — OA status changes).")
+    if report.by_provider:
+        prov = ", ".join(f"{k}: {v}" for k, v in report.by_provider.items())
+        print_info(f"  Sources: {prov}")
+    for err in report.errors[:5]:
+        print_warn(f"  {err}")
+    print_info(f"  PDFs + provenance records: {cfg.OA_LIBRARY_DIR}")
+
+    if report.ingested:
+        print_info("\n[graph] Rebuilding hierarchy with new full-text content ...")
+        graph.rebuild_hierarchy()
+        save(graph)
+
+
+# ── Snowball session ──────────────────────────────────────────────────────────
+
+def snowball_session(graph: HierarchicalResearchGraph) -> None:
+    """
+    Backward/forward citation snowballing from the user's best-rated papers,
+    feeding straight into the normal one-at-a-time rating loop.
+    """
+    from researchbuddy.core import snowball as sb
+
+    print_header("Citation Snowballing")
+    print_info(
+        "Backward: follow the reference lists of your best papers.\n"
+        "Forward:  find newer papers citing them.\n"
+        "Uses bibliographic metadata only (OpenAlex / Semantic Scholar)."
+    )
+
+    seeds = sb.pick_seeds(graph)
+    if not seeds:
+        print_warn("No usable seeds — rate a few papers (or import seed PDFs) "
+                   "first.")
+        return
+    print_info(f"\nSeeding from {len(seeds)} paper(s):")
+    for m in seeds[:5]:
+        r = f"rated {m.user_rating:.0f}/10" if m.user_rating else "seed PDF"
+        print_info(f"  - {m.title[:65]} ({r})")
+    if len(seeds) > 5:
+        print_info(f"  ... and {len(seeds) - 5} more")
+
+    dir_raw = ask("Direction (b=backward, f=forward, both)", "both").strip().lower()
+    directions = {"b": ("backward",), "f": ("forward",)}.get(dir_raw,
+                  ("backward", "forward"))
+
+    print_info("\nSnowballing ... (one OpenAlex round-trip per seed)\n")
+    candidates, stats = sb.snowball_round(
+        graph, seeds=seeds, directions=directions, progress=print_info
+    )
+    audit.log_event("snowball", directions=list(directions),
+                    n_seeds=stats["n_seeds"], fetched=stats["fetched"],
+                    new_unique=stats["new_unique"],
+                    saturation=stats["saturation_ratio"])
+
+    print()
+    print_success(
+        f"Round complete: {stats['new_unique']} new unique papers "
+        f"from {stats['fetched']} fetched references/citations."
+    )
+    if stats["saturated"]:
+        print_success(
+            "  SATURATION reached — another round would add almost nothing "
+            "new. Your coverage of this literature is solid."
+        )
+    else:
+        print_info(
+            f"  Saturation ratio: {stats['saturation_ratio']:.0%} new — "
+            "more rounds will still find new work."
+        )
+
+    if not candidates:
+        return
+
+    n_show = cfg.N_RECOMMENDATIONS
+    raw = ask(f"\nReview top how many now? (0 to skip)", str(max(n_show, 5))).strip()
+    try:
+        n_show = max(0, int(raw))
+    except ValueError:
+        pass
+    if n_show <= 0:
+        return
+
+    results = graph.rank_candidates(candidates, n=n_show, exploration_ratio=0.0)
+    display_results(results)
+    if results:
+        rating_session(graph, results)
+        print_info("Auto-saving ...")
+        save(graph)
+
+
+# ── Review pack export session ────────────────────────────────────────────────
+
+def review_pack_session(graph: HierarchicalResearchGraph) -> None:
+    """Export the full review pack: BibTeX, RIS, matrix, scaffold, PRISMA."""
+    from researchbuddy.core.review_builder import export_review_pack, review_papers
+
+    print_header("Export Review Pack")
+    papers = review_papers(graph)
+    if not papers:
+        print_warn("No papers qualify yet — import PDFs or rate some "
+                   "suggestions first.")
+        return
+
+    n_rated = sum(1 for m in papers if m.user_rating is not None)
+    print_info(
+        f"{len(papers)} papers will be exported ({n_rated} rated).\n"
+        "Pack contents: review.bib, review.ris, synthesis_matrix.csv,\n"
+        "review_scaffold.md (themed skeleton), prisma_flow.md.\n"
+        "Only bibliographic facts + your own ratings + locally-generated\n"
+        "synthesis text are written — no third-party text is reproduced."
+    )
+    use_llm = _check_llm_available()
+    if use_llm:
+        print_info("Local LLM detected — themes get original synthesis "
+                   "paragraphs (slower).")
+        if ask("Use LLM for theme synthesis? (y/n)", "y").lower() != "y":
+            use_llm = False
+
+    if ask("Export now? (y/n)", "y").lower() != "y":
+        return
+    print_info("Building pack ...")
+    pack = export_review_pack(graph, use_llm=use_llm)
+    print_success(f"Review pack written to: {pack}")
+    for f in sorted(pack.iterdir()):
+        print_info(f"  - {f.name}")
+
+
+# ── Living review session ─────────────────────────────────────────────────────
+
+def living_review_session(graph: HierarchicalResearchGraph) -> None:
+    """Manage watch queries and check for new papers since the last visit."""
+    from researchbuddy.core import watcher as wt
+
+    while True:
+        watches = wt.load_watches()
+        print_header("Living Review — Watch Queries")
+        if watches:
+            for i, w in enumerate(watches, 1):
+                kw = f"  +[{', '.join(w['keywords'])}]" if w.get("keywords") else ""
+                print_info(f"  [{i}] '{w['query']}'{kw}  "
+                           f"(last checked {w['last_checked']})")
+        else:
+            print_info("  No watches yet. A watch re-runs a query against "
+                       "OpenAlex,\n  restricted to papers published since "
+                       "your last check.")
+        print()
+        print_info("  [c] Check all watches now")
+        print_info("  [a] Add a watch")
+        print_info("  [d] Delete a watch")
+        print_info("  [b] Back")
+
+        choice = ask("Choose", "c" if watches else "a").strip().lower()
+        if choice == "b":
+            return
+        elif choice == "a":
+            q = ask("Watch query (research topic)", "").strip()
+            if not q:
+                continue
+            raw = ask("Extra keywords (comma-separated, optional)", "").strip()
+            kws = [k.strip() for k in raw.split(",") if k.strip()]
+            wt.add_watch(q, kws)
+            print_success(f"Watch added. First check covers the last 30 days.")
+        elif choice == "d":
+            raw = ask("Watch number to delete", "").strip()
+            try:
+                idx = int(raw) - 1
+            except ValueError:
+                continue
+            if wt.remove_watch(idx):
+                print_success("Watch removed.")
+            else:
+                print_warn("No such watch.")
+        elif choice == "c":
+            if not watches:
+                print_warn("Add a watch first.")
+                continue
+            print()
+            reports = wt.check_watches(graph, progress=print_info)
+            any_new = False
+            for rep in reports:
+                results = rep["results"]
+                print()
+                print_header(f"Watch: {rep['watch']['query']}")
+                if not results:
+                    print_info("  Nothing new (or nothing relevant enough).")
+                    continue
+                any_new = True
+                display_results(results)
+                if ask("Rate these now? (y/n)", "y").lower() == "y":
+                    rating_session(graph, results)
+            if any_new:
+                print_info("Auto-saving ...")
+                save(graph)
+
+
 # ── Main menu ─────────────────────────────────────────────────────────────────
 
 def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
@@ -1425,6 +1614,10 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
         "12": "Browse graph in Neo4j (open Browser + load style)",
         "13": "Manage services (Neo4j / GROBID)",
         "14": "Upload my own writing / thoughts (essay, note, draft, ...)",
+        "15": "Harvest open-access full texts (legal OA only — graph feeds itself)",
+        "16": "Snowball citations (backward/forward from your best papers)",
+        "17": "Export review pack (BibTeX / RIS / matrix / scaffold / PRISMA)",
+        "18": "Living review (watch queries — what's new since last check)",
         "q": "Save & quit",
     }
     while True:
@@ -1500,6 +1693,14 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
         elif choice == "14":
             upload_thought_session(graph)
             save(graph)
+        elif choice == "15":
+            harvest_session(graph)
+        elif choice == "16":
+            snowball_session(graph)
+        elif choice == "17":
+            review_pack_session(graph)
+        elif choice == "18":
+            living_review_session(graph)
         else:
             print_warn("Unknown option.")
 

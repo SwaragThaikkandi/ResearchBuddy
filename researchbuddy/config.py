@@ -132,6 +132,36 @@ CROSSREF_SEARCH_QUERIES = _env_int("RESEARCHBUDDY_CROSSREF_QUERIES", 2, min_valu
 CROSSREF_SEARCH_LIMIT   = _env_int("RESEARCHBUDDY_CROSSREF_LIMIT", 15, min_value=1)
 CROSSREF_API_URL        = "https://api.crossref.org/works"
 
+# ── Open-Access harvesting (legal full-text autopilot) ───────────────────────
+# Resolves and downloads ONLY author/publisher-sanctioned open-access copies,
+# via services that index legal OA exclusively (Unpaywall explicitly excludes
+# Sci-Hub / ResearchGate). License + provenance are recorded per download.
+UNPAYWALL_URL       = "https://api.unpaywall.org/v2"
+# Unpaywall requires an email address; reuse the OpenAlex polite-pool one.
+UNPAYWALL_EMAIL     = _os.getenv("UNPAYWALL_EMAIL", _os.getenv("OPENALEX_MAILTO", "")).strip()
+EUROPEPMC_URL       = "https://www.ebi.ac.uk/europepmc/webservices/rest"
+OA_LIBRARY_DIR      = DATA_DIR / "oa_library"          # downloaded OA PDFs + provenance
+OA_DOWNLOAD_TIMEOUT = _env_int("RESEARCHBUDDY_OA_DOWNLOAD_TIMEOUT", 60, min_value=5)
+OA_MAX_PDF_MB       = _env_int("RESEARCHBUDDY_OA_MAX_PDF_MB", 80, min_value=1)
+HARVEST_MAX_PER_RUN = _env_int("RESEARCHBUDDY_HARVEST_MAX", 25, min_value=1)
+
+# ── Citation snowballing ──────────────────────────────────────────────────────
+SNOWBALL_MIN_RATING     = 7     # papers rated >= this seed the snowball
+SNOWBALL_MAX_SEEDS      = 10    # cap on seed papers per round
+SNOWBALL_PER_PAPER      = 25    # max refs/citations pulled per seed paper
+SNOWBALL_MAX_CANDIDATES = 200   # cap on unique new candidates per round
+SNOWBALL_SATURATION     = 0.05  # new-unique ratio below this = review saturated
+
+# ── Review exports (Review Forge) ─────────────────────────────────────────────
+REVIEW_EXPORT_DIR         = DATA_DIR / "review_packs"
+REVIEW_MIN_RATING_INCLUDE = 6   # rating >= this counts as "included" in the review
+
+# ── Living review (watch queries) ─────────────────────────────────────────────
+WATCHES_FILE = DATA_DIR / "watches.json"
+
+# ── PRISMA audit trail ────────────────────────────────────────────────────────
+PRISMA_LOG = HISTORY_DIR / "prisma_log.jsonl"
+
 # Reproducibility / reliability
 DETERMINISTIC_MODE   = True    # stable query expansion/rerank + deterministic tie-breaks
 SEARCH_CACHE_ENABLED = True    # cache LLM search helpers (query expansion + reranking)
