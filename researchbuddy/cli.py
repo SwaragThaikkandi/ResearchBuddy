@@ -1430,14 +1430,26 @@ def snowball_session(graph: HierarchicalResearchGraph) -> None:
         "Uses bibliographic metadata only (OpenAlex / Semantic Scholar)."
     )
 
-    seeds = sb.pick_seeds(graph)
+    used = sb.load_used_seeds()
+    if used and ask(f"{len(used)} seed(s) already expanded in past rounds. "
+                    "Reset and start over? (y/n)", "n").lower() == "y":
+        sb.reset_used_seeds()
+        used = set()
+
+    seeds = sb.pick_seeds(graph, exclude=used)
     if not seeds:
-        print_warn("No usable seeds — rate a few papers (or import seed PDFs) "
-                   "first.")
+        print_warn("No fresh seeds — every candidate has been expanded. Rate "
+                   "more papers, or answer 'y' above to reset the frontier.")
         return
-    print_info(f"\nSeeding from {len(seeds)} paper(s):")
+    print_info(f"\nSeeding from {len(seeds)} paper(s) (walking the frontier "
+               "outward, skipping already-expanded seeds):")
     for m in seeds[:5]:
-        r = f"rated {m.user_rating:.0f}/10" if m.user_rating else "seed PDF"
+        if m.user_rating:
+            r = f"rated {m.user_rating:.0f}/10"
+        elif m.source in ("snowball", "discovered"):
+            r = "frontier"
+        else:
+            r = "seed PDF"
         print_info(f"  - {m.title[:65]} ({r})")
     if len(seeds) > 5:
         print_info(f"  ... and {len(seeds) - 5} more")
@@ -1460,15 +1472,17 @@ def snowball_session(graph: HierarchicalResearchGraph) -> None:
         f"Round complete: {stats['new_unique']} new unique papers "
         f"from {stats['fetched']} fetched references/citations."
     )
+    remaining = stats.get("seeds_remaining")
     if stats["saturated"]:
         print_success(
-            "  SATURATION reached — another round would add almost nothing "
-            "new. Your coverage of this literature is solid."
+            "  SATURATION reached — little new AND no fresh frontier left. "
+            "Your coverage of this literature is solid."
         )
     else:
         print_info(
-            f"  Saturation ratio: {stats['saturation_ratio']:.0%} new — "
-            "more rounds will still find new work."
+            f"  Saturation ratio: {stats['saturation_ratio']:.0%} new"
+            + (f"  |  {remaining} seed(s) still on the frontier — run again "
+               "to walk further out." if remaining else "")
         )
 
     if not candidates:
@@ -1596,6 +1610,104 @@ def living_review_session(graph: HierarchicalResearchGraph) -> None:
                 save(graph)
 
 
+# ── Graph capsule session (social-psyche interop) ─────────────────────────────
+
+def capsule_session(graph: HierarchicalResearchGraph) -> None:
+    """
+    Package this graph as a privacy-scrubbed capsule, or merge a collaborator's
+    capsule into yours — measuring how reliable the merge is with standard
+    graph-theory error measures (spectral distance, DeltaCon, degree-KS,
+    Jaccard, Gromov–Wasserstein).
+    """
+    from researchbuddy.core import capsule as cap
+
+    print_header("Graph Capsules — Share & Merge (social-psyche)")
+    print_info(
+        "A capsule packages your graph for a collaborator WITHOUT leaking\n"
+        "private data: thought/draft nodes are always dropped; DOIs, titles,\n"
+        "and ratings are shared only if you opt in. Embeddings + structure\n"
+        "always travel, so graphs can be aligned even fully anonymised."
+    )
+    print()
+    print_info("  [1] Export my graph as a capsule")
+    print_info("  [2] Inspect a capsule file")
+    print_info("  [3] Merge a capsule into my graph (with reliability report)")
+    print_info("  [b] Back")
+    choice = ask("Choose", "1").strip().lower()
+    if choice == "b":
+        return
+
+    if choice == "1":
+        ids = ask("Share DOIs + titles? (y/n)  [needed to IMPORT new papers; "
+                  "off = fully private structural share]", "n").lower() == "y"
+        rates = ask("Share your ratings? (y/n)", "n").lower() == "y"
+        cfg.CAPSULE_DIR.mkdir(parents=True, exist_ok=True)
+        default = cfg.CAPSULE_DIR / f"mygraph_{int(time.time())}.rbcapsule"
+        out = ask("Output path", str(default)).strip() or str(default)
+        capsule = cap.export_capsule(
+            graph, share_identifiers=ids, share_ratings=rates)
+        path = cap.write_capsule(capsule, out)
+        print_success(f"Capsule written: {path}")
+        print_info(f"  {capsule.stats['n_papers']} papers, "
+                   f"{capsule.stats['n_sem_edges']} semantic edges, "
+                   f"{capsule.stats['n_clusters']} clusters.")
+        print_info(f"  Privacy: identifiers={'on' if ids else 'OFF'}, "
+                   f"ratings={'on' if rates else 'OFF'}.")
+        print_info("  Send this file to a collaborator; they merge it with "
+                   "option [3].")
+
+    elif choice == "2":
+        path = ask("Capsule path", "").strip()
+        if not path:
+            return
+        try:
+            capsule = cap.load_capsule(path)
+        except Exception as e:
+            print_warn(f"Could not read capsule: {e}")
+            return
+        print_success(f"Capsule v{capsule.version} created {capsule.created}")
+        for k, v in capsule.stats.items():
+            print_info(f"  {k}: {v}")
+        print_info(f"  Privacy: {capsule.privacy}")
+
+    elif choice == "3":
+        path = ask("Capsule path to merge", "").strip()
+        if not path:
+            return
+        try:
+            capsule = cap.load_capsule(path)
+        except Exception as e:
+            print_warn(f"Could not read capsule: {e}")
+            return
+        print_info("Merging + computing graph-theoretic reliability ...")
+        report = cap.merge_capsule(graph, capsule, rebuild=True)
+
+        print_header("Merge Reliability Report")
+        print_info(f"  Shared by DOI         : {report.shared_by_doi}")
+        print_info(f"  Shared by embedding   : {report.shared_by_embedding}")
+        print_success(f"  New papers imported   : {report.imported}")
+        print_info(f"  Novel regions (unmerged): {report.novel_regions}")
+        print()
+
+        def _fmt(x):
+            return f"{x:.3f}" if isinstance(x, (int, float)) else "n/a"
+
+        print_info("  Graph-theory error / similarity measures:")
+        print_info(f"    Jaccard (DOI overlap)   : {_fmt(report.jaccard_doi)}")
+        print_info(f"    Spectral distance        : {_fmt(report.spectral_distance)}")
+        print_info(f"    DeltaCon similarity      : {_fmt(report.deltacon_similarity)}")
+        print_info(f"    Degree-dist KS           : {_fmt(report.degree_ks)}")
+        print_info(f"    Gromov–Wasserstein dist  : {_fmt(report.gw_distortion)}")
+        print_info(f"    Modularity (mine)        : {_fmt(report.modularity_self)}")
+        for note in report.notes:
+            print_warn(f"  - {note}")
+
+        if report.imported:
+            save(graph)
+            print_success("Graph saved with imported papers. Harvest their "
+                          "OA full text with option 15.")
+
+
 # ── Main menu ─────────────────────────────────────────────────────────────────
 
 def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
@@ -1618,6 +1730,7 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
         "16": "Snowball citations (backward/forward from your best papers)",
         "17": "Export review pack (BibTeX / RIS / matrix / scaffold / PRISMA)",
         "18": "Living review (watch queries — what's new since last check)",
+        "19": "Graph capsules — share / merge with a collaborator (social-psyche)",
         "q": "Save & quit",
     }
     while True:
@@ -1701,6 +1814,8 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
             review_pack_session(graph)
         elif choice == "18":
             living_review_session(graph)
+        elif choice == "19":
+            capsule_session(graph)
         else:
             print_warn("Unknown option.")
 

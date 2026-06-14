@@ -1,6 +1,6 @@
 # ResearchBuddy
 
-> **NEW** — Open-access full-text harvest (legal OA only, with license provenance) · Citation snowballing with saturation tracking · One-command review pack (BibTeX / RIS / synthesis matrix / themed scaffold / PRISMA flow) · Living-review watch queries · Automatic PRISMA audit trail
+> **NEW** — Privacy-preserving graph sharing & merge ([social-psyche](#social-psyche-privacy-preserving-graph-sharing) capsules + PSI + Gromov–Wasserstein / DeltaCon reliability) · Snowball frontier walk (no more premature saturation) · Open-access full-text harvest (legal OA only, with license provenance) · Citation snowballing with saturation tracking · One-command review pack (BibTeX / RIS / synthesis matrix / themed scaffold / PRISMA flow) · Living-review watch queries · Automatic PRISMA audit trail
 >
 > **v2.2.0** — Auto-launch Docker services (Neo4j + GROBID) · Readable Neo4j Browser captions + bundled stylesheet · GROBID PDF parsing (figures/tables/equations + local citation network) · Neo4j graph backend · VRAM-aware embedder · Adaptive learned scoring · Temporal decay · Cold-start intelligence · Full-text embeddings via CORE · Hierarchical Small World Network + Causal DAG + LLM-powered Reasoning & Creative Modes
 
@@ -551,6 +551,54 @@ retrieval, and watch check is appended to
 `~/.researchbuddy/history/prisma_log.jsonl`. The review-pack export folds
 this into PRISMA-2020 flow counts — so your literature review is
 *reproducible*, not just thorough.
+
+### 15. Graph Capsules — Share & Merge with a Collaborator (Menu option 19)
+
+The interop contract for [**social-psyche**](#social-psyche-privacy-preserving-graph-sharing):
+two researchers package their graphs and merge them **without either
+revealing what they've been reading**.
+
+- **Export** a privacy-scrubbed `*.rbcapsule`: thought/draft nodes are always
+  dropped; DOIs, titles, and ratings are opt-in; embeddings + structure
+  always travel.
+- **Merge** a collaborator's capsule into yours. New, identified papers are
+  imported (then harvestable for OA full text); structurally-matched papers
+  are recognised, not duplicated.
+- **Reliability report** — every merge reports standard graph-theory
+  error/similarity measures so you know how compatible the two landscapes
+  are: spectral distance, **DeltaCon** similarity, degree-distribution KS,
+  Jaccard overlap, **Gromov–Wasserstein** distortion (label-free alignment),
+  and modularity.
+
+Gromov–Wasserstein needs the optional extra: `pip install researchbuddy[social]`.
+
+#### Snowball frontier walk (improved)
+
+Citation snowballing (option 16) now **walks outward** instead of
+re-harvesting the same shell. Each round remembers the seeds it expanded
+(`~/.researchbuddy/snowball_state.json`) and seeds the next round from the
+*frontier* — recently-added, underconnected papers — so successive rounds
+reach 2-hop, 3-hop neighbourhoods. Saturation is only declared when there's
+little new **and** no fresh frontier left; the menu reports how many seeds
+remain. (Reset the frontier from the snowball prompt to start over.)
+
+---
+
+## social-psyche: privacy-preserving graph sharing
+
+[**social-psyche**](../social-psyche) is a companion package (separate repo)
+that turns the capsule contract above into a two-party collaboration tool:
+
+- **Private Set Intersection (PSI)** — discover which papers you both hold
+  without revealing the ones you don't (Diffie–Hellman commutative
+  encryption, pure Python).
+- **Capsule exchange** — file-based today; authenticated networked handshake
+  is the next milestone.
+- **Graph-theoretic reliability** — reuses ResearchBuddy's `graph_distance`
+  measures to quantify every merge.
+
+ResearchBuddy owns the capsule format + distance measures (the contract);
+social-psyche owns the protocol + crypto. See its README for usage.
 
 ---
 

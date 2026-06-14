@@ -44,6 +44,39 @@ def test_pick_seeds_falls_back_to_seed_pdfs(graph_with_papers):
     assert all(m.source == "seed" for m in seeds)
 
 
+def test_pick_seeds_excludes_used(graph_with_papers):
+    g = graph_with_papers
+    papers = g.all_papers()
+    for m in papers:
+        m.user_rating = 9.0
+    exclude = {papers[0].paper_id, papers[1].paper_id}
+    seeds = sb.pick_seeds(g, exclude=exclude)
+    ids = {m.paper_id for m in seeds}
+    assert exclude.isdisjoint(ids)
+
+
+def test_frontier_fill_uses_recent_snowball_papers(graph_with_papers):
+    g = graph_with_papers
+    # No ratings → no top-rated seeds. Add a frontier paper (snowball source).
+    front = PaperMeta(paper_id="front1", title="Frontier Paper",
+                      abstract="x", doi="10.9/front", source="snowball",
+                      embedding=g.all_papers()[0].embedding)
+    g.add_paper(front, front.embedding)
+    seeds = sb.pick_seeds(g, frontier_fill=True)
+    # seed PDFs have no DOI requirement, but frontier fill should surface the
+    # snowball paper as an outward-walk seed.
+    assert any(m.paper_id == "front1" for m in seeds)
+
+
+def test_used_seed_memory_roundtrip(tmp_path):
+    p = tmp_path / "snow.json"
+    assert sb.load_used_seeds(p) == set()
+    sb.save_used_seeds({"a", "b"}, p)
+    assert sb.load_used_seeds(p) == {"a", "b"}
+    sb.reset_used_seeds(p)
+    assert sb.load_used_seeds(p) == set()
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def test_short_id():
@@ -77,7 +110,7 @@ def test_snowball_dedupes_against_graph(graph_with_papers, monkeypatch):
         _oa_work("A Brand New Reference", doi="10.1/new", oa_id="W10"),  # dup in-round
     ])
 
-    cands, stats = sb.snowball_round(g, seeds=[seed])
+    cands, stats = sb.snowball_round(g, seeds=[seed], remember=False)
     titles = {m.title for m in cands}
     assert "A Brand New Reference" in titles
     assert "A Citing Paper" in titles
@@ -109,7 +142,7 @@ def test_snowball_backward_only(graph_with_papers, monkeypatch):
     monkeypatch.setattr(sb, "_citing_works", no_citing)
 
     cands, stats = sb.snowball_round(g, seeds=[seed],
-                                     directions=("backward",))
+                                     directions=("backward",), remember=False)
     assert calls["citing"] == 0
     assert stats["directions"] == ["backward"]
     assert len(cands) == 1
@@ -134,7 +167,7 @@ def test_snowball_uses_grobid_local_refs(graph_with_papers, monkeypatch):
         _oa_work("Local Ref With Doi", doi="10.9/localref", oa_id="W30"),
     ])
 
-    cands, stats = sb.snowball_round(g, seeds=[seed])
+    cands, stats = sb.snowball_round(g, seeds=[seed], remember=False)
     titles = {m.title for m in cands}
     assert "Local Ref With Doi" in titles        # enriched via OpenAlex
     assert "Local Ref Without Doi" in titles     # kept as bare metadata
@@ -161,7 +194,48 @@ def test_snowball_saturation_flag(graph_with_papers, monkeypatch):
     ])
     monkeypatch.setattr(sb, "_citing_works", lambda oid, limit: [])
 
-    cands, stats = sb.snowball_round(g, seeds=[seed])
+    cands, stats = sb.snowball_round(g, seeds=[seed], remember=False)
     assert stats["new_unique"] == 0
     assert stats["fetched"] >= 20
     assert stats["saturated"] is True
+
+
+def test_unresolved_dois_become_candidates_not_fetched_inflation(
+        graph_with_papers, monkeypatch):
+    """The old bug: unresolved local-ref DOIs inflated `fetched`, faking
+    saturation. Now they become real bare-metadata candidates."""
+    g = graph_with_papers
+    seed = g.all_papers()[0]
+    seed.doi = ""
+    seed.local_refs = [
+        {"title": "", "doi": "10.5/unresolved-a", "authors": []},
+        {"title": "", "doi": "10.5/unresolved-b", "authors": []},
+    ]
+    monkeypatch.setattr(sb, "REQUEST_DELAY", 0)
+    monkeypatch.setattr(sb, "_work_by_doi", lambda doi: None)
+    monkeypatch.setattr(sb, "_citing_works", lambda oid, limit: [])
+    monkeypatch.setattr(sb, "_works_by_dois", lambda dois: [])   # none resolve
+
+    cands, stats = sb.snowball_round(g, seeds=[seed], remember=False)
+    dois = {m.doi for m in cands}
+    assert "10.5/unresolved-a" in dois
+    assert "10.5/unresolved-b" in dois
+    assert stats["new_unique"] == 2
+
+
+def test_snowball_round_remembers_seeds(graph_with_papers, monkeypatch, tmp_path):
+    g = graph_with_papers
+    seed = g.all_papers()[0]
+    seed.user_rating = 9.0
+    seed.doi = "10.1/seed"
+    state = tmp_path / "snow.json"
+
+    monkeypatch.setattr(sb, "REQUEST_DELAY", 0)
+    monkeypatch.setattr(sb, "_work_by_doi", lambda doi: {
+        "id": "https://openalex.org/W_seed", "referenced_works": []})
+    monkeypatch.setattr(sb, "_citing_works", lambda oid, limit: [])
+
+    cands, stats = sb.snowball_round(g, seeds=[seed], remember=True,
+                                     state_path=state)
+    assert seed.paper_id in sb.load_used_seeds(state)
+    assert stats["seeds_remaining"] is not None

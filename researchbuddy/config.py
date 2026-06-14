@@ -151,6 +151,22 @@ SNOWBALL_MAX_SEEDS      = 10    # cap on seed papers per round
 SNOWBALL_PER_PAPER      = 25    # max refs/citations pulled per seed paper
 SNOWBALL_MAX_CANDIDATES = 200   # cap on unique new candidates per round
 SNOWBALL_SATURATION     = 0.05  # new-unique ratio below this = review saturated
+# Frontier walk: once top-rated seeds are used up, keep expanding outward from
+# the most recently-added snowball/discovered papers (and underconnected
+# "frontier" nodes), so successive rounds reach 2-hop, 3-hop neighbourhoods
+# instead of re-harvesting the same 1-hop shell (the cause of fast saturation).
+SNOWBALL_STATE_FILE     = DATA_DIR / "snowball_state.json"   # used-seed memory
+SNOWBALL_FRONTIER_FILL  = True  # fill empty seed slots with frontier papers
+
+# ── Graph capsules (social-psyche interop) ────────────────────────────────────
+# A capsule is a privacy-scrubbed, versioned package of one researcher's graph
+# that another ResearchBuddy can compare + merge — without exchanging reading
+# lists, ratings, or drafts. The contract that social-psyche builds on.
+CAPSULE_DIR        = DATA_DIR / "capsules"
+CAPSULE_VERSION    = 1
+# Embedding-NN threshold for matching a foreign capsule node to a local paper
+# when DOIs are absent (private mode). Cosine >= this ⇒ treated as the same work.
+CAPSULE_MATCH_COS  = 0.92
 
 # ── Review exports (Review Forge) ─────────────────────────────────────────────
 REVIEW_EXPORT_DIR         = DATA_DIR / "review_packs"
