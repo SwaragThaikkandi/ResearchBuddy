@@ -52,6 +52,17 @@ def test_export_drops_thought_nodes(graph_with_papers):
 
 # ── IO roundtrip ───────────────────────────────────────────────────────────────
 
+def test_dumps_loads_roundtrip_in_memory(graph_with_papers):
+    g = _set_dois(graph_with_papers)
+    capsule = cap.export_capsule(g, share_identifiers=True)
+    blob = cap.dumps_capsule(capsule)
+    assert isinstance(blob, bytes) and blob[:2] == b"PK"   # zip magic
+    back = cap.loads_capsule(blob)
+    assert back.doi_set() == capsule.doi_set()
+    assert back.stats == capsule.stats
+    assert np.allclose(back.embeddings, capsule.embeddings, atol=1e-5)
+
+
 def test_write_load_roundtrip(graph_with_papers, tmp_path):
     g = _set_dois(graph_with_papers)
     capsule = cap.export_capsule(g, share_identifiers=True)

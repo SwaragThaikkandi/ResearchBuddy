@@ -154,12 +154,12 @@ def export_capsule(
     return capsule
 
 
-def write_capsule(capsule: GraphCapsule, out_path: Path) -> Path:
-    out_path = Path(out_path)
-    if out_path.suffix != ".rbcapsule":
-        out_path = out_path.with_suffix(".rbcapsule")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+def dumps_capsule(capsule: GraphCapsule) -> bytes:
+    """Serialise a capsule to in-memory `.rbcapsule` bytes (no disk touch).
 
+    This is what the networked transport (social-psyche) sends over an
+    encrypted channel — the capsule never lands on a shared medium.
+    """
     meta = {
         "version": capsule.version,
         "created": capsule.created,
@@ -173,20 +173,20 @@ def write_capsule(capsule: GraphCapsule, out_path: Path) -> Path:
     npz_buf = io.BytesIO()
     np.savez_compressed(npz_buf, embeddings=capsule.embeddings,
                         centroids=capsule.centroids)
-    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("meta.json", json.dumps(meta, ensure_ascii=False))
         zf.writestr("arrays.npz", npz_buf.getvalue())
-    return out_path
+    return out.getvalue()
 
 
-def load_capsule(path: Path) -> GraphCapsule:
-    path = Path(path)
-    with zipfile.ZipFile(path, "r") as zf:
+def loads_capsule(data: bytes) -> GraphCapsule:
+    """Inverse of dumps_capsule: parse `.rbcapsule` bytes from memory."""
+    with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
         meta = json.loads(zf.read("meta.json").decode("utf-8"))
-        with zf.open("arrays.npz") as fh:
-            arr = np.load(io.BytesIO(fh.read()))
-            embeddings = arr["embeddings"]
-            centroids = arr["centroids"]
+        arr = np.load(io.BytesIO(zf.read("arrays.npz")))
+        embeddings = arr["embeddings"]
+        centroids = arr["centroids"]
     return GraphCapsule(
         version=meta["version"],
         created=meta["created"],
@@ -199,6 +199,19 @@ def load_capsule(path: Path) -> GraphCapsule:
         cluster_sizes=meta["cluster_sizes"],
         stats=meta["stats"],
     )
+
+
+def write_capsule(capsule: GraphCapsule, out_path: Path) -> Path:
+    out_path = Path(out_path)
+    if out_path.suffix != ".rbcapsule":
+        out_path = out_path.with_suffix(".rbcapsule")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(dumps_capsule(capsule))
+    return out_path
+
+
+def load_capsule(path: Path) -> GraphCapsule:
+    return loads_capsule(Path(path).read_bytes())
 
 
 # ── Reliability report ────────────────────────────────────────────────────────
