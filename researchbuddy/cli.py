@@ -1629,9 +1629,10 @@ def capsule_session(graph: HierarchicalResearchGraph) -> None:
         "always travel, so graphs can be aligned even fully anonymised."
     )
     print()
-    print_info("  [1] Export my graph as a capsule")
+    print_info("  [1] Export my graph as a capsule (file)")
     print_info("  [2] Inspect a capsule file")
-    print_info("  [3] Merge a capsule into my graph (with reliability report)")
+    print_info("  [3] Merge a capsule file into my graph (with reliability report)")
+    print_info("  [4] Merge LIVE with a collaborator (secure network, no files)")
     print_info("  [b] Back")
     choice = ask("Choose", "1").strip().lower()
     if choice == "b":
@@ -1681,31 +1682,107 @@ def capsule_session(graph: HierarchicalResearchGraph) -> None:
             return
         print_info("Merging + computing graph-theoretic reliability ...")
         report = cap.merge_capsule(graph, capsule, rebuild=True)
-
-        print_header("Merge Reliability Report")
-        print_info(f"  Shared by DOI         : {report.shared_by_doi}")
-        print_info(f"  Shared by embedding   : {report.shared_by_embedding}")
-        print_success(f"  New papers imported   : {report.imported}")
-        print_info(f"  Novel regions (unmerged): {report.novel_regions}")
-        print()
-
-        def _fmt(x):
-            return f"{x:.3f}" if isinstance(x, (int, float)) else "n/a"
-
-        print_info("  Graph-theory error / similarity measures:")
-        print_info(f"    Jaccard (DOI overlap)   : {_fmt(report.jaccard_doi)}")
-        print_info(f"    Spectral distance        : {_fmt(report.spectral_distance)}")
-        print_info(f"    DeltaCon similarity      : {_fmt(report.deltacon_similarity)}")
-        print_info(f"    Degree-dist KS           : {_fmt(report.degree_ks)}")
-        print_info(f"    Gromov–Wasserstein dist  : {_fmt(report.gw_distortion)}")
-        print_info(f"    Modularity (mine)        : {_fmt(report.modularity_self)}")
-        for note in report.notes:
-            print_warn(f"  - {note}")
-
+        _print_merge_report(report)
         if report.imported:
             save(graph)
             print_success("Graph saved with imported papers. Harvest their "
                           "OA full text with option 15.")
+
+    elif choice == "4":
+        networked_merge_session(graph)
+
+
+def _print_merge_report(report) -> None:
+    """Shared pretty-printer for a capsule MergeReport (file or networked)."""
+    print_header("Merge Reliability Report")
+    print_info(f"  Shared by DOI         : {report.shared_by_doi}")
+    print_info(f"  Shared by embedding   : {report.shared_by_embedding}")
+    print_success(f"  New papers imported   : {report.imported}")
+    print_info(f"  Novel regions (unmerged): {report.novel_regions}")
+    print()
+
+    def _fmt(x):
+        return f"{x:.3f}" if isinstance(x, (int, float)) else "n/a"
+
+    print_info("  Graph-theory error / similarity measures:")
+    print_info(f"    Jaccard (DOI overlap)   : {_fmt(report.jaccard_doi)}")
+    print_info(f"    Spectral distance        : {_fmt(report.spectral_distance)}")
+    print_info(f"    DeltaCon similarity      : {_fmt(report.deltacon_similarity)}")
+    print_info(f"    Degree-dist KS           : {_fmt(report.degree_ks)}")
+    print_info(f"    Gromov–Wasserstein dist  : {_fmt(report.gw_distortion)}")
+    print_info(f"    Modularity (mine)        : {_fmt(report.modularity_self)}")
+    for note in report.notes:
+        print_warn(f"  - {note}")
+
+
+def networked_merge_session(graph: HierarchicalResearchGraph) -> None:
+    """
+    Secure, live merge with a collaborator over the network — capsules never
+    touch disk. Delegates the protocol + crypto to the social-psyche package
+    (authenticated, forward-secret, AEAD channel + PSI). Optional dependency:
+    ResearchBuddy works fully without it; this one menu path needs it.
+    """
+    try:
+        from social_psyche import netmerge
+        from social_psyche.identity import Identity
+    except ImportError:
+        print_warn("Live networked merge needs the 'social-psyche' package "
+                   "(separate, optional).")
+        print_info("  Install it (editable, with secure transport):")
+        print_info("    pip install -e <path-to>/social-psyche[net]")
+        print_info("  Then re-open this menu. File-based merge ([1]/[3]) works "
+                   "without it.")
+        return
+
+    ident = Identity.load_or_create()
+    print_header("Secure Networked Merge (social-psyche)")
+    print_success("YOUR identity fingerprint — read it to your collaborator over")
+    print_success("a trusted channel (phone / in person) so they can verify you:")
+    print_info(f"    {ident.fingerprint()}")
+    print()
+
+    role = ask("Role: [s]erve (wait for peer) or [c]onnect (dial peer)?", "s")\
+        .strip().lower()
+    peer_fp = ask("Pin peer's fingerprint (paste it, or Enter for "
+                  "trust-on-first-use)", "").strip() or None
+    if peer_fp is None:
+        print_warn("No fingerprint pinned: the channel is encrypted but NOT "
+                   "verified against a known peer — a man-in-the-middle is "
+                   "possible. Confirm the peer fingerprint shown after connecting.")
+    share_ids = ask("Share DOIs + titles? (y/n)  [needed so the peer can IMPORT "
+                    "your new papers]", "y").lower() == "y"
+    share_rt = ask("Share your ratings? (y/n)", "n").lower() == "y"
+    kwargs = dict(identity=ident, expected_peer_fp=peer_fp,
+                  share_identifiers=share_ids, share_ratings=share_rt)
+
+    try:
+        if role.startswith("c"):
+            host = ask("Peer host / IP", "127.0.0.1").strip()
+            port = int(ask("Port", "9333").strip() or "9333")
+            print_info(f"Connecting to {host}:{port} (handshake + PSI + merge) ...")
+            result = netmerge.connect(graph, host, port, **kwargs)
+        else:
+            host = ask("Bind address", "0.0.0.0").strip()
+            port = int(ask("Port", "9333").strip() or "9333")
+            print_info(f"Listening on {host}:{port} — waiting for peer "
+                       "(Ctrl-C to cancel) ...")
+            result = netmerge.serve(graph, host, port, **kwargs)
+    except KeyboardInterrupt:
+        print_warn("Cancelled.")
+        return
+    except Exception as e:
+        print_warn(f"Networked merge failed: {e}")
+        return
+
+    print()
+    print_info(f"Peer fingerprint (verify this matches your collaborator): "
+               f"{result.peer_fingerprint}")
+    print_info(f"Shared papers found via PSI: {len(result.shared_dois)}")
+    _print_merge_report(result.report)
+    if result.report.imported:
+        save(graph)
+        print_success("Graph saved with imported papers. Harvest their OA full "
+                      "text with option 15.")
 
 
 # ── Main menu ─────────────────────────────────────────────────────────────────

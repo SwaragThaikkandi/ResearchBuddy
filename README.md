@@ -52,7 +52,15 @@ pip install git+https://github.com/SwaragThaikkandi/ResearchBuddy.git
 git clone https://github.com/SwaragThaikkandi/ResearchBuddy.git
 cd ResearchBuddy
 pip install -e .
+
+# With the privacy-preserving graph-merge extra (Gromov–Wasserstein):
+pip install -e ".[social]"
 ```
+
+> **Note:** ResearchBuddy is **not published on PyPI**, so
+> `pip install researchbuddy[social]` will fail (or pull an unrelated/old
+> package). Install from this repo with `pip install -e ".[social]"`. The
+> `[social]` extra (POT) only exists in this source tree.
 
 **Requirements:** Python 3.9 or newer. All dependencies are installed automatically:
 
@@ -570,7 +578,17 @@ revealing what they've been reading**.
   Jaccard overlap, **Gromov–Wasserstein** distortion (label-free alignment),
   and modularity.
 
-Gromov–Wasserstein needs the optional extra: `pip install researchbuddy[social]`.
+The menu offers four modes:
+
+| | Mode |
+|---|---|
+| [1] | Export my graph → `*.rbcapsule` file |
+| [2] | Inspect a capsule file |
+| [3] | Merge a capsule **file** into my graph |
+| [4] | **Merge LIVE** with a collaborator over a **secure network** — capsules never touch disk (authenticated, forward-secret, end-to-end-encrypted; PSI hides non-shared papers). Needs the optional [social-psyche](#social-psyche-privacy-preserving-graph-sharing) package. |
+
+Gromov–Wasserstein needs the optional extra: install ResearchBuddy editable
+with `pip install -e .[social]` (see install note below).
 
 #### Snowball frontier walk (improved)
 
