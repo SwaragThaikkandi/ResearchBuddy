@@ -1361,8 +1361,25 @@ class HierarchicalResearchGraph:
 
         # ── Apply weights (learned or default) ────────────────────────────
         w = self._signal_weights()
-        total_w = w.sum() or 1.0
-        fused = float(np.dot(signals, w) / total_w)
+        # Mask out signals the candidate structurally cannot supply, removing
+        # their weight from BOTH numerator and denominator. Search candidates
+        # are abstract-only (no per-section embeddings), so their section
+        # signals are necessarily 0. When the user's ratings have learned to
+        # favour section similarity (common once full-text papers are ingested),
+        # leaving those weights in the denominator deflates every fresh
+        # candidate below the relevance floor — the "142 fetched, 0 shown,
+        # No new candidates found" failure. Score on available evidence instead.
+        mask = np.ones_like(w)
+        cand_secs = getattr(meta, "section_embeddings", None) or {}
+        sec_ctx = getattr(self, "_section_context_vecs", {}) or {}
+        for i, stype in enumerate(SCORED_SECTION_TYPES):
+            pos = 7 + i
+            if pos < len(mask) and (stype not in cand_secs
+                                    or sec_ctx.get(stype) is None):
+                mask[pos] = 0.0
+        wm = w * mask
+        total_w = float(wm.sum()) or 1.0
+        fused = float(np.dot(signals, wm) / total_w)
         return float(np.clip(fused, 0.0, 1.0))
 
     def _cold_start_score(self, meta: PaperMeta) -> float:
