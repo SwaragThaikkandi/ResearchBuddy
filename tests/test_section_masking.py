@@ -104,3 +104,28 @@ def test_full_ranking_surfaces_abstract_only_candidates():
 
     results = g.rank_candidates(candidates, n=5, exploration_ratio=0.0)
     assert len(results) >= 1, "abstract-only candidates were all floored out"
+
+
+def test_snowball_and_watcher_candidates_not_floored():
+    """
+    Snowballing (menu 16), living-review watches (menu 18), and search (menu 1)
+    all funnel through graph.rank_candidates → score_candidate. Their candidates
+    are abstract-only metadata (OpenAlex/CrossRef/S2), so the same section-weight
+    deflation would have silently zeroed them. Guard all three at once.
+    """
+    g, base = _clustered_graph()
+    g._learned_signal_weights = _section_heavy_weights()
+    g._section_context_dirty = True
+    rng = np.random.RandomState(11)
+
+    for source in ("snowball", "watch", "discovered"):
+        cands = []
+        for i in range(8):
+            v = base + 0.05 * rng.randn(len(base)); v /= np.linalg.norm(v)
+            m = PaperMeta(paper_id=f"{source}_{i}", title=f"{source} cand {i}",
+                          abstract="", doi=f"10.x/{source}{i}",
+                          source=source, embedding=v)
+            assert not m.section_embeddings          # the failing shape
+            cands.append(m)
+        results = g.rank_candidates(cands, n=5, exploration_ratio=0.0)
+        assert len(results) >= 1, f"{source} candidates all floored out"
