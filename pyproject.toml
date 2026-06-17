@@ -4,16 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name            = "researchbuddy"
-version         = "0.7.3"
+version         = "0.7.4"
 description     = "Hierarchical graph-based literature search assistant for researchers"
 readme          = "README.md"
 requires-python = ">=3.9"
-license         = {text = "MIT"}
+license         = {text = "GPL-3.0-or-later"}
 keywords        = ["literature-search", "research", "NLP", "graph", "recommendation"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",

@@ -1034,4 +1034,15 @@ This means your research graph grows in breadth *and* depth, surfacing adjacent 
 
 ## License
 
-MIT
+**GNU General Public License v3.0 or later (GPL-3.0-or-later).** Strictly
+open source / copyleft: you may use, study, share, and modify ResearchBuddy,
+but any distributed derivative must also be released under the GPL with its
+source. See [LICENSE](LICENSE) for the full text.
+
+Copyright (C) 2026 Swarag Thaikkandi and ResearchBuddy contributors.
+
+> This program is free software: you can redistribute it and/or modify it
+> under the terms of the GNU General Public License as published by the Free
+> Software Foundation, either version 3 of the License, or (at your option)
+> any later version. This program is distributed WITHOUT ANY WARRANTY; see
+> the GNU General Public License for more details.
