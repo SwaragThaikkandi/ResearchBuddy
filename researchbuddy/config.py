@@ -158,6 +158,11 @@ SNOWBALL_SATURATION     = 0.05  # new-unique ratio below this = review saturated
 SNOWBALL_STATE_FILE     = DATA_DIR / "snowball_state.json"   # used-seed memory
 SNOWBALL_FRONTIER_FILL  = True  # fill empty seed slots with frontier papers
 
+# ── Open archives (anti-lock-in escape hatch) ─────────────────────────────────
+# Full-graph export/import in open formats (JSONL + pickle-free NPZ) so the
+# topology outlives ResearchBuddy, Python, and any single vendor.
+ARCHIVE_DIR = DATA_DIR / "archives"
+
 # ── Graph capsules (social-psyche interop) ────────────────────────────────────
 # A capsule is a privacy-scrubbed, versioned package of one researcher's graph
 # that another ResearchBuddy can compare + merge — without exchanging reading

@@ -1785,6 +1785,79 @@ def networked_merge_session(graph: HierarchicalResearchGraph) -> None:
                       "text with option 15.")
 
 
+# ── Open archive session (anti-lock-in) ───────────────────────────────────────
+
+def archive_session(graph: HierarchicalResearchGraph) -> Optional[HierarchicalResearchGraph]:
+    """
+    Export the full graph to an open, hash-verified archive (JSONL + NPZ), or
+    rebuild a graph from one. This is the guarantee that your knowledge
+    topology never depends on ResearchBuddy, pickle, or any single vendor.
+    Returns a new graph when an import happened, else None.
+    """
+    from pathlib import Path
+    from researchbuddy.core import archive as ar
+
+    print_header("Open Archive — Your Topology, No Lock-In")
+    print_info(
+        "Exports the ENTIRE graph as open formats anyone can read without\n"
+        "ResearchBuddy: papers.jsonl, edges.jsonl, embeddings.npz (pickle-\n"
+        "free), state.json, manifest.json with sha256 integrity hashes.\n"
+        "Personal backup — contains abstracts; publish capsules (19), not this."
+    )
+    print()
+    print_info("  [1] Export archive")
+    print_info("  [2] Verify an archive (integrity check)")
+    print_info("  [3] Import archive (REPLACES the current graph)")
+    print_info("  [b] Back")
+    choice = ask("Choose", "1").strip().lower()
+
+    if choice == "1":
+        default = cfg.ARCHIVE_DIR / f"archive_{time.strftime('%Y%m%d_%H%M%S')}"
+        out = ask("Output directory", str(default)).strip() or str(default)
+        print_info("Exporting ...")
+        path = ar.export_archive(graph, out)
+        print_success(f"Archive written: {path}")
+        for f in sorted(Path(path).iterdir()):
+            print_info(f"  - {f.name}  ({f.stat().st_size:,} bytes)")
+    elif choice == "2":
+        d = ask("Archive directory", "").strip()
+        if not d:
+            return None
+        try:
+            man = ar.verify_archive(d)
+        except ar.ArchiveError as e:
+            print_warn(f"VERIFY FAILED: {e}")
+            return None
+        print_success(
+            f"Archive OK: {man['n_papers']} papers, {man['n_edges']} edges, "
+            f"created {man['created']} — all hashes match.")
+    elif choice == "3":
+        d = ask("Archive directory to import", "").strip()
+        if not d:
+            return None
+        print_warn("This REPLACES your current in-memory graph. Your existing "
+                   "pickle is backed up before the new graph is saved.")
+        if ask("Proceed? (y/n)", "n").lower() != "y":
+            return None
+        try:
+            new_graph = ar.import_archive(d)
+        except ar.ArchiveError as e:
+            print_warn(f"Import failed: {e}")
+            return None
+        import shutil
+        if cfg.STATE_FILE.exists():
+            backup = cfg.STATE_FILE.with_suffix(".pkl.before-archive-import")
+            shutil.copy2(cfg.STATE_FILE, backup)
+            print_info(f"Backed up current state to {backup.name}")
+        save(new_graph)
+        s = new_graph.stats()
+        print_success(
+            f"Imported: {s['total_papers']} papers, "
+            f"{s['rated_papers']} rated. Graph saved.")
+        return new_graph
+    return None
+
+
 # ── Main menu ─────────────────────────────────────────────────────────────────
 
 def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
@@ -1808,6 +1881,7 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
         "17": "Export review pack (BibTeX / RIS / matrix / scaffold / PRISMA)",
         "18": "Living review (watch queries — what's new since last check)",
         "19": "Graph capsules — share / merge with a collaborator (social-psyche)",
+        "20": "Open archive — export/import full graph, zero lock-in (JSONL/NPZ)",
         "q": "Save & quit",
     }
     while True:
@@ -1842,7 +1916,8 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
         choice = ask("Choose", "1").strip().lower()
 
         if choice == "q":
-            break
+            return graph          # caller must save THIS object (archive
+                                  # import may have replaced the original)
         elif choice == "1":
             search_session(graph, plot=plot)
         elif choice == "2":
@@ -1893,6 +1968,10 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
             living_review_session(graph)
         elif choice == "19":
             capsule_session(graph)
+        elif choice == "20":
+            new_graph = archive_session(graph)
+            if new_graph is not None:
+                graph = new_graph
         else:
             print_warn("Unknown option.")
 
@@ -2177,7 +2256,9 @@ def main():
             save(graph)
 
     try:
-        main_menu(graph, plot=plot)
+        result = main_menu(graph, plot=plot)
+        if result is not None:
+            graph = result    # archive import may have swapped the graph
     except KeyboardInterrupt:
         print("\n[Interrupted]")
 

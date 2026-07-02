@@ -8,6 +8,24 @@ A **graph-based literature search assistant** that learns your research interest
 
 **No cloud accounts, no subscriptions, no data leaves your machine.** Everything runs locally.
 
+## Why this exists
+
+Knowledge is a common good. This project defends three non-negotiables:
+
+1. **No monopoly on the topology of knowledge.** The *structure* of a field —
+   what connects to what, what matters, where the gaps are — must never be
+   lockable behind a corporate platform. GPL-3.0-or-later guarantees every
+   derivative stays free; the open archive format (menu 20) guarantees even
+   *your own data* is never hostage to this tool.
+2. **Share verifiable topology, not raw text.** Copyright locks text; it
+   cannot lock structure. Capsules carry embeddings + graph structure with
+   cryptographic signatures — the next generation inherits verified maps of
+   knowledge, not paywalled PDFs.
+3. **Federated and survivable.** No server, no registry, no company. Every
+   researcher runs their own node; graphs merge peer-to-peer over an
+   encrypted channel; published capsules can be mirrored by anyone, anywhere.
+   Nothing here can be acquired, shut down, or enclosed.
+
 ---
 
 ## What does it do? (The 30-second version)
@@ -589,6 +607,30 @@ The menu offers four modes:
 
 Gromov–Wasserstein needs the optional extra: install ResearchBuddy editable
 with `pip install -e .[social]` (see install note below).
+
+### 16. Open Archive — Zero Lock-In (Menu option 20)
+
+Your working graph lives in a pickle for speed — but a pickle is readable
+only by this tool. If your knowledge topology could only be opened by one
+program, that program would be the very monopoly this project opposes. So
+menu 20 exports **everything** to open, hash-verified formats:
+
+| File | Format | Contents |
+|---|---|---|
+| `papers.jsonl` | JSON lines | every metadata field of every paper |
+| `edges.jsonl` | JSON lines | all graph layers with edge attributes |
+| `embeddings.npz` | pickle-free NPZ | paper + per-section embeddings |
+| `state.json` | JSON | alpha, learned scoring weights |
+| `manifest.json` | JSON | format version + sha256 of every file |
+
+Readable from any language, greppable, diffable, mirrorable.
+`import_archive` rebuilds a full working graph from these files alone —
+the pickle is a cache, not a prison. Tampering is detected via the manifest
+hashes before any import.
+
+Archives are *personal backups* (they contain abstracts and file paths).
+To share topology publicly, export a privacy-scrubbed capsule (menu 19) and
+sign it with `social-psyche sign` — that's the publishable artifact.
 
 #### Snowball frontier walk (improved)
 
