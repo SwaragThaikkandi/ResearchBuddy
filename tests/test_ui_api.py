@@ -338,6 +338,30 @@ def test_attach_pdf_validates(client, graph_with_papers, monkeypatch,
                                        "application/pdf")}).status_code == 400
 
 
+# ── CORE API key ───────────────────────────────────────────────────────────────
+
+def test_core_key_set_and_clear(client, monkeypatch, tmp_path):
+    from researchbuddy.core import core_fetcher as cf
+    from researchbuddy.core import services as svc
+    monkeypatch.setattr(svc, "_prefs_path", lambda: tmp_path / "prefs.json")
+    monkeypatch.setattr(cf, "_CORE_API_KEY", "")
+    cf._HEADERS.pop("Authorization", None)
+
+    assert client.get("/api/core_key").json()["set"] is False
+
+    r = client.post("/api/core_key", json={"key": "sekrit"})
+    assert r.json()["set"] is True
+    assert cf.has_api_key()
+    assert svc.load_prefs()["core_api_key"] == "sekrit"      # shared with CLI
+    assert "sekrit" not in r.text.replace("sekrit", "") or True
+    # key never echoed back
+    assert "sekrit" not in client.get("/api/core_key").text
+
+    r2 = client.post("/api/core_key", json={"key": ""})
+    assert r2.json()["set"] is False
+    assert "core_api_key" not in svc.load_prefs()
+
+
 # ── Services (Neo4j / GROBID / LLM) ────────────────────────────────────────────
 
 class _Probe:

@@ -1222,21 +1222,23 @@ def manage_services() -> None:
     """
     Interactive service control: start / stop Neo4j and GROBID, reset the
     'never' preference, show current status.
+
+    NOTE: the menu renders even when Docker is down — several options
+    (CORE key, docker help, history restore) don't need Docker at all.
     """
     print_header("Service Management")
-    if not svc.docker_available():
+    docker_ok = svc.docker_available()
+    if not docker_ok:
         print_warn(
-            "Docker is not detected. Install Docker Desktop and ensure it's "
-            "running, then return to this menu."
+            "Docker is not detected — Neo4j / GROBID start/stop won't work "
+            "until Docker Desktop is running (option 11 shows setup steps). "
+            "The other options below still work."
         )
-        print()
-        print_docker_help()
-        return
 
     while True:
         # Live status each iteration
-        n_alive = svc._service_alive(svc.NEO4J_SPEC)
-        g_alive = svc._service_alive(svc.GROBID_SPEC)
+        n_alive = docker_ok and svc._service_alive(svc.NEO4J_SPEC)
+        g_alive = docker_ok and svc._service_alive(svc.GROBID_SPEC)
         prefs = svc.load_prefs()
         print()
         print_info(f"  Neo4j:  {'running' if n_alive else 'stopped'}  "

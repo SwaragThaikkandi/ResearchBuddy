@@ -631,7 +631,24 @@ function renderServices() {
   $("#sv-neo4j-use").textContent =
     s.backend === "Neo4j" ? "Active backend ✓" : "Use as backend now";
 }
-async function loadServices() { await pollServices(); renderServices(); }
+async function loadServices() {
+  await pollServices(); renderServices();
+  try {
+    const k = await api("/api/core_key");
+    $("#sv-core-dot").className = "dot " + (k.set ? "on" : "dim");
+    $("#sv-core-status").textContent = k.set
+      ? "key set — fast lane active" : "no key — polite (slow) rate";
+  } catch (e) {}
+}
+$("#sv-core-save").onclick = async () => {
+  try {
+    const r = await api("/api/core_key", { key: $("#sv-core-key").value });
+    $("#sv-core-key").value = "";
+    $("#sv-core-dot").className = "dot " + (r.set ? "on" : "dim");
+    $("#sv-core-status").textContent = r.set
+      ? "key saved — fast lane active" : "key cleared";
+  } catch (e) { $("#sv-core-status").textContent = "error: " + e.message; }
+};
 
 async function svcAction(name, action, statusEl) {
   $(statusEl).textContent = action + "ing… (docker can take ~30 s)";

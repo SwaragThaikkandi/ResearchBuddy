@@ -135,6 +135,17 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
     state = UIState(graph)
     app.state.rb = state
 
+    # Reapply a saved CORE API key (core_fetcher reads env only at import;
+    # the key lives in service prefs, shared with the CLI).
+    try:
+        from researchbuddy.core import core_fetcher
+        from researchbuddy.core import services as svc
+        _saved_key = (svc.load_prefs().get("core_api_key") or "").strip()
+        if _saved_key and not core_fetcher.has_api_key():
+            core_fetcher.set_api_key(_saved_key)
+    except Exception as e:                            # pragma: no cover
+        logger.debug("CORE key pref load skipped: %s", e)
+
     def _save():
         if autosave:
             try:
@@ -628,6 +639,31 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
         if spec is None:
             raise HTTPException(400, "name must be 'neo4j' or 'grobid'")
         return {"ok": bool(svc.stop_service(spec))}
+
+    @app.get("/api/core_key")
+    def core_key_status():
+        from researchbuddy.core import core_fetcher
+        return {"set": core_fetcher.has_api_key()}
+
+    @app.post("/api/core_key")
+    def core_key_set(body: dict):
+        """Apply a CORE API key live + persist it in service prefs (same
+        storage the CLI uses, so both surfaces stay in sync). Empty key
+        clears it. The key itself is never echoed back."""
+        from researchbuddy.core import core_fetcher
+        from researchbuddy.core import services as svc
+        key = (body.get("key") or "").strip()
+        core_fetcher.set_api_key(key)
+        try:
+            prefs = svc.load_prefs()
+            if key:
+                prefs["core_api_key"] = key
+            else:
+                prefs.pop("core_api_key", None)
+            svc.save_prefs(prefs)
+        except Exception as e:                       # pragma: no cover
+            logger.warning("could not persist CORE key: %s", e)
+        return {"set": core_fetcher.has_api_key()}
 
     @app.post("/api/switch_backend")
     def switch_backend():

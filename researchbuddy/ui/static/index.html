@@ -193,6 +193,20 @@
         just reduced.</p>
     </div>
     <div class="card">
+      <h3><i id="sv-core-dot" class="dot"></i> CORE API key
+        <span class="res-meta">faster full-text enrichment</span></h3>
+      <p class="note">Free key from
+        <a href="https://core.ac.uk/services/api" target="_blank">core.ac.uk/services/api</a>.
+        Without one, CORE access is rate-limited to ~1 request/second;
+        with one it's ~7× faster. Saved locally, shared with the CLI.</p>
+      <div class="form row">
+        <input id="sv-core-key" type="password"
+               placeholder="paste CORE API key (blank = clear)">
+        <button id="sv-core-save" class="primary">Save key</button>
+        <span id="sv-core-status"></span>
+      </div>
+    </div>
+    <div class="card">
       <h3>Active graph backend: <code id="sv-backend">…</code></h3>
       <p class="note">"Use as backend now" saves your work, starts Neo4j if
         needed, and reloads the graph onto it — no restart required.</p>
