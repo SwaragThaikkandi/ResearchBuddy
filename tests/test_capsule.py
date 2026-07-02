@@ -124,6 +124,76 @@ def test_merge_private_capsule_does_not_import(sample_papers):
     assert any("Private capsule" in n for n in report.notes)
 
 
+# ── Untrusted-capsule validation ───────────────────────────────────────────────
+
+def test_loads_rejects_garbage_bytes():
+    import pytest as _pytest
+    with _pytest.raises(cap.CapsuleError):
+        cap.loads_capsule(b"this is not a zip")
+
+
+def test_loads_rejects_newer_version(graph_with_papers):
+    capsule = cap.export_capsule(graph_with_papers)
+    capsule.version = 999
+    blob = cap.dumps_capsule(capsule)
+    import pytest as _pytest
+    with _pytest.raises(cap.CapsuleError, match="newer than supported"):
+        cap.loads_capsule(blob)
+
+
+def test_loads_rejects_out_of_range_idx(graph_with_papers):
+    capsule = cap.export_capsule(graph_with_papers, share_identifiers=True)
+    capsule.nodes[0]["idx"] = 10_000          # beyond embedding rows
+    blob = cap.dumps_capsule(capsule)
+    import pytest as _pytest
+    with _pytest.raises(cap.CapsuleError, match="idx"):
+        cap.loads_capsule(blob)
+
+
+def test_loads_rejects_bad_edges(graph_with_papers):
+    capsule = cap.export_capsule(graph_with_papers)
+    capsule.edges_sem = [(0, 99_999, 1.0)]     # endpoint out of range
+    blob = cap.dumps_capsule(capsule)
+    import pytest as _pytest
+    with _pytest.raises(cap.CapsuleError, match="endpoints"):
+        cap.loads_capsule(blob)
+
+
+def test_loads_rejects_nan_embeddings(graph_with_papers):
+    capsule = cap.export_capsule(graph_with_papers)
+    capsule.embeddings[0, 0] = np.nan
+    blob = cap.dumps_capsule(capsule)
+    import pytest as _pytest
+    with _pytest.raises(cap.CapsuleError, match="NaN"):
+        cap.loads_capsule(blob)
+
+
+def test_merge_dim_mismatch_imports_metadata_only(sample_papers):
+    """Peer on a different embedding model must not poison the local graph."""
+    for i, m in enumerate(sample_papers):
+        m.doi = f"10.123/paper{i}"
+    gA = _graph_from(sample_papers)
+    capsule = cap.export_capsule(gA, share_identifiers=True)
+    # Simulate a peer with 128-dim embeddings.
+    capsule.embeddings = np.random.RandomState(0)\
+        .randn(capsule.embeddings.shape[0], 128).astype(np.float32)
+    capsule.centroids = np.zeros((0, 128), dtype=np.float32)
+
+    gB2 = _graph_from(sample_papers[:1])   # one local paper fixes the local dim
+    for i, m in enumerate(gB2.all_papers()):
+        m.doi = "10.999/other"
+    report = cap.merge_capsule(gB2, capsule)
+
+    assert any("dim mismatch" in n.lower() for n in report.notes)
+    assert report.imported == 5
+    # Imported papers are metadata stubs — no foreign-dim embeddings inside.
+    for m in gB2.all_papers():
+        if m.source == "capsule":
+            assert m.embedding is None
+    # NN matching was skipped, not garbage-matched.
+    assert report.shared_by_embedding == 0
+
+
 def test_merge_deltacon_on_shared_subgraph(sample_papers):
     for i, m in enumerate(sample_papers):
         m.doi = f"10.123/paper{i}"

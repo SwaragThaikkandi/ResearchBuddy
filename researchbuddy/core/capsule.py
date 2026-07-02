@@ -39,6 +39,21 @@ from researchbuddy.core.graph_model import HierarchicalResearchGraph, PaperMeta
 logger = logging.getLogger(__name__)
 
 
+class CapsuleError(ValueError):
+    """Raised when a capsule is malformed, oversized, or unsupported.
+
+    Capsules can arrive from untrusted network peers (social-psyche), so a
+    bad capsule must fail loudly here — never crash deep inside a merge or
+    silently corrupt the local graph."""
+
+
+# Hard ceilings for untrusted input. Generous for real research graphs
+# (100k papers x 768-dim float32 ≈ 300 MB), tight enough to stop zip bombs.
+MAX_CAPSULE_NODES        = 100_000
+MAX_CAPSULE_EDGES        = 2_000_000
+MAX_DECOMPRESSED_MEMBER  = 512 * 1024 * 1024   # per zip member, bytes
+
+
 # ── In-memory capsule ─────────────────────────────────────────────────────────
 
 @dataclass
@@ -181,24 +196,102 @@ def dumps_capsule(capsule: GraphCapsule) -> bytes:
 
 
 def loads_capsule(data: bytes) -> GraphCapsule:
-    """Inverse of dumps_capsule: parse `.rbcapsule` bytes from memory."""
-    with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
-        meta = json.loads(zf.read("meta.json").decode("utf-8"))
-        arr = np.load(io.BytesIO(zf.read("arrays.npz")))
-        embeddings = arr["embeddings"]
-        centroids = arr["centroids"]
-    return GraphCapsule(
-        version=meta["version"],
-        created=meta["created"],
-        privacy=meta["privacy"],
-        nodes=meta["nodes"],
-        embeddings=embeddings,
-        edges_sem=[tuple(e) for e in meta["edges_sem"]],
-        edges_cit=[tuple(e) for e in meta["edges_cit"]],
-        centroids=centroids,
-        cluster_sizes=meta["cluster_sizes"],
-        stats=meta["stats"],
-    )
+    """Inverse of dumps_capsule: parse and VALIDATE `.rbcapsule` bytes.
+
+    Treats the input as untrusted (it may come from a network peer): guards
+    against zip bombs before decompression and structural attacks after.
+    Raises CapsuleError on anything suspicious.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
+            # Zip-bomb guard: check declared decompressed sizes BEFORE reading.
+            for info in zf.infolist():
+                if info.file_size > MAX_DECOMPRESSED_MEMBER:
+                    raise CapsuleError(
+                        f"capsule member {info.filename!r} declares "
+                        f"{info.file_size} decompressed bytes (max "
+                        f"{MAX_DECOMPRESSED_MEMBER}) — rejecting")
+            meta = json.loads(zf.read("meta.json").decode("utf-8"))
+            arr = np.load(io.BytesIO(zf.read("arrays.npz")))   # allow_pickle=False
+            embeddings = arr["embeddings"]
+            centroids = arr["centroids"]
+    except CapsuleError:
+        raise
+    except Exception as e:
+        raise CapsuleError(f"not a readable capsule: {e}") from e
+
+    try:
+        capsule = GraphCapsule(
+            version=int(meta["version"]),
+            created=str(meta["created"]),
+            privacy=dict(meta["privacy"]),
+            nodes=list(meta["nodes"]),
+            embeddings=embeddings,
+            edges_sem=[tuple(e) for e in meta["edges_sem"]],
+            edges_cit=[tuple(e) for e in meta["edges_cit"]],
+            centroids=centroids,
+            cluster_sizes=list(meta["cluster_sizes"]),
+            stats=dict(meta["stats"]),
+        )
+    except (KeyError, TypeError, ValueError) as e:
+        raise CapsuleError(f"capsule metadata malformed: {e}") from e
+    validate_capsule(capsule)
+    return capsule
+
+
+def validate_capsule(capsule: GraphCapsule) -> None:
+    """Structural validation of a (possibly hostile) capsule.
+
+    Every index used later by merge_capsule is bounds-checked HERE, once,
+    so the merge itself can trust the data. Raises CapsuleError.
+    """
+    if capsule.version > CAPSULE_VERSION:
+        raise CapsuleError(
+            f"capsule version {capsule.version} is newer than supported "
+            f"({CAPSULE_VERSION}) — upgrade ResearchBuddy")
+
+    emb = capsule.embeddings
+    if not isinstance(emb, np.ndarray) or emb.ndim != 2:
+        raise CapsuleError("embeddings must be a 2-D array")
+    n = emb.shape[0]
+    if n > MAX_CAPSULE_NODES:
+        raise CapsuleError(f"{n} nodes exceeds cap {MAX_CAPSULE_NODES}")
+    if len(capsule.nodes) != n:
+        raise CapsuleError(
+            f"node list ({len(capsule.nodes)}) and embedding rows ({n}) disagree")
+    if not np.isfinite(emb).all():
+        raise CapsuleError("embeddings contain NaN/Inf")
+
+    seen_idx: set[int] = set()
+    for node in capsule.nodes:
+        if not isinstance(node, dict):
+            raise CapsuleError("node entries must be dicts")
+        idx = node.get("idx")
+        if not isinstance(idx, int) or not (0 <= idx < n) or idx in seen_idx:
+            raise CapsuleError(f"node idx {idx!r} out of range or duplicated")
+        seen_idx.add(idx)
+
+    for name, edges in (("edges_sem", capsule.edges_sem),
+                        ("edges_cit", capsule.edges_cit)):
+        if len(edges) > MAX_CAPSULE_EDGES:
+            raise CapsuleError(f"{name}: {len(edges)} edges exceeds cap")
+        for e in edges:
+            if len(e) != 3:
+                raise CapsuleError(f"{name}: edge {e!r} malformed")
+            i, j, w = e
+            if not (isinstance(i, int) and isinstance(j, int)
+                    and 0 <= i < n and 0 <= j < n):
+                raise CapsuleError(f"{name}: edge endpoints {i!r},{j!r} invalid")
+            if not np.isfinite(float(w)):
+                raise CapsuleError(f"{name}: non-finite edge weight")
+
+    cent = capsule.centroids
+    if not isinstance(cent, np.ndarray) or cent.ndim != 2:
+        raise CapsuleError("centroids must be a 2-D array")
+    if n and cent.shape[0] and cent.shape[1] != emb.shape[1]:
+        raise CapsuleError("centroid dim disagrees with embedding dim")
+    if not np.isfinite(cent).all():
+        raise CapsuleError("centroids contain NaN/Inf")
 
 
 def write_capsule(capsule: GraphCapsule, out_path: Path) -> Path:
@@ -267,6 +360,10 @@ def merge_capsule(
     """
     from researchbuddy.core import graph_distance as gd
 
+    # Defense in depth: callers should already have validated (loads_capsule
+    # does), but a capsule constructed in memory could bypass that path.
+    validate_capsule(capsule)
+
     report = MergeReport()
 
     my_papers = [m for m in graph.all_papers()
@@ -277,12 +374,25 @@ def merge_capsule(
                           for m in my_papers])
                if my_papers else np.zeros((0, capsule.embeddings.shape[1])))
 
+    # Embedding-space compatibility: a peer on a different embedding model
+    # (e.g. 384-dim MiniLM vs 768-dim nomic) produces vectors that are
+    # meaningless in our space. Importing them would poison the local graph;
+    # NN-matching against them would be noise. Fall back to metadata-only.
+    cap_dim = capsule.embeddings.shape[1] if capsule.n_nodes() else 0
+    dims_compatible = (not my_papers) or (cap_dim == my_embs.shape[1])
+    if not dims_compatible:
+        report.notes.append(
+            f"Embedding dim mismatch (peer {cap_dim} vs local "
+            f"{my_embs.shape[1]}): peer vectors discarded; identified papers "
+            "imported metadata-only (harvest full text to embed locally); "
+            "structural matching skipped.")
+
     has_ids = capsule.privacy.get("share_identifiers", False)
     cap_dois = capsule.doi_set()
 
     # ── 1. Node reconciliation ────────────────────────────────────────────
     for node in capsule.nodes:
-        idx = node["idx"]
+        idx = node["idx"]                      # bounds-checked by validate_capsule
         doi = (node.get("doi") or "").lower()
         if doi:
             if doi in my_dois:
@@ -299,12 +409,15 @@ def merge_capsule(
                     is_peer_reviewed=node.get("is_peer_reviewed"),
                     source="capsule",
                 )
-                emb = np.asarray(capsule.embeddings[idx], dtype=float)
-                graph.add_paper(meta, emb)
+                if dims_compatible:
+                    emb = np.asarray(capsule.embeddings[idx], dtype=float)
+                    graph.add_paper(meta, emb)
+                else:
+                    graph.add_paper(meta, None)   # metadata stub; embed later
                 report.imported += 1
                 continue
         # No usable DOI → structural match by embedding NN.
-        if my_embs.shape[0]:
+        if my_embs.shape[0] and dims_compatible:
             v = np.asarray(capsule.embeddings[idx], float)
             v = v / (np.linalg.norm(v) or 1.0)
             best = float(np.max(my_embs @ v))
