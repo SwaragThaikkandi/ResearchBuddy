@@ -8,6 +8,31 @@ A **graph-based literature search assistant** that learns your research interest
 
 **No cloud accounts, no subscriptions, no data leaves your machine.** Everything runs locally.
 
+## Web UI
+
+```bash
+pip install -e ".[ui]"
+researchbuddy-ui          # serves http://127.0.0.1:8230 and opens your browser
+```
+
+A local web app — no cloud, no account, bound to 127.0.0.1 only. The
+frontend is bundled vanilla JS (no npm, no CDN — fully offline). Tabs:
+
+- **Graph** — interactive force-directed map of your research landscape
+  (click a node for details; colors: rated / paper / your writing / full text)
+- **Discover** — intent + keyword search with **focus mode** (type to pick
+  anchor papers from your library), rate results 1–10 inline
+- **Snowball** — backward/forward citation expansion with saturation stats
+- **Harvest** — legal open-access full-text autopilot
+- **Review** — one-click review pack (BibTeX / RIS / matrix / scaffold / PRISMA)
+- **Watches** — living-review queries
+- **Collaborate** — social-psyche: your identity fingerprint, contribution
+  ledger (with chain verification), pinned peers, **live secure merge**
+  (serve/connect), and signed capsule publication
+
+The CLI (`researchbuddy`) remains fully equivalent — the UI is a view over
+the same engine and the same local data.
+
 ## Why this exists
 
 Knowledge is a common good. This project defends three non-negotiables:

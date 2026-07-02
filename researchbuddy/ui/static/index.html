@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ResearchBuddy</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>Research<span>Buddy</span></h1>
+  <nav id="tabs">
+    <button data-tab="graph" class="active">Graph</button>
+    <button data-tab="discover">Discover</button>
+    <button data-tab="snowball">Snowball</button>
+    <button data-tab="harvest">Harvest</button>
+    <button data-tab="review">Review</button>
+    <button data-tab="watches">Watches</button>
+    <button data-tab="collab">Collaborate</button>
+  </nav>
+  <div id="statbar">loading…</div>
+</header>
+
+<main>
+  <!-- ── Graph ─────────────────────────────────────────────────────────── -->
+  <section id="tab-graph" class="tab active">
+    <div class="toolbar">
+      <label>Min edge weight <input id="g-minw" type="range" min="0.3"
+        max="0.9" step="0.05" value="0.45"></label>
+      <button id="g-reload">Reload</button>
+      <button id="g-rebuild">Rebuild hierarchy</button>
+      <span class="legend">
+        <i class="dot rated"></i>rated <i class="dot seed"></i>paper
+        <i class="dot thought"></i>your writing <i class="dot ft"></i>full text
+      </span>
+    </div>
+    <div id="graph-wrap">
+      <canvas id="graph-canvas"></canvas>
+      <aside id="node-panel" class="hidden"></aside>
+    </div>
+  </section>
+
+  <!-- ── Discover ──────────────────────────────────────────────────────── -->
+  <section id="tab-discover" class="tab">
+    <div class="form">
+      <input id="d-intent" placeholder="Research intent (natural language, optional)">
+      <input id="d-keywords" placeholder="Extra keywords, comma-separated (optional)">
+      <div class="focus-row">
+        <input id="d-focus-q" placeholder="Focus mode: search YOUR library to pick anchor papers…">
+        <div id="d-focus-hits"></div>
+        <div id="d-focus-chips"></div>
+      </div>
+      <button id="d-run" class="primary">Search</button>
+      <span id="d-status"></span>
+    </div>
+    <div id="d-results" class="results"></div>
+  </section>
+
+  <!-- ── Snowball ──────────────────────────────────────────────────────── -->
+  <section id="tab-snowball" class="tab">
+    <div class="form row">
+      <label><input type="checkbox" id="s-back" checked> backward (references)</label>
+      <label><input type="checkbox" id="s-fwd" checked> forward (citing)</label>
+      <label><input type="checkbox" id="s-reset"> reset frontier</label>
+      <button id="s-run" class="primary">Snowball</button>
+      <span id="s-status"></span>
+    </div>
+    <div id="s-stats" class="banner hidden"></div>
+    <div id="s-results" class="results"></div>
+  </section>
+
+  <!-- ── Harvest ───────────────────────────────────────────────────────── -->
+  <section id="tab-harvest" class="tab">
+    <p class="note">Fetches full texts ONLY from legal open-access sources
+      (arXiv → Unpaywall → OpenAlex → Europe PMC). Paywalls are skipped,
+      never circumvented. License + provenance recorded per download.</p>
+    <div class="form row">
+      <label>Max papers <input id="h-n" type="number" value="10" min="1"
+        max="100" style="width:5em"></label>
+      <button id="h-run" class="primary">Harvest OA full texts</button>
+      <span id="h-status"></span>
+    </div>
+    <pre id="h-log" class="log hidden"></pre>
+  </section>
+
+  <!-- ── Review ────────────────────────────────────────────────────────── -->
+  <section id="tab-review" class="tab">
+    <p class="note">One click exports BibTeX, RIS, a synthesis matrix, a
+      themed review scaffold, and a PRISMA flow report. Only bibliographic
+      facts + your own ratings — no third-party text is reproduced.</p>
+    <div class="form row">
+      <label><input type="checkbox" id="r-llm"> use local LLM for theme synthesis</label>
+      <button id="r-run" class="primary">Export review pack</button>
+      <span id="r-status"></span>
+    </div>
+    <div id="r-out" class="banner hidden"></div>
+  </section>
+
+  <!-- ── Watches ───────────────────────────────────────────────────────── -->
+  <section id="tab-watches" class="tab">
+    <div class="form row">
+      <input id="w-q" placeholder="Watch query (topic)">
+      <input id="w-kw" placeholder="keywords, comma-separated">
+      <button id="w-add">Add watch</button>
+      <button id="w-check" class="primary">Check all now</button>
+      <span id="w-status"></span>
+    </div>
+    <div id="w-list"></div>
+    <div id="w-results" class="results"></div>
+  </section>
+
+  <!-- ── Collaborate (social-psyche) ───────────────────────────────────── -->
+  <section id="tab-collab" class="tab">
+    <div id="c-unavailable" class="banner hidden">social-psyche is not
+      installed. <code>pip install -e &lt;path&gt;/social-psyche[net]</code></div>
+    <div id="c-body">
+      <div class="card">
+        <h3>My identity</h3>
+        <p class="note">Read this fingerprint to your collaborator over a
+          trusted channel (phone / in person) so they can pin you.</p>
+        <code id="c-fp">…</code>
+      </div>
+      <div class="card">
+        <h3>Contribution ledger</h3>
+        <div id="c-ledger">…</div>
+      </div>
+      <div class="card">
+        <h3>Pinned peers</h3>
+        <div id="c-peers"></div>
+        <div class="form row">
+          <input id="cp-name" placeholder="name" style="width:7em">
+          <input id="cp-host" placeholder="host" style="width:10em">
+          <input id="cp-port" placeholder="port" style="width:5em">
+          <input id="cp-fp" placeholder="fingerprint (verified out of band)">
+          <button id="cp-add">Pin peer</button>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Live merge (secure, no files)</h3>
+        <div class="form row">
+          <select id="cm-mode">
+            <option value="connect">connect (dial peer)</option>
+            <option value="serve">serve (wait for peer)</option>
+          </select>
+          <select id="cm-peer"><option value="">— pinned peer —</option></select>
+          <input id="cm-host" placeholder="host (connect)" style="width:10em">
+          <input id="cm-port" placeholder="9333" style="width:5em">
+          <label><input type="checkbox" id="cm-ids" checked> share DOIs+titles</label>
+          <button id="cm-run" class="primary">Merge</button>
+          <span id="cm-status"></span>
+        </div>
+        <div id="cm-out" class="banner hidden"></div>
+      </div>
+      <div class="card">
+        <h3>Publish topology</h3>
+        <div class="form row">
+          <label><input type="checkbox" id="ce-ids"> include DOIs+titles</label>
+          <button id="ce-run">Export + sign capsule</button>
+        </div>
+        <div id="ce-out" class="banner hidden"></div>
+      </div>
+    </div>
+  </section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>
