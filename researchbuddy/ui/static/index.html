@@ -18,7 +18,9 @@
     <button data-tab="review">Review</button>
     <button data-tab="watches">Watches</button>
     <button data-tab="collab">Collaborate</button>
+    <button data-tab="services">Services</button>
   </nav>
+  <div id="svcbar" title="service status — click Services tab to manage"></div>
   <div id="statbar">loading…</div>
 </header>
 
@@ -99,6 +101,8 @@
       <label><input type="checkbox" id="s-back" checked> backward (references)</label>
       <label><input type="checkbox" id="s-fwd" checked> forward (citing)</label>
       <label><input type="checkbox" id="s-reset"> reset frontier</label>
+      <label>show top <input id="s-n" type="number" value="10" min="1"
+        max="30" style="width:4.5em"> papers</label>
       <button id="s-run" class="primary">Snowball</button>
       <span id="s-status"></span>
     </div>
@@ -144,6 +148,55 @@
     </div>
     <div id="w-list"></div>
     <div id="w-results" class="results"></div>
+  </section>
+
+  <!-- ── Services (Neo4j / GROBID / LLM) ───────────────────────────────── -->
+  <section id="tab-services" class="tab">
+    <div id="sv-docker" class="banner hidden warn">Docker not detected —
+      install/start Docker Desktop to launch Neo4j and GROBID with one click.
+    </div>
+    <div class="card">
+      <h3><i id="sv-neo4j-dot" class="dot"></i> Neo4j
+        <span class="res-meta">graph database backend</span></h3>
+      <p class="note">Persistent graph storage + the Neo4j Browser for
+        interactive Cypher exploration. ResearchBuddy works fine on the
+        built-in NetworkX backend; Neo4j adds durability and live queries.</p>
+      <div id="sv-neo4j-info" class="res-meta"></div>
+      <div class="form row">
+        <button id="sv-neo4j-start">Start</button>
+        <button id="sv-neo4j-stop">Stop</button>
+        <button id="sv-neo4j-use" class="primary">Use as backend now</button>
+        <a id="sv-neo4j-browser" href="http://localhost:7474" target="_blank">
+          <button>Open Neo4j Browser</button></a>
+        <span id="sv-neo4j-status"></span>
+      </div>
+    </div>
+    <div class="card">
+      <h3><i id="sv-grobid-dot" class="dot"></i> GROBID
+        <span class="res-meta">scientific-PDF parser</span></h3>
+      <p class="note">Dramatically better PDF extraction (sections,
+        references, figures, equations). Without it, imports fall back to
+        pdfplumber — usable, but shallower graph nodes. Start it BEFORE
+        importing PDFs in the Library tab.</p>
+      <div class="form row">
+        <button id="sv-grobid-start">Start</button>
+        <button id="sv-grobid-stop">Stop</button>
+        <span id="sv-grobid-status"></span>
+      </div>
+    </div>
+    <div class="card">
+      <h3><i id="sv-llm-dot" class="dot"></i> Local LLM (Ollama)
+        <span class="res-meta">HyDE · query expansion · reranking · synthesis</span></h3>
+      <div id="sv-llm-info" class="res-meta"></div>
+      <p class="note">Runs outside Docker: <code>ollama serve</code> then
+        <code>ollama pull phi3.5</code>. Search works without it — quality is
+        just reduced.</p>
+    </div>
+    <div class="card">
+      <h3>Active graph backend: <code id="sv-backend">…</code></h3>
+      <p class="note">"Use as backend now" saves your work, starts Neo4j if
+        needed, and reloads the graph onto it — no restart required.</p>
+    </div>
   </section>
 
   <!-- ── Collaborate (social-psyche) ───────────────────────────────────── -->
@@ -199,6 +252,13 @@
     </div>
   </section>
 </main>
+
+<!-- Global progress overlay (browser-install style: bar + explanation) -->
+<div id="progress" class="hidden">
+  <div id="progress-bar"><div id="progress-fill"></div></div>
+  <div id="progress-text">working…</div>
+</div>
+
 <script src="/static/app.js"></script>
 </body>
 </html>

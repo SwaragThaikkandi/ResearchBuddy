@@ -1189,6 +1189,35 @@ def upload_thought_session(graph: HierarchicalResearchGraph) -> None:
 
 # ── Service management (on-demand) ────────────────────────────────────────────
 
+def print_docker_help() -> None:
+    """Step-by-step Docker setup for Neo4j + GROBID (shown whenever Docker
+    or a service is missing, so nobody has to hunt through the README)."""
+    print_info("How to set up the optional services with Docker:")
+    print_info("  1. Install Docker Desktop:  https://www.docker.com/products/docker-desktop/")
+    print_info("     (Windows: enable WSL2 when the installer asks; then start Docker Desktop)")
+    print_info("  2. Verify it works:         docker --version")
+    print_info("  3. Start Neo4j (graph database backend + browser):")
+    print_info("       docker run -d --name researchbuddy-neo4j -p 7474:7474 -p 7687:7687 \\")
+    print_info("         -e NEO4J_AUTH=neo4j/researchbuddy neo4j:5-community")
+    print_info("  4. Start GROBID (scientific-PDF parser — much richer imports):")
+    print_info("       docker run -d --name researchbuddy-grobid -p 8070:8070 lfoppiano/grobid:0.8.1")
+    print_info("     First GROBID request loads its ML models (~30 s) — be patient.")
+    print_info("  5. Re-launch ResearchBuddy (or use this menu) — services are")
+    print_info("     auto-detected. Stop them anytime: docker stop <name>.")
+
+
+def _apply_core_key_from_prefs() -> None:
+    """Load a saved CORE API key (service prefs) into the live session."""
+    try:
+        key = (svc.load_prefs().get("core_api_key") or "").strip()
+        if key and not os.environ.get("CORE_API_KEY"):
+            from researchbuddy.core import core_fetcher
+            core_fetcher.set_api_key(key)
+            print_info("  CORE API key loaded from saved preferences.")
+    except Exception as e:
+        logger.debug("CORE key pref load skipped: %s", e)
+
+
 def manage_services() -> None:
     """
     Interactive service control: start / stop Neo4j and GROBID, reset the
@@ -1200,6 +1229,8 @@ def manage_services() -> None:
             "Docker is not detected. Install Docker Desktop and ensure it's "
             "running, then return to this menu."
         )
+        print()
+        print_docker_help()
         return
 
     while True:
@@ -1222,6 +1253,10 @@ def manage_services() -> None:
         print_info("  [7] Set Neo4j password for this session")
         print_info("  [8] Restore graph from a history snapshot")
         print_info("  [9] Compact history (delete old snapshots, keep stats log)")
+        from researchbuddy.core import core_fetcher as _cf
+        core_tag = "set" if _cf.has_api_key() else "not set — slower CORE access"
+        print_info(f"  [10] Set CORE API key ({core_tag})")
+        print_info("  [11] Docker setup instructions (Neo4j / GROBID)")
         print_info("  [b] Back to main menu")
 
         choice = ask("Choose", "b").strip().lower()
@@ -1290,6 +1325,23 @@ def manage_services() -> None:
             _restore_from_snapshot()
         elif choice == "9":
             _compact_history_menu()
+        elif choice == "10":
+            from researchbuddy.core import core_fetcher
+            print_info("Free key: https://core.ac.uk/services/api "
+                       "(anonymous works, but is rate-limited to ~1 req/s).")
+            key = ask("CORE API key (blank to clear)", "").strip()
+            core_fetcher.set_api_key(key)
+            prefs = svc.load_prefs()
+            if key:
+                prefs["core_api_key"] = key
+                print_success("CORE key applied to this session and saved.")
+            else:
+                prefs.pop("core_api_key", None)
+                print_info("CORE key cleared.")
+            svc.save_prefs(prefs)
+        elif choice == "11":
+            print()
+            print_docker_help()
         else:
             print_warn("Unknown option.")
 
@@ -2139,12 +2191,14 @@ def _ensure_services_at_startup() -> None:
     without the user having to export anything.
     """
     if not svc.docker_available():
-        # Tell the user why we didn't ask, instead of silently skipping.
+        # Tell the user why we didn't ask, instead of silently skipping —
+        # and show exactly how to fix it.
         print_warn(
             "Docker not detected -- can't auto-launch Neo4j / GROBID. "
-            "Install Docker Desktop and re-run, or use option 13 from the "
-            "main menu later."
+            "ResearchBuddy still works (NetworkX backend + pdfplumber "
+            "extraction), but here's how to unlock the full stack:"
         )
+        print_docker_help()
         return
 
     prefs = svc.load_prefs()
@@ -2258,6 +2312,9 @@ def main():
 
     # ── LLM status at startup ─────────────────────────────────────────────
     _show_llm_status_banner()
+
+    # ── Saved CORE API key (service menu option 10) ───────────────────────
+    _apply_core_key_from_prefs()
 
     # ── Auto-launch optional Docker services (Neo4j, GROBID) ──────────────
     # If Docker is installed, offer to start any missing service. The user's

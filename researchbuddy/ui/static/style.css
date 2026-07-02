@@ -21,6 +21,13 @@ nav button {
 }
 nav button.active { color: var(--text); border-color: var(--accent); }
 #statbar { margin-left: auto; color: var(--dim); font-size: 12px; }
+#svcbar { display: flex; gap: 8px; align-items: center; cursor: pointer; }
+.svc-chip { display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--dim); background: var(--panel2);
+  border: 1px solid var(--line); border-radius: 10px; padding: 2px 8px; }
+.svc-chip .dot { margin: 0; }
+.dot.on { background: var(--good); } .dot.off { background: var(--bad); }
+.dot.dim { background: var(--dim); }
 
 main { padding: 14px 16px; }
 .tab { display: none; }
@@ -98,6 +105,32 @@ code { background: var(--panel2); padding: 2px 6px; border-radius: 5px;
   word-break: break-all; }
 .ok { color: var(--good); } .warn { color: var(--warn); }
 .err { color: var(--bad); }
+
+/* Global progress overlay */
+#progress {
+  position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+  width: min(560px, 90vw); z-index: 50; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 10px; padding: 14px 18px;
+  box-shadow: 0 6px 24px rgba(0,0,0,.5);
+}
+#progress-bar {
+  height: 8px; background: var(--panel2); border-radius: 4px;
+  overflow: hidden; position: relative;
+}
+#progress-fill {
+  height: 100%; background: var(--accent); border-radius: 4px;
+  width: 30%; transition: width .4s ease;
+}
+#progress-fill.indeterminate {
+  width: 30%; position: absolute;
+  animation: slide 1.2s ease-in-out infinite;
+}
+@keyframes slide {
+  0% { left: -30%; } 100% { left: 100%; }
+}
+#progress-text {
+  margin-top: 8px; color: var(--dim); font-size: 12.5px; line-height: 1.4;
+}
 
 /* PDF dropzone */
 #l-drop {

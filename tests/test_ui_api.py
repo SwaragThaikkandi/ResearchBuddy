@@ -126,8 +126,9 @@ def test_snowball_endpoint(client, graph_with_papers, monkeypatch, tmp_path):
     monkeypatch.setattr(sb, "load_used_seeds", lambda p=None: set())
     monkeypatch.setattr(sb, "pick_seeds",
                         lambda g, exclude=None: graph_with_papers.all_papers()[:2])
-    monkeypatch.setattr(sb, "snowball_round",
-                        lambda g, seeds=None, directions=None: (cands, stats))
+    monkeypatch.setattr(
+        sb, "snowball_round",
+        lambda g, seeds=None, directions=None, progress=None: (cands, stats))
     from researchbuddy.core import audit
     monkeypatch.setattr(audit, "PRISMA_LOG", tmp_path / "log.jsonl")
 
@@ -254,6 +255,181 @@ def test_import_folder_endpoint(client, graph_with_papers, monkeypatch,
                        json={"path": str(ok_dir)}).status_code == 200
     assert client.post("/api/import_folder",
                        json={"path": str(tmp_path / "nope")}).status_code == 400
+
+
+# ── Progress + attach-PDF ──────────────────────────────────────────────────────
+
+def test_progress_endpoint_idle_and_active(client):
+    assert client.get("/api/progress").json() == {
+        "active": False, "pct": None, "text": ""}
+    st = client.app.state.rb
+    st.set_progress("Parsing something…", 0.4)
+    body = client.get("/api/progress").json()
+    assert body["active"] is True and body["pct"] == 0.4
+    assert "Parsing" in body["text"]
+    st.end_progress()
+    assert client.get("/api/progress").json()["active"] is False
+
+
+def test_snowball_respects_n(client, graph_with_papers, monkeypatch, tmp_path):
+    from tests.conftest import _fake_embed
+    base = graph_with_papers.all_papers()[0].title
+    cands = [PaperMeta(paper_id=f"sb_{i}", title=f"Snowballed {i}",
+                       abstract="Decision making models.",
+                       embedding=_fake_embed(base)) for i in range(8)]
+    stats = {"n_seeds": 1, "directions": ["backward"], "fetched": 8,
+             "new_unique": 8, "saturation_ratio": 1.0,
+             "seeds_remaining": 0, "saturated": False}
+    import researchbuddy.core.snowball as sb
+    monkeypatch.setattr(sb, "load_used_seeds", lambda p=None: set())
+    monkeypatch.setattr(sb, "pick_seeds",
+                        lambda g, exclude=None: graph_with_papers.all_papers()[:1])
+    monkeypatch.setattr(
+        sb, "snowball_round",
+        lambda g, seeds=None, directions=None, progress=None: (cands, stats))
+    from researchbuddy.core import audit
+    monkeypatch.setattr(audit, "PRISMA_LOG", tmp_path / "log.jsonl")
+
+    r = client.post("/api/snowball", json={"n": 3})
+    assert r.status_code == 200
+    assert len(r.json()["results"]) <= 3
+
+
+def test_attach_pdf_ingests_into_rated_paper(client, graph_with_papers,
+                                             monkeypatch, tmp_path):
+    import researchbuddy.ui.server as srv_mod
+    monkeypatch.setattr(srv_mod.cfg, "DATA_DIR", tmp_path)
+    from researchbuddy.core import audit
+    monkeypatch.setattr(audit, "PRISMA_LOG", tmp_path / "log.jsonl")
+
+    captured = {}
+
+    def fake_ingest(graph, meta, pdf_path):
+        captured["path"] = Path(pdf_path)
+        meta.filepath = str(pdf_path)
+        return {"parser": "grobid", "n_sections": 4, "n_refs": 21}
+
+    import researchbuddy.core.ingest as ingest_mod
+    monkeypatch.setattr(ingest_mod, "ingest_pdf_into_meta", fake_ingest)
+
+    pid = graph_with_papers.all_papers()[0].paper_id
+    r = client.post("/api/attach_pdf",
+                    data={"token": pid},
+                    files={"file": ("paper.pdf", b"%PDF-1.5 x",
+                                    "application/pdf")})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["n_sections"] == 4 and body["n_refs"] == 21
+    assert captured["path"].exists()          # persisted, not temp-deleted
+
+
+def test_attach_pdf_validates(client, graph_with_papers, monkeypatch,
+                              tmp_path):
+    import researchbuddy.ui.server as srv_mod
+    monkeypatch.setattr(srv_mod.cfg, "DATA_DIR", tmp_path)
+    pid = graph_with_papers.all_papers()[0].paper_id
+    # unknown token
+    assert client.post("/api/attach_pdf", data={"token": "ghost"},
+                       files={"file": ("a.pdf", b"%PDF-1.5",
+                                       "application/pdf")}).status_code == 404
+    # non-PDF payload
+    assert client.post("/api/attach_pdf", data={"token": pid},
+                       files={"file": ("a.pdf", b"<html>",
+                                       "application/pdf")}).status_code == 400
+
+
+# ── Services (Neo4j / GROBID / LLM) ────────────────────────────────────────────
+
+class _Probe:
+    def __init__(self, ok, reason=""):
+        self.ok, self.reason = ok, reason
+
+
+class _StartRes:
+    def __init__(self, started=False, already=False, error=None):
+        self.started, self.already_running, self.error = started, already, error
+
+
+def _mock_services(monkeypatch, docker=True, neo4j_http=True, bolt_ok=True,
+                   grobid=True):
+    import researchbuddy.core.services as svc
+    monkeypatch.setattr(svc, "docker_available", lambda: docker)
+    monkeypatch.setattr(
+        svc, "_service_alive",
+        lambda spec, timeout=2.0: neo4j_http if spec is svc.NEO4J_SPEC else grobid)
+    monkeypatch.setattr(svc, "probe_neo4j_bolt",
+                        lambda password="": _Probe(bolt_ok, "" if bolt_ok
+                                                   else "auth failed"))
+    return svc
+
+
+def test_services_status(client, monkeypatch):
+    _mock_services(monkeypatch)
+    import researchbuddy.ui.server as srv_mod
+    monkeypatch.setattr(srv_mod.cfg, "LLM_ENABLED", False)
+
+    s = client.get("/api/services").json()
+    assert s["docker"] is True
+    assert s["neo4j"]["http"] is True and s["neo4j"]["bolt"] is True
+    assert s["grobid"]["alive"] is True
+    assert s["llm"]["enabled"] is False
+    assert s["backend"] == "NetworkX"
+
+
+def test_services_status_degraded(client, monkeypatch):
+    _mock_services(monkeypatch, neo4j_http=True, bolt_ok=False, grobid=False)
+    import researchbuddy.ui.server as srv_mod
+    monkeypatch.setattr(srv_mod.cfg, "LLM_ENABLED", False)
+    s = client.get("/api/services").json()
+    assert s["neo4j"]["http"] is True and s["neo4j"]["bolt"] is False
+    assert "auth" in s["neo4j"]["reason"]
+    assert s["grobid"]["alive"] is False
+
+
+def test_services_start_and_stop(client, monkeypatch):
+    svc = _mock_services(monkeypatch)
+    monkeypatch.setattr(svc, "ensure_running",
+                        lambda spec, **kw: _StartRes(started=True))
+    monkeypatch.setattr(svc, "stop_service", lambda spec: True)
+    # avoid mutating real process env/config during the test
+    monkeypatch.setattr("importlib.reload", lambda m: m)
+    monkeypatch.setenv("RESEARCHBUDDY_NEO4J_ENABLED", "")
+
+    r = client.post("/api/services/start", json={"name": "grobid"})
+    assert r.json()["started"] is True
+    r2 = client.post("/api/services/stop", json={"name": "neo4j"})
+    assert r2.json()["ok"] is True
+    assert client.post("/api/services/start",
+                       json={"name": "bogus"}).status_code == 400
+
+
+def test_services_start_requires_docker(client, monkeypatch):
+    _mock_services(monkeypatch, docker=False)
+    r = client.post("/api/services/start", json={"name": "neo4j"})
+    assert r.status_code == 503
+
+
+def test_switch_backend_reloads_graph(client, graph_with_papers, monkeypatch):
+    import researchbuddy.ui.server as srv_mod
+    from researchbuddy.core.graph_model import HierarchicalResearchGraph
+    fresh = HierarchicalResearchGraph(alpha=0.6)
+    monkeypatch.setattr(srv_mod, "save_graph", lambda g: None)
+    monkeypatch.setattr(srv_mod, "load_graph", lambda: fresh)
+
+    r = client.post("/api/switch_backend", json={})
+    assert r.status_code == 200
+    assert r.json()["backend"] == "NetworkX"
+    # the app is now serving the reloaded graph object
+    assert client.get("/api/stats").json()["total_papers"] == 0
+
+
+def test_switch_backend_failure_keeps_old_graph(client, graph_with_papers,
+                                                monkeypatch):
+    import researchbuddy.ui.server as srv_mod
+    monkeypatch.setattr(srv_mod, "save_graph", lambda g: None)
+    monkeypatch.setattr(srv_mod, "load_graph", lambda: None)
+    assert client.post("/api/switch_backend", json={}).status_code == 500
+    assert client.get("/api/stats").json()["total_papers"] == 5
 
 
 # ── social-psyche endpoints ────────────────────────────────────────────────────

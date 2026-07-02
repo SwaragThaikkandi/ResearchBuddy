@@ -16,7 +16,9 @@ process-wide lock serialises graph mutations.
 
 from __future__ import annotations
 
+import importlib
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -44,10 +46,21 @@ class UIState:
         self.lock = threading.Lock()
         self.candidates: dict[str, PaperMeta] = {}   # token -> pending candidate
         self.merge_job: dict = {"status": "idle"}
+        # Live progress for the browser's progress bar. pct=None means
+        # indeterminate (spinner-style bar); text explains the current step.
+        self.progress: dict = {"active": False, "pct": None, "text": ""}
 
     def remember(self, metas) -> None:
         for m in metas:
             self.candidates[m.paper_id] = m
+
+    def set_progress(self, text: str, pct: Optional[float] = None) -> None:
+        self.progress = {"active": True,
+                         "pct": None if pct is None else round(float(pct), 3),
+                         "text": str(text)[:200]}
+
+    def end_progress(self) -> None:
+        self.progress = {"active": False, "pct": None, "text": ""}
 
 
 # ── Serialization helpers ─────────────────────────────────────────────────────
@@ -143,6 +156,8 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
     def stats():
         s = state.graph.stats()
         s["sp_available"] = _sp_available()
+        s["backend"] = getattr(state.graph._backend, "backend_name",
+                               "NetworkX")
         return s
 
     @app.get("/api/graph")
@@ -202,6 +217,10 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
                 if m.kind == "paper" and ql and ql in m.title.lower()][:12]
         return [_paper_json(m) for m in hits]
 
+    @app.get("/api/progress")
+    def progress():
+        return state.progress
+
     @app.post("/api/search")
     def search(body: dict):
         from researchbuddy.core.searcher import find_candidates
@@ -213,14 +232,24 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
         n = max(1, min(int(body.get("n", 10)), 30))
 
         with state.lock:
-            candidates, hyde = find_candidates(
-                state.graph, extra_keywords=keywords, query=intent)
-            audit.log_event("search", query=intent or "", keywords=keywords,
-                            n_results=len(candidates))
-            results = state.graph.rank_candidates(
-                candidates, n=n, exploration_ratio=cfg.EXPLORATION_RATIO,
-                hyde_embedding=hyde, focus_ids=focus_ids or None)
-            state.remember([m for m, _, _ in results])
+            try:
+                state.set_progress(
+                    "Querying OpenAlex, CrossRef, Semantic Scholar and arXiv "
+                    "(plus LLM query expansion when available)…", 0.15)
+                candidates, hyde = find_candidates(
+                    state.graph, extra_keywords=keywords, query=intent)
+                audit.log_event("search", query=intent or "",
+                                keywords=keywords, n_results=len(candidates))
+                state.set_progress(
+                    f"Ranking {len(candidates)} candidates — fused semantic + "
+                    "citation + PageRank scoring with your learned weights…",
+                    0.75)
+                results = state.graph.rank_candidates(
+                    candidates, n=n, exploration_ratio=cfg.EXPLORATION_RATIO,
+                    hyde_embedding=hyde, focus_ids=focus_ids or None)
+                state.remember([m for m, _, _ in results])
+            finally:
+                state.end_progress()
         return {"results": _results_json(results),
                 "n_fetched": len(candidates)}
 
@@ -265,24 +294,101 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
                            or ("backward", "forward"))
         n = max(1, min(int(body.get("n", 10)), 30))
         with state.lock:
-            used = sb.load_used_seeds()
-            if body.get("reset_frontier"):
-                sb.reset_used_seeds()
-                used = set()
-            seeds = sb.pick_seeds(state.graph, exclude=used)
-            if not seeds:
-                return {"results": [], "stats": {"error": "no fresh seeds"}}
-            cands, stats_d = sb.snowball_round(
-                state.graph, seeds=seeds, directions=directions)
-            audit.log_event("snowball", directions=list(directions),
-                            n_seeds=stats_d["n_seeds"],
-                            fetched=stats_d["fetched"],
-                            new_unique=stats_d["new_unique"],
-                            saturation=stats_d["saturation_ratio"])
-            results = state.graph.rank_candidates(cands, n=n,
-                                                  exploration_ratio=0.0)
-            state.remember([m for m, _, _ in results])
+            try:
+                used = sb.load_used_seeds()
+                if body.get("reset_frontier"):
+                    sb.reset_used_seeds()
+                    used = set()
+                seeds = sb.pick_seeds(state.graph, exclude=used)
+                if not seeds:
+                    return {"results": [],
+                            "stats": {"error": "no fresh seeds"}}
+                n_seeds = len(seeds)
+                done = {"i": 0}
+
+                def _prog(msg: str) -> None:
+                    # snowball_round reports one line per seed — turn that
+                    # into a real fraction for the progress bar.
+                    if msg.startswith("["):
+                        done["i"] += 1
+                    state.set_progress(
+                        msg, 0.05 + 0.75 * (done["i"] / max(n_seeds, 1)))
+
+                state.set_progress(
+                    f"Walking the citation frontier from {n_seeds} seed "
+                    "paper(s)…", 0.05)
+                cands, stats_d = sb.snowball_round(
+                    state.graph, seeds=seeds, directions=directions,
+                    progress=_prog)
+                audit.log_event("snowball", directions=list(directions),
+                                n_seeds=stats_d["n_seeds"],
+                                fetched=stats_d["fetched"],
+                                new_unique=stats_d["new_unique"],
+                                saturation=stats_d["saturation_ratio"])
+                state.set_progress(
+                    f"Ranking {len(cands)} new candidates with your learned "
+                    "weights…", 0.9)
+                results = state.graph.rank_candidates(cands, n=n,
+                                                      exploration_ratio=0.0)
+                state.remember([m for m, _, _ in results])
+            finally:
+                state.end_progress()
         return {"results": _results_json(results), "stats": stats_d}
+
+    # ── Attach a PDF to a rated/known paper (CLI parity: richer node) ────
+    @app.post("/api/attach_pdf")
+    def attach_pdf(token: str = Form(...), file: UploadFile = File(...)):
+        """
+        Optional PDF ingest for a paper you just rated (or any graph paper):
+        GROBID parses it into section embeddings + local references, turning
+        an abstract-only node into a full one — exactly the CLI's
+        "PDF path to ingest as full graph node" prompt, without the typing.
+        """
+        import re as _re
+        import shutil
+        from researchbuddy.core.ingest import ingest_pdf_into_meta, IngestError
+
+        with state.lock:
+            meta = state.graph.get_paper(token) or state.candidates.get(token)
+            if meta is None:
+                raise HTTPException(404, "unknown paper — rate it first")
+            in_graph = state.graph.get_paper(token) is not None
+        name = Path(file.filename or "paper.pdf").name
+        name = _re.sub(r"[^A-Za-z0-9 ._-]+", "_", name) or "paper.pdf"
+        if not name.lower().endswith(".pdf"):
+            raise HTTPException(400, f"not a PDF: {name}")
+        dest_dir = cfg.DATA_DIR / "uploads" / "attached"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"{token[:12]}_{name}"
+        with open(dest, "wb") as out:
+            shutil.copyfileobj(file.file, out)
+        if not dest.read_bytes().startswith(b"%PDF"):
+            dest.unlink(missing_ok=True)
+            raise HTTPException(400, "invalid PDF payload")
+
+        with state.lock:
+            try:
+                state.set_progress(
+                    f"Parsing {name} with GROBID (section embeddings + "
+                    "reference extraction — first request loads models, "
+                    "can take a minute)…")
+                if not in_graph:
+                    # rate-later flow: add as unrated node so ingest sticks
+                    if meta.embedding is None:
+                        state.graph.embed_abstract(meta)
+                    state.graph.add_paper(meta, meta.embedding)
+                info = ingest_pdf_into_meta(state.graph, meta, dest)
+                audit.log_event("fulltext", paper_id=meta.paper_id,
+                                title=meta.title[:200], doi=meta.doi,
+                                provider="user-supplied-ui", license="",
+                                url="")
+                _save()
+            except IngestError as e:
+                raise HTTPException(422, str(e))
+            finally:
+                state.end_progress()
+        return {"ok": True, "parser": info["parser"],
+                "n_sections": info["n_sections"], "n_refs": info["n_refs"]}
 
     # ── Harvest ──────────────────────────────────────────────────────────
     @app.post("/api/harvest")
@@ -290,12 +396,34 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
         from researchbuddy.core import oa_harvester as oh
         n = max(1, min(int(body.get("n", 10)), 100))
         log: list[str] = []
+
+        def _prog(msg: str) -> None:
+            log.append(msg)
+            # harvester emits "[i/n] Title…" lines — derive a fraction
+            pct = None
+            if msg.startswith("[") and "/" in msg.split("]")[0]:
+                try:
+                    i, tot = msg[1:].split("]")[0].split("/")
+                    pct = 0.05 + 0.85 * (int(i) - 1) / max(int(tot), 1)
+                except ValueError:
+                    pass
+            state.set_progress(msg, pct)
+
         with state.lock:
-            report = oh.harvest(state.graph, max_papers=n,
-                                progress=log.append)
-            if report.ingested:
-                state.graph.rebuild_hierarchy()
-            _save()
+            try:
+                state.set_progress(
+                    "Resolving legal open-access copies (arXiv → Unpaywall → "
+                    "OpenAlex → Europe PMC)…", 0.02)
+                report = oh.harvest(state.graph, max_papers=n,
+                                    progress=_prog)
+                if report.ingested:
+                    state.set_progress(
+                        "Rebuilding the hierarchy with the new full-text "
+                        "content…", 0.95)
+                    state.graph.rebuild_hierarchy()
+                _save()
+            finally:
+                state.end_progress()
         return {"checked": report.checked, "resolved": report.resolved,
                 "downloaded": report.downloaded, "ingested": report.ingested,
                 "no_oa": report.no_oa, "by_provider": report.by_provider,
@@ -392,16 +520,25 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
             raise
 
         with state.lock:
-            if kind == "paper":
-                from researchbuddy.core.state_manager import import_pdf_folder
-                before = len(state.graph.all_papers())
-                import_pdf_folder(state.graph, batch_dir)
-                added = len(state.graph.all_papers()) - before
-                if added:
-                    state.graph.rebuild_hierarchy()
-            else:
-                added = _ingest_draft_pdfs(state.graph, saved)
-            _save()
+            try:
+                state.set_progress(
+                    f"Extracting {len(saved)} PDF(s) with GROBID — sections, "
+                    "references, figures (falls back to pdfplumber; first "
+                    "GROBID request loads models, ~30 s)…")
+                if kind == "paper":
+                    from researchbuddy.core.state_manager import import_pdf_folder
+                    before = len(state.graph.all_papers())
+                    import_pdf_folder(state.graph, batch_dir)
+                    added = len(state.graph.all_papers()) - before
+                    if added:
+                        state.set_progress(
+                            "Rebuilding hierarchy with the new papers…", 0.9)
+                        state.graph.rebuild_hierarchy()
+                else:
+                    added = _ingest_draft_pdfs(state.graph, saved)
+                _save()
+            finally:
+                state.end_progress()
         return {"ok": True, "kind": kind, "uploaded": len(saved),
                 "added": added, "stored_in": str(batch_dir),
                 "note": ("" if added == len(saved) else
@@ -423,6 +560,89 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
                 state.graph.rebuild_hierarchy()
             _save()
         return {"ok": True, "added": added}
+
+    # ── Services (Neo4j / GROBID / LLM) — status + one-click control ─────
+    @app.get("/api/services")
+    def services_status():
+        from researchbuddy.core import services as svc
+        out: dict = {
+            "docker": svc.docker_available(),
+            "backend": getattr(state.graph._backend, "backend_name",
+                               "NetworkX"),
+        }
+        # Neo4j: HTTP liveness + bolt auth probe (the one that matters)
+        n_http = svc._service_alive(svc.NEO4J_SPEC)
+        bolt_ok, bolt_reason = False, ""
+        if n_http:
+            pw = os.environ.get("RESEARCHBUDDY_NEO4J_PASSWORD",
+                                "researchbuddy")
+            probe = svc.probe_neo4j_bolt(password=pw)
+            bolt_ok, bolt_reason = probe.ok, (probe.reason or "")
+        out["neo4j"] = {"http": n_http, "bolt": bolt_ok,
+                        "reason": bolt_reason,
+                        "browser": "http://localhost:7474"}
+        # GROBID
+        out["grobid"] = {"alive": svc._service_alive(svc.GROBID_SPEC)}
+        # LLM (Ollama)
+        llm_info = {"enabled": cfg.LLM_ENABLED, "available": False,
+                    "model": cfg.LLM_MODEL}
+        if cfg.LLM_ENABLED:
+            try:
+                from researchbuddy.core.llm import get_llm
+                st = get_llm().status()
+                llm_info["available"] = bool(st.available)
+                if not st.available and st.error:
+                    llm_info["error"] = str(st.error)[:120]
+            except Exception as e:
+                llm_info["error"] = str(e)[:120]
+        out["llm"] = llm_info
+        return out
+
+    @app.post("/api/services/start")
+    def services_start(body: dict):
+        from researchbuddy.core import services as svc
+        name = body.get("name", "")
+        spec = {"neo4j": svc.NEO4J_SPEC, "grobid": svc.GROBID_SPEC}.get(name)
+        if spec is None:
+            raise HTTPException(400, "name must be 'neo4j' or 'grobid'")
+        if not svc.docker_available():
+            raise HTTPException(503, "Docker not detected — install/start "
+                                     "Docker Desktop first")
+        res = svc.ensure_running(spec)
+        if name == "neo4j" and (res.started or res.already_running):
+            # Same env plumbing the CLI startup uses, so create_backend()
+            # (which reads config at call time) can see Neo4j.
+            os.environ.setdefault("RESEARCHBUDDY_NEO4J_ENABLED", "true")
+            os.environ.setdefault("RESEARCHBUDDY_NEO4J_PASSWORD",
+                                  "researchbuddy")
+            importlib.reload(cfg)
+        return {"started": bool(res.started),
+                "already_running": bool(res.already_running),
+                "error": res.error or ""}
+
+    @app.post("/api/services/stop")
+    def services_stop(body: dict):
+        from researchbuddy.core import services as svc
+        name = body.get("name", "")
+        spec = {"neo4j": svc.NEO4J_SPEC, "grobid": svc.GROBID_SPEC}.get(name)
+        if spec is None:
+            raise HTTPException(400, "name must be 'neo4j' or 'grobid'")
+        return {"ok": bool(svc.stop_service(spec))}
+
+    @app.post("/api/switch_backend")
+    def switch_backend():
+        """Reload the graph so it migrates to whatever backend the current
+        config selects (Neo4j after /api/services/start, else NetworkX).
+        No UI restart needed — this is the CLI's 're-launch to switch',
+        done live."""
+        with state.lock:
+            save_graph(state.graph)          # never lose in-memory work
+            new_graph = load_graph()
+            if new_graph is None:
+                raise HTTPException(500, "could not reload the graph")
+            state.graph = new_graph
+        return {"backend": getattr(state.graph._backend, "backend_name",
+                                   "NetworkX")}
 
     # ── social-psyche integration ────────────────────────────────────────
     def _sp_available() -> bool:

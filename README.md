@@ -26,13 +26,22 @@ frontend is bundled vanilla JS (no npm, no CDN — fully offline). Tabs:
   Files persist in `~/.researchbuddy/uploads/`.
 - **Discover** — intent + keyword search with **focus mode** (type to pick
   anchor papers from your library), rate results 1–10 inline
-- **Snowball** — backward/forward citation expansion with saturation stats
+- **Snowball** — backward/forward citation expansion with saturation stats,
+  a "show top N" control, and **optional PDF attach after rating** (GROBID
+  parses it into section embeddings + references — CLI parity, no typing paths)
 - **Harvest** — legal open-access full-text autopilot
 - **Review** — one-click review pack (BibTeX / RIS / matrix / scaffold / PRISMA)
 - **Watches** — living-review queries
 - **Collaborate** — social-psyche: your identity fingerprint, contribution
   ledger (with chain verification), pinned peers, **live secure merge**
   (serve/connect), and signed capsule publication
+- **Services** — live status chips for **Neo4j / GROBID / LLM** in the
+  header, one-click start/stop via Docker, "Use as backend now" (switches
+  the graph onto Neo4j without restarting the UI), Neo4j Browser link
+
+Long operations (search, snowball, harvest, PDF parsing) show a **progress
+bar with a plain-language explanation** of the current step underneath —
+polled live from the server.
 
 The CLI (`researchbuddy`) remains fully equivalent — the UI is a view over
 the same engine and the same local data.

@@ -15,17 +15,60 @@ const api = async (path, body) => {
   return r.json();
 };
 
+/* ── Global progress overlay ──────────────────────────────────────────── */
+let progTimer = null, progOps = 0;
+
+function progressRender(p) {
+  const box = $("#progress"), fill = $("#progress-fill");
+  if (!p || !p.active) {
+    if (progOps === 0) box.classList.add("hidden");
+    return;
+  }
+  box.classList.remove("hidden");
+  $("#progress-text").textContent = p.text || "working…";
+  if (p.pct == null) {
+    fill.classList.add("indeterminate");
+  } else {
+    fill.classList.remove("indeterminate");
+    fill.style.width = Math.max(3, Math.min(100, p.pct * 100)) + "%";
+  }
+}
+function progressStart(initialText) {
+  progOps++;
+  progressRender({ active: true, pct: null, text: initialText });
+  if (!progTimer)
+    progTimer = setInterval(async () => {
+      try { progressRender(await api("/api/progress")); } catch (e) {}
+    }, 700);
+}
+function progressEnd() {
+  progOps = Math.max(0, progOps - 1);
+  if (progOps === 0) {
+    clearInterval(progTimer); progTimer = null;
+    $("#progress").classList.add("hidden");
+  }
+}
+/* Wrap a long-running op: shows the bar, polls server-side progress text,
+   always hides on completion/error. */
+async function withProgress(initialText, fn) {
+  progressStart(initialText);
+  try { return await fn(); }
+  finally { progressEnd(); }
+}
+
 /* ── Tabs ─────────────────────────────────────────────────────────────── */
+function showTab(name) {
+  document.querySelectorAll("#tabs button").forEach(b =>
+    b.classList.toggle("active", b.dataset.tab === name));
+  document.querySelectorAll(".tab").forEach(t =>
+    t.classList.toggle("active", t.id === "tab-" + name));
+  if (name === "graph") loadGraph();
+  if (name === "watches") loadWatches();
+  if (name === "collab") loadCollab();
+  if (name === "services") loadServices();
+}
 document.querySelectorAll("#tabs button").forEach(btn => {
-  btn.onclick = () => {
-    document.querySelectorAll("#tabs button").forEach(b =>
-      b.classList.toggle("active", b === btn));
-    document.querySelectorAll(".tab").forEach(t =>
-      t.classList.toggle("active", t.id === "tab-" + btn.dataset.tab));
-    if (btn.dataset.tab === "graph") loadGraph();
-    if (btn.dataset.tab === "watches") loadWatches();
-    if (btn.dataset.tab === "collab") loadCollab();
-  };
+  btn.onclick = () => showTab(btn.dataset.tab);
 });
 
 /* ── Stats bar ────────────────────────────────────────────────────────── */
@@ -58,6 +101,7 @@ function resultCard(p) {
     <div class="res-abs">${esc(p.abstract || "")}</div>
     <div class="rate-row"><span class="res-meta">rate:</span></div>`;
   const row = div.querySelector(".rate-row");
+  let rated = false;
   for (let i = 1; i <= 10; i++) {
     const b = document.createElement("button");
     b.textContent = i;
@@ -66,11 +110,43 @@ function resultCard(p) {
         await api("/api/rate", { token: p.token, rating: i });
         row.querySelectorAll("button").forEach(x => x.classList.remove("rated"));
         b.classList.add("rated");
+        rated = true;
+        pdfBtn.classList.remove("hidden");
         loadStats();
       } catch (e) { alert("rate failed: " + e.message); }
     };
     row.appendChild(b);
   }
+  // Optional PDF attach (CLI parity): after rating, offer to ingest the PDF
+  // so GROBID adds section embeddings + parsed references to the node.
+  const pdfInput = document.createElement("input");
+  pdfInput.type = "file"; pdfInput.accept = ".pdf,application/pdf";
+  pdfInput.classList.add("hidden");
+  const pdfBtn = document.createElement("button");
+  pdfBtn.textContent = "📎 attach PDF";
+  pdfBtn.title = "optional — GROBID parses it into section embeddings + " +
+    "references, making this a full graph node";
+  pdfBtn.classList.add("hidden");        // appears once rated
+  pdfBtn.onclick = () => pdfInput.click();
+  pdfInput.onchange = () => {
+    const f = pdfInput.files[0];
+    if (!f) return;
+    withProgress(`Parsing ${f.name} with GROBID…`, async () => {
+      const fd = new FormData();
+      fd.append("token", p.token);
+      fd.append("file", f);
+      const r = await fetch("/api/attach_pdf", { method: "POST", body: fd });
+      if (!r.ok) throw new Error((await r.json()).detail || r.status);
+      const info = await r.json();
+      pdfBtn.textContent =
+        `✓ ${info.n_sections} sections · ${info.n_refs} refs [${info.parser}]`;
+      pdfBtn.disabled = true;
+      loadStats();
+    }).catch(e => alert("PDF ingest failed: " + e.message))
+      .finally(() => { pdfInput.value = ""; });
+  };
+  row.appendChild(pdfBtn);
+  row.appendChild(pdfInput);
   return div;
 }
 function renderResults(el, results) {
@@ -225,14 +301,15 @@ $("#l-upload").onclick = async () => {
   const fd = new FormData();
   queuedFiles.forEach(f => fd.append("files", f));
   fd.append("kind", $("#l-kind").value);
-  $("#l-status").textContent =
-    `importing ${queuedFiles.length} PDF(s)… (GROBID extraction — can take ` +
-    `a minute per paper)`;
+  $("#l-status").textContent = "";
   $("#l-upload").disabled = true;
   try {
-    const r = await fetch("/api/upload_pdfs", { method: "POST", body: fd });
-    if (!r.ok) throw new Error((await r.json()).detail || r.status);
-    const body = await r.json();
+    const body = await withProgress(
+      `Uploading ${queuedFiles.length} PDF(s)…`, async () => {
+        const r = await fetch("/api/upload_pdfs", { method: "POST", body: fd });
+        if (!r.ok) throw new Error((await r.json()).detail || r.status);
+        return r.json();
+      });
     $("#l-status").innerHTML =
       `<span class="ok">${body.added} added</span> of ${body.uploaded} ` +
       `uploaded ${body.note ? "· " + esc(body.note) : ""}`;
@@ -285,12 +362,13 @@ function drawChips() {
   });
 }
 $("#d-run").onclick = async () => {
-  $("#d-status").textContent = "searching… (20–40 s)";
+  $("#d-status").textContent = "";
   $("#d-run").disabled = true;
   try {
-    const r = await api("/api/search", {
-      intent: $("#d-intent").value, keywords: $("#d-keywords").value,
-      focus_ids: [...focusIds.keys()], n: 10 });
+    const r = await withProgress("Starting search…", () =>
+      api("/api/search", {
+        intent: $("#d-intent").value, keywords: $("#d-keywords").value,
+        focus_ids: [...focusIds.keys()], n: 10 }));
     $("#d-status").textContent = `${r.n_fetched} fetched`;
     renderResults($("#d-results"), r.results);
   } catch (e) { $("#d-status").textContent = "error: " + e.message; }
@@ -302,11 +380,13 @@ $("#s-run").onclick = async () => {
   const dirs = [];
   if ($("#s-back").checked) dirs.push("backward");
   if ($("#s-fwd").checked) dirs.push("forward");
-  $("#s-status").textContent = "snowballing…";
+  $("#s-status").textContent = "";
   $("#s-run").disabled = true;
   try {
-    const r = await api("/api/snowball", { directions: dirs, n: 10,
-      reset_frontier: $("#s-reset").checked });
+    const n = Math.max(1, Math.min(30, +$("#s-n").value || 10));
+    const r = await withProgress("Starting snowball round…", () =>
+      api("/api/snowball", { directions: dirs, n,
+        reset_frontier: $("#s-reset").checked }));
     const st = r.stats, b = $("#s-stats");
     b.classList.remove("hidden");
     b.innerHTML = st.error ? `<span class="warn">${esc(st.error)}</span>` :
@@ -322,10 +402,11 @@ $("#s-run").onclick = async () => {
 
 /* ── Harvest tab ──────────────────────────────────────────────────────── */
 $("#h-run").onclick = async () => {
-  $("#h-status").textContent = "harvesting… (network)";
+  $("#h-status").textContent = "";
   $("#h-run").disabled = true;
   try {
-    const r = await api("/api/harvest", { n: +$("#h-n").value });
+    const r = await withProgress("Resolving open-access copies…", () =>
+      api("/api/harvest", { n: +$("#h-n").value }));
     $("#h-status").innerHTML =
       `<span class="ok">${r.ingested} ingested</span> / ${r.downloaded} ` +
       `downloaded / ${r.checked} checked · no-OA ${r.no_oa}`;
@@ -506,6 +587,82 @@ $("#ce-run").onclick = async () => {
   } catch (e) { alert(e.message); }
 };
 
+/* ── Services (Neo4j / GROBID / LLM) ──────────────────────────────────── */
+let svcCache = null;
+
+function svcChip(label, cls) {
+  return `<span class="svc-chip"><i class="dot ${cls}"></i>${label}</span>`;
+}
+async function pollServices() {
+  try {
+    svcCache = await api("/api/services");
+    const s = svcCache;
+    $("#svcbar").innerHTML =
+      svcChip("Neo4j", s.neo4j.bolt ? "on" : (s.neo4j.http ? "dim" : "off")) +
+      svcChip("GROBID", s.grobid.alive ? "on" : "off") +
+      svcChip("LLM", !s.llm.enabled ? "dim" : (s.llm.available ? "on" : "off")) +
+      svcChip(s.backend, "dim");
+    if (document.querySelector("#tab-services.active")) renderServices();
+  } catch (e) { /* server briefly busy — keep last chips */ }
+}
+$("#svcbar").onclick = () => showTab("services");
+
+function renderServices() {
+  const s = svcCache;
+  if (!s) return;
+  $("#sv-docker").classList.toggle("hidden", s.docker);
+  const nd = $("#sv-neo4j-dot");
+  nd.className = "dot " + (s.neo4j.bolt ? "on" : (s.neo4j.http ? "dim" : "off"));
+  $("#sv-neo4j-info").textContent = s.neo4j.bolt
+    ? "running — bolt authenticated, usable as backend"
+    : s.neo4j.http
+      ? "HTTP up but bolt failed: " + (s.neo4j.reason || "auth?")
+      : "not running";
+  $("#sv-grobid-dot").className = "dot " + (s.grobid.alive ? "on" : "off");
+  $("#sv-grobid-status").textContent = s.grobid.alive
+    ? "running — PDF imports get full extraction" : "";
+  $("#sv-llm-dot").className =
+    "dot " + (!s.llm.enabled ? "dim" : (s.llm.available ? "on" : "off"));
+  $("#sv-llm-info").textContent = s.llm.available
+    ? `connected — model ${s.llm.model}`
+    : (s.llm.enabled ? (s.llm.error || "unreachable") : "disabled");
+  $("#sv-backend").textContent = s.backend;
+  $("#sv-neo4j-use").disabled = s.backend === "Neo4j";
+  $("#sv-neo4j-use").textContent =
+    s.backend === "Neo4j" ? "Active backend ✓" : "Use as backend now";
+}
+async function loadServices() { await pollServices(); renderServices(); }
+
+async function svcAction(name, action, statusEl) {
+  $(statusEl).textContent = action + "ing… (docker can take ~30 s)";
+  try {
+    const r = await api(`/api/services/${action}`, { name });
+    $(statusEl).textContent = r.error ? "error: " + r.error :
+      (r.already_running ? "already running" : "done");
+  } catch (e) { $(statusEl).textContent = "error: " + e.message; }
+  await pollServices(); renderServices();
+}
+$("#sv-neo4j-start").onclick = () => svcAction("neo4j", "start", "#sv-neo4j-status");
+$("#sv-neo4j-stop").onclick = () => svcAction("neo4j", "stop", "#sv-neo4j-status");
+$("#sv-grobid-start").onclick = () => svcAction("grobid", "start", "#sv-grobid-status");
+$("#sv-grobid-stop").onclick = () => svcAction("grobid", "stop", "#sv-grobid-status");
+
+$("#sv-neo4j-use").onclick = async () => {
+  const st = $("#sv-neo4j-status");
+  st.textContent = "starting Neo4j + switching backend…";
+  $("#sv-neo4j-use").disabled = true;
+  try {
+    const r = await api("/api/services/start", { name: "neo4j" });
+    if (r.error) throw new Error(r.error);
+    const sw = await api("/api/switch_backend", {});
+    st.textContent = "backend: " + sw.backend;
+    loadStats();
+  } catch (e) { st.textContent = "error: " + e.message; }
+  await pollServices(); renderServices();
+};
+
 /* ── boot ─────────────────────────────────────────────────────────────── */
 loadStats();
 loadGraph();
+pollServices();
+setInterval(pollServices, 20000);

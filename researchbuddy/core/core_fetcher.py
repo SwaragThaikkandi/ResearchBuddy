@@ -42,6 +42,24 @@ _REQUEST_TIMEOUT = 20
 # Polite rate: 1.1 s without key, 0.15 s with key
 _REQUEST_DELAY = 0.15 if _CORE_API_KEY else 1.1
 
+
+def set_api_key(key: str) -> None:
+    """Apply a CORE API key at runtime (the module reads the env only once
+    at import). Used by the CLI's service menu and startup pref loading."""
+    global _CORE_API_KEY, _REQUEST_DELAY
+    _CORE_API_KEY = (key or "").strip()
+    os.environ["CORE_API_KEY"] = _CORE_API_KEY
+    if _CORE_API_KEY:
+        _HEADERS["Authorization"] = f"Bearer {_CORE_API_KEY}"
+        _REQUEST_DELAY = 0.15
+    else:
+        _HEADERS.pop("Authorization", None)
+        _REQUEST_DELAY = 1.1
+
+
+def has_api_key() -> bool:
+    return bool(_CORE_API_KEY)
+
 # ── Equation / noise stripping ─────────────────────────────────────────────────
 
 # Lines where fewer than 35% of characters are alphabetic are likely equations,
