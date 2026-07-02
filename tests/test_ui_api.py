@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -151,6 +153,107 @@ def test_watches_crud(client, monkeypatch, tmp_path):
     assert client.get("/api/watches").json() == []
     assert client.post("/api/watches",
                        json={"query": ""}).status_code == 400
+
+
+# ── PDF import ─────────────────────────────────────────────────────────────────
+
+def test_upload_pdfs_paper_kind(client, graph_with_papers, monkeypatch,
+                                tmp_path):
+    import researchbuddy.ui.server as srv_mod
+    monkeypatch.setattr(srv_mod.cfg, "DATA_DIR", tmp_path)
+
+    seen = {}
+
+    def fake_import(graph, folder):
+        # simulate the real pipeline adding one paper from the saved files
+        pdfs = list(Path(folder).glob("*.pdf"))
+        seen["files"] = [p.name for p in pdfs]
+        seen["bytes"] = pdfs[0].read_bytes()
+        from tests.conftest import _fake_embed
+        m = PaperMeta(paper_id="up_1", title="Uploaded Paper", abstract="x",
+                      source="seed", embedding=_fake_embed("uploaded"))
+        graph.add_paper(m, m.embedding)
+        return 1
+
+    import researchbuddy.core.state_manager as sm
+    monkeypatch.setattr(sm, "import_pdf_folder", fake_import)
+    monkeypatch.setattr(graph_with_papers, "rebuild_hierarchy", lambda: None)
+
+    before = len(graph_with_papers.all_papers())
+    r = client.post(
+        "/api/upload_pdfs",
+        files=[("files", ("my paper.pdf", b"%PDF-1.5 fake", "application/pdf"))],
+        data={"kind": "paper"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["added"] == 1 and body["uploaded"] == 1
+    assert len(graph_with_papers.all_papers()) == before + 1
+    # file persisted (meta.filepath must not dangle) with sanitised name
+    assert seen["files"] == ["my paper.pdf"]
+    assert seen["bytes"].startswith(b"%PDF")
+    stored = Path(body["stored_in"])
+    assert stored.exists() and list(stored.glob("*.pdf"))
+
+
+def test_upload_pdfs_draft_kind(client, graph_with_papers, monkeypatch,
+                                tmp_path):
+    import researchbuddy.ui.server as srv_mod
+    monkeypatch.setattr(srv_mod.cfg, "DATA_DIR", tmp_path)
+
+    class _Sec:
+        section_type = "introduction"
+        heading = "Intro"
+        text = "My draft argues something important. " * 30
+
+    class _EP:
+        title = "My Draft"
+        abstract = ""
+        doi = ""
+        full_text = _Sec.text
+        sections = [_Sec()]
+
+    import researchbuddy.core.pdf_processor as pp
+    monkeypatch.setattr(pp, "extract_from_pdf", lambda p: _EP())
+
+    r = client.post(
+        "/api/upload_pdfs",
+        files=[("files", ("draft.pdf", b"%PDF-1.5 d", "application/pdf"))],
+        data={"kind": "draft"})
+    assert r.status_code == 200, r.text
+    assert r.json()["added"] == 1
+    thoughts = [m for m in graph_with_papers.all_papers() if m.kind != "paper"]
+    assert len(thoughts) == 1
+    assert thoughts[0].title == "My Draft"
+
+
+def test_upload_rejects_non_pdf(client, monkeypatch, tmp_path):
+    import researchbuddy.ui.server as srv_mod
+    monkeypatch.setattr(srv_mod.cfg, "DATA_DIR", tmp_path)
+    r = client.post(
+        "/api/upload_pdfs",
+        files=[("files", ("evil.exe", b"MZ...", "application/octet-stream"))],
+        data={"kind": "paper"})
+    assert r.status_code == 400
+    r2 = client.post(
+        "/api/upload_pdfs",
+        files=[("files", ("fake.pdf", b"<html>not a pdf</html>", "application/pdf"))],
+        data={"kind": "paper"})
+    assert r2.status_code == 400
+    # rejected batches leave nothing behind
+    uploads = tmp_path / "uploads"
+    assert not uploads.exists() or not any(uploads.rglob("*.pdf"))
+
+
+def test_import_folder_endpoint(client, graph_with_papers, monkeypatch,
+                                tmp_path):
+    import researchbuddy.core.state_manager as sm
+    monkeypatch.setattr(sm, "import_pdf_folder", lambda g, f: 0)
+    monkeypatch.setattr(graph_with_papers, "rebuild_hierarchy", lambda: None)
+    ok_dir = tmp_path / "pdfs"; ok_dir.mkdir()
+    assert client.post("/api/import_folder",
+                       json={"path": str(ok_dir)}).status_code == 200
+    assert client.post("/api/import_folder",
+                       json={"path": str(tmp_path / "nope")}).status_code == 400
 
 
 # ── social-psyche endpoints ────────────────────────────────────────────────────

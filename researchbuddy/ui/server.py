@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -76,6 +76,39 @@ def _paper_json(m: PaperMeta, score: Optional[float] = None,
 
 def _results_json(results) -> list[dict]:
     return [_paper_json(m, score=s, label=lab) for m, s, lab in results]
+
+
+def _ingest_draft_pdfs(graph: HierarchicalResearchGraph,
+                       paths: list[Path]) -> int:
+    """Ingest the user's own PDFs as thought/draft nodes (strong implicit
+    weight on the context vector) — mirrors the CLI's option 14."""
+    from researchbuddy.core.pdf_processor import extract_from_pdf
+
+    added = 0
+    for p in paths:
+        try:
+            ep = extract_from_pdf(p)
+        except Exception as e:
+            logger.warning("draft extraction failed for %s: %s", p.name, e)
+            continue
+        if ep is None:
+            continue
+        joined = "\n\n".join(s.text for s in ep.sections if s.text) \
+                 or ep.full_text or ep.abstract
+        section_text_map: dict[str, list[str]] = {}
+        for s in ep.sections:
+            if s.section_type and s.section_type != "other" and s.text:
+                section_text_map.setdefault(s.section_type, []).append(s.text)
+        meta = graph.add_thought_from_text(
+            joined, title=ep.title or p.stem, kind="draft",
+            section_text_map={k: "\n\n".join(v)
+                              for k, v in section_text_map.items()},
+        )
+        if meta is not None:
+            if ep.doi and not meta.doi:
+                meta.doi = ep.doi
+            added += 1
+    return added
 
 
 # ── App factory ───────────────────────────────────────────────────────────────
@@ -318,6 +351,78 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
         with state.lock:
             save_graph(state.graph)
         return {"ok": True}
+
+    # ── PDF import (browser upload + server-side folder) ─────────────────
+    @app.post("/api/upload_pdfs")
+    def upload_pdfs(files: list[UploadFile] = File(...),
+                    kind: str = Form("paper")):
+        """
+        Drag-and-drop / file-picker import. `kind`:
+          paper — seed papers: full GROBID extraction, section embeddings,
+                  parsed references (same pipeline as the CLI folder import)
+          draft — the user's OWN writing: becomes a strongly-weighted
+                  thought node that re-shapes future recommendations
+        """
+        import re as _re
+        import shutil
+
+        if kind not in ("paper", "draft"):
+            raise HTTPException(400, "kind must be 'paper' or 'draft'")
+        # Persist uploads: imported papers keep meta.filepath pointing here,
+        # so the library dir must outlive the request (NOT a temp dir).
+        batch_dir = (cfg.DATA_DIR / "uploads"
+                     / time.strftime("%Y%m%d_%H%M%S"))
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        saved: list[Path] = []
+        try:
+            for uf in files:
+                name = Path(uf.filename or "upload.pdf").name
+                name = _re.sub(r"[^A-Za-z0-9 ._-]+", "_", name) or "upload.pdf"
+                if not name.lower().endswith(".pdf"):
+                    raise HTTPException(400, f"not a PDF: {name}")
+                dest = batch_dir / name
+                with open(dest, "wb") as out:
+                    shutil.copyfileobj(uf.file, out)
+                if dest.stat().st_size == 0 or \
+                        not dest.read_bytes().startswith(b"%PDF"):
+                    raise HTTPException(400, f"invalid PDF payload: {name}")
+                saved.append(dest)
+        except HTTPException:
+            shutil.rmtree(batch_dir, ignore_errors=True)   # reject whole batch
+            raise
+
+        with state.lock:
+            if kind == "paper":
+                from researchbuddy.core.state_manager import import_pdf_folder
+                before = len(state.graph.all_papers())
+                import_pdf_folder(state.graph, batch_dir)
+                added = len(state.graph.all_papers()) - before
+                if added:
+                    state.graph.rebuild_hierarchy()
+            else:
+                added = _ingest_draft_pdfs(state.graph, saved)
+            _save()
+        return {"ok": True, "kind": kind, "uploaded": len(saved),
+                "added": added, "stored_in": str(batch_dir),
+                "note": ("" if added == len(saved) else
+                         f"{len(saved) - added} skipped "
+                         "(duplicates or no extractable text)")}
+
+    @app.post("/api/import_folder")
+    def import_folder(body: dict):
+        """Bulk import of a folder that already lives on this machine."""
+        from researchbuddy.core.state_manager import import_pdf_folder
+        folder = Path((body.get("path") or "").strip()).expanduser()
+        if not folder.is_dir():
+            raise HTTPException(400, f"not a folder: {folder}")
+        with state.lock:
+            before = len(state.graph.all_papers())
+            import_pdf_folder(state.graph, folder)
+            added = len(state.graph.all_papers()) - before
+            if added:
+                state.graph.rebuild_hierarchy()
+            _save()
+        return {"ok": True, "added": added}
 
     # ── social-psyche integration ────────────────────────────────────────
     def _sp_available() -> bool:

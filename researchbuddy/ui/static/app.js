@@ -191,6 +191,73 @@ $("#g-rebuild").onclick = async () => {
   finally { $("#g-rebuild").disabled = false; }
 };
 
+/* ── Library tab: PDF upload + folder import ──────────────────────────── */
+let queuedFiles = [];
+const drop = $("#l-drop"), fileInput = $("#l-files");
+
+function drawQueue() {
+  const q = $("#l-queue"); q.innerHTML = "";
+  queuedFiles.forEach((f, i) => {
+    const c = document.createElement("span");
+    c.className = "chip";
+    c.innerHTML = `${esc(f.name)} <span class="res-meta">` +
+      `${(f.size / 1048576).toFixed(1)} MB</span><b>×</b>`;
+    c.querySelector("b").onclick = () => {
+      queuedFiles.splice(i, 1); drawQueue(); };
+    q.appendChild(c);
+  });
+  $("#l-upload").disabled = !queuedFiles.length;
+}
+function queuePdfs(list) {
+  for (const f of list)
+    if (/\.pdf$/i.test(f.name)) queuedFiles.push(f);
+  drawQueue();
+}
+drop.onclick = () => fileInput.click();
+fileInput.onchange = () => { queuePdfs(fileInput.files); fileInput.value = ""; };
+drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("drag"); };
+drop.ondragleave = () => drop.classList.remove("drag");
+drop.ondrop = (e) => {
+  e.preventDefault(); drop.classList.remove("drag");
+  queuePdfs(e.dataTransfer.files);
+};
+$("#l-upload").onclick = async () => {
+  const fd = new FormData();
+  queuedFiles.forEach(f => fd.append("files", f));
+  fd.append("kind", $("#l-kind").value);
+  $("#l-status").textContent =
+    `importing ${queuedFiles.length} PDF(s)… (GROBID extraction — can take ` +
+    `a minute per paper)`;
+  $("#l-upload").disabled = true;
+  try {
+    const r = await fetch("/api/upload_pdfs", { method: "POST", body: fd });
+    if (!r.ok) throw new Error((await r.json()).detail || r.status);
+    const body = await r.json();
+    $("#l-status").innerHTML =
+      `<span class="ok">${body.added} added</span> of ${body.uploaded} ` +
+      `uploaded ${body.note ? "· " + esc(body.note) : ""}`;
+    queuedFiles = []; drawQueue();
+    loadStats(); loadGraph();
+  } catch (e) {
+    $("#l-status").innerHTML = `<span class="err">error: ${esc(e.message)}</span>`;
+    $("#l-upload").disabled = false;
+  }
+};
+$("#l-folder-run").onclick = async () => {
+  const path = $("#l-folder").value.trim();
+  if (!path) return;
+  $("#l-folder-status").textContent = "importing folder…";
+  try {
+    const r = await api("/api/import_folder", { path });
+    $("#l-folder-status").innerHTML =
+      `<span class="ok">${r.added} added</span>`;
+    loadStats(); loadGraph();
+  } catch (e) {
+    $("#l-folder-status").innerHTML =
+      `<span class="err">error: ${esc(e.message)}</span>`;
+  }
+};
+
 /* ── Discover tab ─────────────────────────────────────────────────────── */
 const focusIds = new Map();     // token -> title
 $("#d-focus-q").oninput = async (ev) => {

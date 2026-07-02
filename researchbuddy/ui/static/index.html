@@ -11,6 +11,7 @@
   <h1>Research<span>Buddy</span></h1>
   <nav id="tabs">
     <button data-tab="graph" class="active">Graph</button>
+    <button data-tab="library">Library</button>
     <button data-tab="discover">Discover</button>
     <button data-tab="snowball">Snowball</button>
     <button data-tab="harvest">Harvest</button>
@@ -37,6 +38,42 @@
     <div id="graph-wrap">
       <canvas id="graph-canvas"></canvas>
       <aside id="node-panel" class="hidden"></aside>
+    </div>
+  </section>
+
+  <!-- ── Library (PDF import) ──────────────────────────────────────────── -->
+  <section id="tab-library" class="tab">
+    <div class="card">
+      <h3>Add PDFs</h3>
+      <div class="form row">
+        <select id="l-kind">
+          <option value="paper">research papers (full extraction)</option>
+          <option value="draft">my own writing / draft (thought node)</option>
+        </select>
+      </div>
+      <div id="l-drop">
+        <p>Drag &amp; drop PDFs here<br>
+           <span class="note">or click to choose files</span></p>
+        <input id="l-files" type="file" accept=".pdf,application/pdf"
+               multiple class="hidden">
+      </div>
+      <div id="l-queue"></div>
+      <div class="form row">
+        <button id="l-upload" class="primary" disabled>Import selected</button>
+        <span id="l-status"></span>
+      </div>
+      <p class="note">Papers go through the full pipeline: GROBID (or
+        pdfplumber) extraction, section embeddings, parsed references —
+        exactly like the CLI import. Files are stored in your local library
+        (<code>~/.researchbuddy/uploads/</code>).</p>
+    </div>
+    <div class="card">
+      <h3>Import a folder on this machine</h3>
+      <div class="form row">
+        <input id="l-folder" placeholder="C:\path\to\pdf\folder" style="min-width:320px">
+        <button id="l-folder-run">Import folder</button>
+        <span id="l-folder-status"></span>
+      </div>
     </div>
   </section>
 

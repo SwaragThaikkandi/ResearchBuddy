@@ -98,3 +98,15 @@ code { background: var(--panel2); padding: 2px 6px; border-radius: 5px;
   word-break: break-all; }
 .ok { color: var(--good); } .warn { color: var(--warn); }
 .err { color: var(--bad); }
+
+/* PDF dropzone */
+#l-drop {
+  border: 2px dashed var(--line); border-radius: 10px; padding: 34px;
+  text-align: center; cursor: pointer; margin: 10px 0; color: var(--dim);
+  transition: border-color .15s, background .15s;
+}
+#l-drop.drag { border-color: var(--accent); background: var(--panel2);
+  color: var(--text); }
+#l-queue { margin: 8px 0; }
+#l-queue .chip { max-width: 340px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }

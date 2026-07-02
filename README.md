@@ -20,6 +20,10 @@ frontend is bundled vanilla JS (no npm, no CDN — fully offline). Tabs:
 
 - **Graph** — interactive force-directed map of your research landscape
   (click a node for details; colors: rated / paper / your writing / full text)
+- **Library** — **drag-and-drop PDF import** (multi-file, better than the
+  CLI's folder prompt): papers get the full GROBID pipeline; or mark uploads
+  as *my own draft* to create thought nodes. Server-side folder import too.
+  Files persist in `~/.researchbuddy/uploads/`.
 - **Discover** — intent + keyword search with **focus mode** (type to pick
   anchor papers from your library), rate results 1–10 inline
 - **Snowball** — backward/forward citation expansion with saturation stats
