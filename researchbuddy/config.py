@@ -77,6 +77,23 @@ N_RECOMMENDATIONS    = _env_int("RESEARCHBUDDY_N_RECOMMENDATIONS", 1, min_value=
 EXPLORATION_RATIO    = 0.25    # fraction of suggestions that are exploratory
 MIN_NOVELTY_DISTANCE = 0.30    # min distance from graph for "explore" papers
 
+# ── Discovery engine (rigorous retrieval upgrades) ────────────────────────────
+# Personalized PageRank (random walk with restart; Haveliwala 2002): relevance
+# mass flows from your rated papers through the fused graph, catching multi-hop
+# relationships plain cosine cannot see.
+PPR_DAMPING        = 0.85   # continue-walk probability (standard)
+PPR_TOPK_NEIGHBORS = 10     # graph neighbours used to score an off-graph candidate
+# Maximal Marginal Relevance (Carbonell & Goldstein 1998): final slate trades
+# relevance against redundancy so 10 results span the topic, not 10 clones.
+MMR_LAMBDA         = 0.7    # 1.0 = pure relevance, 0.0 = pure diversity
+# Reciprocal Rank Fusion (Cormack et al. 2009): each search API returns a
+# relevance ORDER; RRF fuses those ranks calibration-free.
+RRF_K              = 60     # standard smoothing constant
+RRF_BLEND          = 0.15   # weight of RRF evidence in the final relevance
+# Age-normalised impact prior: log-scaled citations-per-year, saturating at
+# IMPACT_SATURATION cites/year (field-typical "very high impact").
+IMPACT_SATURATION  = 50
+
 # ── Learned scoring weights ───────────────────────────────────────────────────
 WEIGHT_LEARNING_MIN_RATINGS = 8   # minimum rated papers before learning kicks in
 WEIGHT_LEARNING_REGULARIZATION = 0.1  # L2 regularization strength

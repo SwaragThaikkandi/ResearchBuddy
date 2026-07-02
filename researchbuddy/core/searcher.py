@@ -454,6 +454,7 @@ def _openalex_to_meta(item: dict) -> Optional[PaperMeta]:
     else:
         is_peer_reviewed = None
 
+    cited_by = item.get("cited_by_count")
     paper_id = ResearchGraph.make_id(title, doi=doi)
     return PaperMeta(
         paper_id = paper_id,
@@ -465,6 +466,7 @@ def _openalex_to_meta(item: dict) -> Optional[PaperMeta]:
         doi      = doi,
         venue    = venue_name[:200],
         is_peer_reviewed = is_peer_reviewed,
+        cited_by_count = int(cited_by) if isinstance(cited_by, int) else None,
         source   = "discovered",
     )
 
@@ -575,6 +577,7 @@ def _crossref_to_meta(item: dict) -> Optional[PaperMeta]:
     else:
         is_peer_reviewed = None
 
+    cited_by = item.get("is-referenced-by-count")
     paper_id = ResearchGraph.make_id(title, doi=doi)
     url = item.get("URL") or (f"https://doi.org/{doi}" if doi else "")
     return PaperMeta(
@@ -587,6 +590,7 @@ def _crossref_to_meta(item: dict) -> Optional[PaperMeta]:
         doi      = doi,
         venue    = (venue_name or "")[:200],
         is_peer_reviewed = is_peer_reviewed,
+        cited_by_count = int(cited_by) if isinstance(cited_by, int) else None,
         source   = "discovered",
     )
 
@@ -864,28 +868,36 @@ def find_candidates(
     LLM is unavailable or no query is given.
     """
     all_candidates: list[PaperMeta] = []
-    seen_ids: set[str] = set()
-    seen_arxiv_ids: set[str] = set()
-    seen_dois: set[str] = set()
+    index_by_pid: dict[str, PaperMeta] = {}
+    index_by_arxiv: dict[str, PaperMeta] = {}
+    index_by_doi: dict[str, PaperMeta] = {}
     hyde_embedding: Optional[np.ndarray] = None
     from researchbuddy.config import DETERMINISTIC_MODE
 
-    def add(papers: list[PaperMeta]):
-        for p in papers:
-            # Primary dedup by paper_id
-            if p.paper_id in seen_ids:
+    def add(papers: list[PaperMeta], source_name: str = ""):
+        """Dedup across sources while PRESERVING multi-source evidence: the
+        retained copy accumulates each source's relevance rank (fed to
+        Reciprocal Rank Fusion downstream) and the best citation count."""
+        for rank, p in enumerate(papers):
+            existing = (index_by_pid.get(p.paper_id)
+                        or (index_by_arxiv.get(p.arxiv_id) if p.arxiv_id else None)
+                        or (index_by_doi.get(p.doi) if p.doi else None))
+            if existing is not None:
+                if source_name:
+                    prev = existing.source_ranks.get(source_name)
+                    existing.source_ranks[source_name] = (
+                        rank if prev is None else min(prev, rank))
+                if (getattr(existing, "cited_by_count", None) is None
+                        and getattr(p, "cited_by_count", None) is not None):
+                    existing.cited_by_count = p.cited_by_count
                 continue
-            # Cross-source dedup: same ArXiv preprint may appear from S2 and ArXiv
-            if p.arxiv_id and p.arxiv_id in seen_arxiv_ids:
-                continue
-            # Cross-source dedup: same DOI from different S2 IDs
-            if p.doi and p.doi in seen_dois:
-                continue
-            seen_ids.add(p.paper_id)
+            if source_name:
+                p.source_ranks[source_name] = rank
+            index_by_pid[p.paper_id] = p
             if p.arxiv_id:
-                seen_arxiv_ids.add(p.arxiv_id)
+                index_by_arxiv[p.arxiv_id] = p
             if p.doi:
-                seen_dois.add(p.doi)
+                index_by_doi[p.doi] = p
             all_candidates.append(p)
 
     # ── HyDE: generate hypothetical abstract ─────────────────────────────────
@@ -904,14 +916,15 @@ def find_candidates(
 
     if pos_ids:
         logger.info("Fetching S2 recommendations ...")
-        add(get_s2_recommendations(pos_ids, neg_ids))
+        add(get_s2_recommendations(pos_ids, neg_ids), source_name="s2_rec")
 
     # ── Forward citation expansion: papers that build on highly-rated work ───
     # Cap at 3 papers to limit API calls; skip if S2 cooldown is active
     if pos_ids and not _s2_cooldown_remaining():
         for s2_id in pos_ids[:3]:
             logger.info(f"Fetching forward citations for S2:{s2_id[:12]} ...")
-            add(fetch_forward_citations(s2_id, limit=15))
+            add(fetch_forward_citations(s2_id, limit=15),
+                source_name="s2_citations")
 
     # Build search queries from keywords + top-rated paper titles
     keywords = graph.top_seed_keywords(n=6)
@@ -966,18 +979,20 @@ def find_candidates(
 
     for q in queries[:s2_cap]:
         logger.info(f"S2 search: '{q[:60]}' ...")
-        add(search_semantic_scholar(q, limit=S2_SEARCH_LIMIT))
+        add(search_semantic_scholar(q, limit=S2_SEARCH_LIMIT),
+            source_name="s2_search")
 
     for q in queries[:arxiv_cap]:
         logger.info(f"ArXiv search: '{q[:60]}' ...")
-        add(search_arxiv(q, limit=ARXIV_SEARCH_LIMIT))
+        add(search_arxiv(q, limit=ARXIV_SEARCH_LIMIT), source_name="arxiv")
 
     # OpenAlex — biggest catalogue, most reliable, no rate-limit pain.
     # Run this *after* S2/ArXiv so dedup catches cross-source overlap.
     for q in queries[:openalex_cap]:
         logger.info(f"OpenAlex search: '{q[:60]}' ...")
         try:
-            add(search_openalex(q, limit=OPENALEX_SEARCH_LIMIT))
+            add(search_openalex(q, limit=OPENALEX_SEARCH_LIMIT),
+                source_name="openalex")
         except Exception as e:
             logger.debug("OpenAlex query failed (%s)", e)
 
@@ -986,7 +1001,8 @@ def find_candidates(
     for q in queries[:crossref_cap]:
         logger.info(f"CrossRef search: '{q[:60]}' ...")
         try:
-            add(search_crossref(q, limit=CROSSREF_SEARCH_LIMIT))
+            add(search_crossref(q, limit=CROSSREF_SEARCH_LIMIT),
+                source_name="crossref")
         except Exception as e:
             logger.debug("CrossRef query failed (%s)", e)
 

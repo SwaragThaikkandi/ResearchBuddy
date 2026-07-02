@@ -456,11 +456,33 @@ After each session, **three separate PDFs** are generated in `~/.researchbuddy/`
 ### 1. Paper Search (Menu option 1)
 
 Search using natural language queries. ResearchBuddy:
-- Fetches candidates from Semantic Scholar (recommendations + text search) and ArXiv
+- Fetches candidates from OpenAlex, CrossRef, Semantic Scholar (recommendations + text search) and ArXiv
 - Optionally generates a HyDE hypothetical abstract via LLM for better matching
 - Optionally expands your query with LLM-generated alternatives
 - Ranks results using a multi-signal scoring system (see [Intelligence System](#the-intelligence-system))
 - Mixes in exploratory papers to prevent filter bubbles
+
+The ranking engine is built on citable retrieval science, not vibes:
+
+- **Personalized PageRank** (Haveliwala 2002) — relevance mass random-walks
+  from your rated papers through the fused semantic+citation graph, so a
+  paper two hops from your favourites outranks an isolated keyword match.
+  Restart-injection is subtracted before scoring, so weight learning is not
+  contaminated by label leakage.
+- **Reciprocal Rank Fusion** (Cormack et al. 2009) — each search API returns
+  a relevance *order*; papers near the top of several independent sources
+  carry corroborating evidence, fused calibration-free.
+- **MMR diversification** (Carbonell & Goldstein 1998) — the final slate
+  maximises relevance *minus* redundancy: ten results that span the topic
+  instead of ten near-duplicates of the best hit.
+- **Age-normalised impact prior** — log-scaled citations-per-year from
+  OpenAlex/CrossRef counts, masked when unknown.
+- **Focus mode** — anchor a search on a few papers from *your* library; the
+  context vector and the PageRank restart distribution centre on that subset
+  (multi-seed exploration with an explicit, inspectable scoring model).
+
+All of these enter the same learned-weight fusion as the existing signals, so
+your ratings continue to tune how much each one matters *for you*.
 
 ### 2. Graph Statistics (Menu option 2)
 

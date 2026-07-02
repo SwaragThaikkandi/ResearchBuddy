@@ -37,7 +37,14 @@ from researchbuddy.config import (
     RATING_HALF_LIFE_DAYS, RATING_DECAY_FLOOR,
     WEIGHT_LEARNING_MIN_RATINGS, WEIGHT_LEARNING_REGULARIZATION,
     COLD_START_THRESHOLD, SCORED_SECTION_TYPES,
+    PPR_DAMPING, PPR_TOPK_NEIGHBORS, MMR_LAMBDA,
+    RRF_K, RRF_BLEND, IMPACT_SATURATION,
 )
+
+# Extra scoring signals appended after the per-section block. Order is the
+# canonical layout for the extended weight vector (see __init__ / __setstate__).
+EXTRA_SIGNAL_TYPES    = ["ppr", "impact"]
+EXTRA_SIGNAL_DEFAULTS = [1.5, 0.5]
 from researchbuddy.core.embedder import embed, cosine_similarity, mean_pool
 from researchbuddy.core.hierarchy import (
     build_adaptive_hswn, ClusterNode, n_levels_detected,
@@ -109,6 +116,13 @@ class PaperMeta:
     section_embeddings: dict[str, np.ndarray] = field(default_factory=dict, repr=False)
     venue: str                      = ""
     is_peer_reviewed: Optional[bool]= None   # None=unknown, True=journal/conf, False=preprint
+    # Citation count from the source API (OpenAlex cited_by_count / CrossRef
+    # is-referenced-by-count). None = unknown; feeds the age-normalised
+    # impact signal, masked out when absent.
+    cited_by_count: Optional[int]   = None
+    # Per-source relevance rank from the search APIs (source name -> 0-based
+    # rank in that source's result order). Feeds Reciprocal Rank Fusion.
+    source_ranks: dict[str, int]    = field(default_factory=dict)
     user_rating: Optional[float]    = None
     rated_at: float                 = 0.0    # timestamp when user_rating was set
     times_shown: int                = 0
@@ -183,17 +197,28 @@ class HierarchicalResearchGraph:
         self._style_profile: Optional[StyleProfile]            = None
 
         # ── Learned scoring weights ─────────────────────────────────────────
-        # Signal weights: 7 base + one per scored section type. Layout:
+        # Signal weights: 7 base + one per scored section type + extras. Layout:
         #   [context, niche, area, citation, snf, pub_quality, recency,
-        #    sec[methods], sec[results], sec[discussion], sec[introduction]]
+        #    sec[methods], sec[results], sec[discussion], sec[introduction],
+        #    ppr, impact]
+        # ppr    = Personalized-PageRank mass (multi-hop graph relevance)
+        # impact = age-normalised citation prior (masked when count unknown)
         # Section weights start moderate; weight learning will tune them per
         # user. Methods > results > discussion > intro is the empirically
         # most-useful default ordering for finding similar prior art.
         _sec_defaults = [1.2, 0.8, 0.6, 0.5][: len(SCORED_SECTION_TYPES)]
         self._default_signal_weights = np.array(
             [3.0, 2.0, 1.0, 2.0, 1.5, 0.5, 0.3] + _sec_defaults
+            + list(EXTRA_SIGNAL_DEFAULTS)
         )
         self._learned_signal_weights: Optional[np.ndarray] = None
+        # Personalized-PageRank mass cache (paper_id -> normalised network
+        # mass). Invalidated with the context vector; rebuilt lazily.
+        self._ppr_mass_cache: Optional[dict[str, float]] = None
+        # Focus mode: when set, context_vector() and the PPR restart vector
+        # centre on this subset instead of the whole graph.
+        self._focus_ids: Optional[set[str]] = None
+        self._context_override: Optional[np.ndarray] = None
         # Cache of per-section user-context vectors (one per SCORED_SECTION_TYPES).
         # None entries mean "no rated paper has that section embedded yet".
         self._section_context_vecs: dict[str, Optional[np.ndarray]] = {}
@@ -774,7 +799,13 @@ class HierarchicalResearchGraph:
         """
         Hierarchical context vector: weighted mean of paper embeddings AND
         niche/area centroids (to capture higher-level research direction).
+
+        When a focus-mode override is active (rank_candidates focus_ids),
+        that vector wins — discovery centres on the chosen subset instead of
+        the whole graph.
         """
+        if getattr(self, "_context_override", None) is not None:
+            return self._context_override
         if not self._context_dirty and self._context_vec is not None:
             return self._context_vec
 
@@ -816,6 +847,143 @@ class HierarchicalResearchGraph:
         self._context_vec   = mean_pool(vecs, weights)
         self._context_dirty = False
         return self._context_vec
+
+    def focused_context(self, focus_ids: list[str]) -> Optional[np.ndarray]:
+        """Context vector built ONLY from the chosen papers (focus mode)."""
+        vecs, weights = [], []
+        for pid in focus_ids:
+            m = self._papers.get(pid)
+            if m is not None and m.embedding is not None:
+                vecs.append(m.embedding)
+                weights.append(max(m.effective_weight, 1.0))
+        return mean_pool(vecs, weights) if vecs else None
+
+    # ── Personalized PageRank (random walk with restart) ──────────────────────
+
+    def _ppr_mass(self) -> Optional[dict[str, float]]:
+        """
+        Normalised *network* PPR mass per paper over the fused (semantic ∪
+        citation, undirected) graph. Restart vector = rated/seed papers by
+        effective weight — or the focus subset when focus mode is active.
+
+        The direct restart injection (1-damping)·p is subtracted before
+        normalising, so restart-set members are scored by mass that actually
+        FLOWED to them through the network. This removes the label leakage
+        that would otherwise inflate the ppr weight during learning (rated
+        positives are restart nodes).
+
+        Returns None when the graph has no usable edges (signal is masked).
+        """
+        if self._ppr_mass_cache is not None:
+            return self._ppr_mass_cache
+
+        # Fused undirected view: max of semantic / citation edge weight.
+        G = nx.Graph()
+        G.add_nodes_from(self._papers.keys())
+        for src in (self.G_semantic, self.G_citation):
+            try:
+                for u, v, data in src.edges(data=True):
+                    if u in self._papers and v in self._papers:
+                        w = float(data.get("weight", 1.0) or 1.0)
+                        if G.has_edge(u, v):
+                            G[u][v]["weight"] = max(G[u][v]["weight"], w)
+                        else:
+                            G.add_edge(u, v, weight=w)
+            except Exception as e:
+                logger.debug("PPR layer skipped: %s", e)
+        if G.number_of_edges() == 0:
+            return None
+
+        # Restart vector
+        if self._focus_ids:
+            restart = {pid: 1.0 for pid in self._focus_ids
+                       if pid in self._papers}
+        else:
+            restart = {m.paper_id: m.effective_weight
+                       for m in self._papers.values()
+                       if m.effective_weight > 0}
+        total = sum(restart.values())
+        if not total:
+            return None
+        restart = {k: v / total for k, v in restart.items()}
+
+        try:
+            pr = nx.pagerank(G, alpha=PPR_DAMPING, personalization=restart,
+                             weight="weight")
+        except Exception as e:
+            logger.debug("PPR failed: %s", e)
+            return None
+
+        # Remove the direct restart injection: pi = (1-a)p + a·(flow), so
+        # flow-only mass = (pi - (1-a)p) / a. Clip fp negatives.
+        net = {}
+        for pid, mass in pr.items():
+            direct = (1.0 - PPR_DAMPING) * restart.get(pid, 0.0)
+            net[pid] = max(0.0, (mass - direct) / PPR_DAMPING)
+        peak = max(net.values()) if net else 0.0
+        if peak <= 0:
+            return None
+        self._ppr_mass_cache = {k: v / peak for k, v in net.items()}
+        return self._ppr_mass_cache
+
+    def _ppr_signal(self, meta: PaperMeta) -> Optional[float]:
+        """
+        PPR relevance of a paper. In-graph papers read their own mass;
+        off-graph candidates get the similarity-weighted mass of their
+        top-k nearest graph neighbours (a one-step extension of the walk).
+        Returns None when PPR is unavailable (masked out of scoring).
+        """
+        mass = self._ppr_mass()
+        if mass is None:
+            return None
+        if meta.paper_id in mass:
+            return float(mass[meta.paper_id])
+        if meta.embedding is None:
+            return None
+        sims: list[tuple[float, float]] = []       # (cos, mass)
+        for m in self._papers.values():
+            if m.embedding is None:
+                continue
+            c = float(cosine_similarity(meta.embedding, m.embedding))
+            if c > 0:
+                sims.append((c, mass.get(m.paper_id, 0.0)))
+        if not sims:
+            return 0.0
+        sims.sort(key=lambda t: -t[0])
+        top = sims[:PPR_TOPK_NEIGHBORS]
+        denom = sum(c for c, _ in top) or 1.0
+        return float(sum(c * mval for c, mval in top) / denom)
+
+    @staticmethod
+    def _impact_signal(meta: PaperMeta) -> Optional[float]:
+        """
+        Age-normalised citation prior in [0, 1]: log-scaled citations per
+        year, saturating at IMPACT_SATURATION cites/year. None (masked)
+        when the source API supplied no count.
+        """
+        count = getattr(meta, "cited_by_count", None)
+        if count is None:
+            return None
+        import datetime
+        age = max(0.5, datetime.datetime.now().year - (meta.year or
+                                                       datetime.datetime.now().year))
+        per_year = max(0.0, float(count)) / age
+        return float(min(1.0, np.log1p(per_year) / np.log1p(IMPACT_SATURATION)))
+
+    @staticmethod
+    def _rrf_score(meta: PaperMeta, n_sources: int = 4) -> float:
+        """
+        Reciprocal Rank Fusion over the per-source result ranks the search
+        APIs returned (Cormack et al. 2009): sum of 1/(RRF_K + rank + 1),
+        normalised by the best achievable value so the score lives in [0, 1].
+        Papers found at the top of several independent sources score highest.
+        """
+        ranks = getattr(meta, "source_ranks", None) or {}
+        if not ranks:
+            return 0.0
+        raw = sum(1.0 / (RRF_K + r + 1) for r in ranks.values())
+        best = max(1, n_sources) * (1.0 / (RRF_K + 1))
+        return float(min(1.0, raw / best))
 
     # ── User rating ────────────────────────────────────────────────────────────
 
@@ -1159,10 +1327,21 @@ class HierarchicalResearchGraph:
     # ── Learned scoring weights ──────────────────────────────────────────────
 
     def _signal_weights(self) -> np.ndarray:
-        """Return learned weights if available, else defaults."""
-        if self._learned_signal_weights is not None:
-            return self._learned_signal_weights
-        return self._default_signal_weights
+        """Return learned weights if available, else defaults.
+
+        Schema-safe: weights from an older signal layout are padded with the
+        canonical defaults for the missing tail positions (and truncated if
+        somehow longer), so scoring never crashes on a length mismatch.
+        """
+        w = (self._learned_signal_weights
+             if self._learned_signal_weights is not None
+             else self._default_signal_weights)
+        full = self._default_signal_weights
+        if len(w) < len(full):
+            w = np.concatenate([np.asarray(w, dtype=float), full[len(w):]])
+        elif len(w) > len(full):
+            w = np.asarray(w, dtype=float)[: len(full)]
+        return w
 
     def learn_signal_weights(self) -> bool:
         """
@@ -1285,7 +1464,7 @@ class HierarchicalResearchGraph:
             return None
 
         n_base = 7
-        n_total = n_base + len(SCORED_SECTION_TYPES)
+        n_total = n_base + len(SCORED_SECTION_TYPES) + len(EXTRA_SIGNAL_TYPES)
         signals = np.zeros(n_total)
 
         # 1. Global context similarity
@@ -1331,7 +1510,17 @@ class HierarchicalResearchGraph:
             signals[6] = max(0.0, 1.0 - age / 20.0)
 
         # 8..N. Per-section similarity (Phase 2)
-        signals[n_base:] = self._section_signals(meta)
+        n_sec = len(SCORED_SECTION_TYPES)
+        signals[n_base:n_base + n_sec] = self._section_signals(meta)
+
+        # N+1: Personalized-PageRank mass (0.0 here when unavailable — the
+        # scoring mask removes its weight so it never deflates the score).
+        ppr = self._ppr_signal(meta)
+        signals[n_base + n_sec + 0] = ppr if ppr is not None else 0.0
+
+        # N+2: age-normalised impact prior (masked when count unknown).
+        imp = self._impact_signal(meta)
+        signals[n_base + n_sec + 1] = imp if imp is not None else 0.0
 
         return signals
 
@@ -1377,6 +1566,14 @@ class HierarchicalResearchGraph:
             if pos < len(mask) and (stype not in cand_secs
                                     or sec_ctx.get(stype) is None):
                 mask[pos] = 0.0
+        # Extras masked the same way when their evidence is unavailable:
+        # ppr needs graph edges; impact needs a citation count from the API.
+        n_sec = len(SCORED_SECTION_TYPES)
+        ppr_pos, imp_pos = 7 + n_sec, 7 + n_sec + 1
+        if ppr_pos < len(mask) and self._ppr_mass() is None:
+            mask[ppr_pos] = 0.0
+        if imp_pos < len(mask) and getattr(meta, "cited_by_count", None) is None:
+            mask[imp_pos] = 0.0
         wm = w * mask
         total_w = float(wm.sum()) or 1.0
         fused = float(np.dot(signals, wm) / total_w)
@@ -1395,18 +1592,23 @@ class HierarchicalResearchGraph:
 
         parts, weights = [], []
 
-        # Context similarity (primary signal)
+        # Context similarity (primary signal; honours focus-mode override)
         ctx = self.context_vector()
         if ctx is not None:
             parts.append(float(cosine_similarity(ctx, meta.embedding)))
             weights.append(4.0)
 
-        # Direct similarity to each rated/seed paper
+        # Direct similarity to each rated/seed paper. In focus mode only the
+        # anchor papers count — otherwise the rest of the graph drowns the
+        # chosen subset and focus does nothing in cold-start graphs.
+        focus = getattr(self, "_focus_ids", None)
         for m in self._papers.values():
-            if m.embedding is not None and m.effective_weight > 0:
+            if focus and m.paper_id not in focus:
+                continue
+            if m.embedding is not None and (m.effective_weight > 0 or focus):
                 sim = float(cosine_similarity(m.embedding, meta.embedding))
                 parts.append(sim)
-                weights.append(m.effective_weight / 5.0)
+                weights.append(max(m.effective_weight, 1.0 if focus else 0.0) / 5.0)
 
         # Recency
         if meta.year is not None:
@@ -1516,17 +1718,43 @@ class HierarchicalResearchGraph:
         n: int = 10,
         exploration_ratio: float = EXPLORATION_RATIO,
         hyde_embedding: Optional[np.ndarray] = None,
+        focus_ids: Optional[list[str]] = None,
     ) -> list[tuple[PaperMeta, float, str]]:
         """
         Rank candidates by fused (semantic + citation) relevance, with
-        optional HyDE embedding blending.
+        optional HyDE blending, Reciprocal-Rank-Fusion source evidence, and
+        an MMR-diversified final slate.
 
-        When ``hyde_embedding`` is provided (from the LLM-generated hypothetical
-        abstract), each candidate's score is blended:
-            final = graph_score * 0.6 + hyde_sim * 0.4
-        This lets the LLM's understanding of the research intent supplement
-        the graph-based scoring, while keeping the graph as the primary signal.
+        ``focus_ids`` activates focus mode: the context vector and the
+        Personalized-PageRank restart distribution centre on that subset of
+        the user's papers, so discovery orbits the chosen anchors instead of
+        the whole graph (multi-seed exploration, ResearchRabbit-style —
+        but with an explicit, inspectable scoring model).
         """
+        use_focus = bool(focus_ids)
+        if use_focus:
+            valid = {pid for pid in focus_ids if pid in self._papers}
+            self._focus_ids = valid or None
+            self._context_override = (self.focused_context(sorted(valid))
+                                      if valid else None)
+            self._ppr_mass_cache = None
+        try:
+            return self._rank_candidates_impl(
+                candidates, n=n, exploration_ratio=exploration_ratio,
+                hyde_embedding=hyde_embedding)
+        finally:
+            if use_focus:
+                self._focus_ids = None
+                self._context_override = None
+                self._ppr_mass_cache = None
+
+    def _rank_candidates_impl(
+        self,
+        candidates: list[PaperMeta],
+        n: int = 10,
+        exploration_ratio: float = EXPLORATION_RATIO,
+        hyde_embedding: Optional[np.ndarray] = None,
+    ) -> list[tuple[PaperMeta, float, str]]:
         new_cands = [
             c for c in candidates
             if c.paper_id not in self._papers
@@ -1546,6 +1774,14 @@ class HierarchicalResearchGraph:
                 hyde_sim = float(cosine_similarity(hyde_embedding, c.embedding))
                 hyde_sim = max(0.0, hyde_sim)  # clamp negatives
                 rel = rel * 0.6 + hyde_sim * 0.4
+
+            # Reciprocal Rank Fusion: papers ranked highly by several
+            # independent search APIs carry corroborating evidence that
+            # content similarity alone can't see. Calibration-free by
+            # construction (Cormack et al. 2009).
+            rrf = self._rrf_score(c)
+            if rrf > 0.0:
+                rel = rel * (1.0 - RRF_BLEND) + rrf * RRF_BLEND
 
             # Diminishing-returns penalty for papers shown many times already.
             # Factor: 1.0 (never shown) → ~0.57 (shown 5×) → ~0.33 (shown 10×)
@@ -1608,7 +1844,29 @@ class HierarchicalResearchGraph:
         results: list[tuple[PaperMeta, float, str]] = []
         seen: set[str] = set()
 
-        for meta, rel, _ in by_rel[:n_relevant]:
+        # ── MMR-diversified relevant slate (Carbonell & Goldstein 1998) ────
+        # Greedy argmax of  λ·relevance − (1−λ)·max-sim-to-already-picked.
+        # Guarantees the n_relevant slots span the topic instead of being
+        # n near-duplicates of the single best hit. λ=1 reduces exactly to
+        # the old pure-relevance ordering.
+        pool = list(by_rel)          # already relevance-sorted, floor-filtered
+        picked: list[tuple[PaperMeta, float, float]] = []
+        while pool and len(picked) < n_relevant:
+            best_i, best_val = 0, -np.inf
+            for i, (meta, rel, nov) in enumerate(pool):
+                if meta.embedding is None or not picked:
+                    redundancy = 0.0
+                else:
+                    redundancy = max(
+                        (float(cosine_similarity(meta.embedding, p.embedding))
+                         for p, _, _ in picked if p.embedding is not None),
+                        default=0.0)
+                val = MMR_LAMBDA * rel - (1.0 - MMR_LAMBDA) * redundancy
+                if val > best_val + 1e-12:
+                    best_i, best_val = i, val
+            picked.append(pool.pop(best_i))
+
+        for meta, rel, _ in picked:
             if meta.paper_id not in seen:
                 results.append((meta, rel, "relevant"))
                 seen.add(meta.paper_id)
@@ -1977,6 +2235,7 @@ class HierarchicalResearchGraph:
     def _invalidate(self):
         self._context_dirty = True
         self._fused_W       = None
+        self._ppr_mass_cache = None
 
     # ── Pickle serialisation ─────────────────────────────────────────────────────
 
@@ -2075,36 +2334,50 @@ class HierarchicalResearchGraph:
         # v2.3.0 — extended with per-section signals (one weight per
         #          SCORED_SECTION_TYPES entry).
         n_sec = len(SCORED_SECTION_TYPES)
-        n_total = 7 + n_sec
+        # v2.5.0 — extras appended after the section block (ppr, impact).
+        n_total = 7 + n_sec + len(EXTRA_SIGNAL_TYPES)
+        _sec_defaults = [1.2, 0.8, 0.6, 0.5][: n_sec]
+        _full_defaults = ([3.0, 2.0, 1.0, 2.0, 1.5, 0.5, 0.3]
+                          + _sec_defaults + list(EXTRA_SIGNAL_DEFAULTS))
         if not hasattr(self, "_default_signal_weights"):
-            _sec_defaults = [1.2, 0.8, 0.6, 0.5][: n_sec]
-            self._default_signal_weights = np.array(
-                [3.0, 2.0, 1.0, 2.0, 1.5, 0.5, 0.3] + _sec_defaults
-            )
+            self._default_signal_weights = np.array(_full_defaults)
         elif len(self._default_signal_weights) < n_total:
-            # Old 7-dim weights — extend with section defaults
-            _sec_defaults = [1.2, 0.8, 0.6, 0.5][: n_sec]
+            # Older shorter weight vector — extend with the canonical defaults
+            # for whatever tail positions it is missing.
             old = list(self._default_signal_weights)
             self._default_signal_weights = np.array(
-                old + _sec_defaults[len(old) - 7:]
+                old + _full_defaults[len(old):]
             )
         if not hasattr(self, "_learned_signal_weights"):
             self._learned_signal_weights = None
         elif (self._learned_signal_weights is not None
               and len(self._learned_signal_weights) < n_total):
-            # Old 7-dim learned weights — invalidate so they get re-learned
-            # with the new feature set on the next call to learn_signal_weights().
-            logger.info(
-                "Discarding old %d-dim learned weights "
-                "(new schema has %d signals); will re-learn on next rating.",
-                len(self._learned_signal_weights), n_total,
+            # Learned weights from an older schema stay useful: keep them for
+            # the signals they were trained on and fill the NEW tail positions
+            # with defaults (those signals are additionally masked whenever
+            # their evidence is absent, so this is conservative). Re-learning
+            # on the next rating batch refits the full vector.
+            old_w = list(self._learned_signal_weights)
+            self._learned_signal_weights = np.array(
+                old_w + _full_defaults[len(old_w):]
             )
-            self._learned_signal_weights = None
+            logger.info(
+                "Extended %d-dim learned weights to %d signals "
+                "(new positions use defaults until re-learned).",
+                len(old_w), n_total,
+            )
         # v2.3.0 — per-section context cache
         if not hasattr(self, "_section_context_vecs"):
             self._section_context_vecs = {}
         if not hasattr(self, "_section_context_dirty"):
             self._section_context_dirty = True
+        # v2.5.0 — discovery-engine caches / focus mode
+        if not hasattr(self, "_ppr_mass_cache"):
+            self._ppr_mass_cache = None
+        if not hasattr(self, "_focus_ids"):
+            self._focus_ids = None
+        if not hasattr(self, "_context_override"):
+            self._context_override = None
         for meta in self._papers.values():
             if not hasattr(meta, "venue"):
                 meta.venue = ""
@@ -2129,6 +2402,11 @@ class HierarchicalResearchGraph:
             # v2.4.0 — user-content nodes
             if not hasattr(meta, "kind"):
                 meta.kind = "paper"
+            # v2.5.0 — discovery-engine fields
+            if not hasattr(meta, "cited_by_count"):
+                meta.cited_by_count = None
+            if not hasattr(meta, "source_ranks"):
+                meta.source_ranks = {}
         # v0.2.0 used n_levels; v0.3.0 uses alpha only
         if not hasattr(self, "alpha"):
             self.alpha = FUSION_ALPHA

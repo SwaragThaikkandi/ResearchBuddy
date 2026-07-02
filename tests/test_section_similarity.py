@@ -151,7 +151,8 @@ class TestSectionScoringSignals:
         any_meta = next(iter(g._papers.values()))
         sig = g._extract_signals(any_meta)
         assert sig is not None
-        assert len(sig) == 7 + len(SCORED_SECTION_TYPES)
+        from researchbuddy.core.graph_model import EXTRA_SIGNAL_TYPES
+        assert len(sig) == 7 + len(SCORED_SECTION_TYPES) + len(EXTRA_SIGNAL_TYPES)
 
     def test_section_signal_zero_without_user_ratings(self):
         """No rated papers => no user-section context => section signals == 0."""
@@ -196,8 +197,10 @@ class TestSectionScoringSignals:
 
     def test_default_weights_include_section_dims(self):
         from researchbuddy.config import SCORED_SECTION_TYPES
+        from researchbuddy.core.graph_model import EXTRA_SIGNAL_TYPES
         g = HierarchicalResearchGraph()
-        assert len(g._default_signal_weights) == 7 + len(SCORED_SECTION_TYPES)
+        assert len(g._default_signal_weights) == (
+            7 + len(SCORED_SECTION_TYPES) + len(EXTRA_SIGNAL_TYPES))
 
     def test_weight_learning_works_with_extended_features(self):
         """The logistic regression must accept the wider feature matrix
@@ -214,13 +217,16 @@ class TestSectionScoringSignals:
         ok = g.learn_signal_weights()
         assert ok, "weight learning should succeed with enough positives/negatives"
         assert g._learned_signal_weights is not None
-        assert len(g._learned_signal_weights) == 7 + len(SCORED_SECTION_TYPES)
+        from researchbuddy.core.graph_model import EXTRA_SIGNAL_TYPES
+        assert len(g._learned_signal_weights) == (
+            7 + len(SCORED_SECTION_TYPES) + len(EXTRA_SIGNAL_TYPES))
         # All learned weights should be positive (clamped to >= 0.05)
         assert (g._learned_signal_weights >= 0.05 - 1e-9).all()
 
     def test_setstate_migrates_old_7dim_default_weights(self):
         """Pickles from v1.0–v2.2 had 7-dim defaults; setstate must extend."""
         from researchbuddy.config import SCORED_SECTION_TYPES
+        from researchbuddy.core.graph_model import EXTRA_SIGNAL_TYPES
         g = HierarchicalResearchGraph()
         # Simulate an old pickled state
         g._default_signal_weights = np.array([3.0, 2.0, 1.0, 2.0, 1.5, 0.5, 0.3])
@@ -229,9 +235,14 @@ class TestSectionScoringSignals:
         state = g.__dict__.copy()
         new_g = HierarchicalResearchGraph.__new__(HierarchicalResearchGraph)
         new_g.__setstate__(state)
-        assert len(new_g._default_signal_weights) == 7 + len(SCORED_SECTION_TYPES)
-        # Old learned weights should be invalidated, ready to be re-learned
-        assert new_g._learned_signal_weights is None
+        n_total = 7 + len(SCORED_SECTION_TYPES) + len(EXTRA_SIGNAL_TYPES)
+        assert len(new_g._default_signal_weights) == n_total
+        # Old learned weights are PRESERVED for the trained positions and
+        # padded with defaults for the new tail (v0.8.1 behaviour — no more
+        # throwing away the user's training on every schema bump).
+        assert new_g._learned_signal_weights is not None
+        assert len(new_g._learned_signal_weights) == n_total
+        assert np.allclose(new_g._learned_signal_weights[:7], 1.5)
 
 
 def test_section_layer_clears_stale_state_on_rebuild():

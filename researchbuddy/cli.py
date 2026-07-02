@@ -326,7 +326,8 @@ def show_stats(graph: HierarchicalResearchGraph):
         base_labels = ["context", "niche", "area", "citation", "snf", "pub_qual", "recency"]
         # Per-section labels (only present in v2.3.0+ learned weights)
         sec_labels = [f"sec[{s[:4]}]" for s in cfg.SCORED_SECTION_TYPES]
-        labels = (base_labels + sec_labels)[: len(w)]
+        extra_labels = ["ppr", "impact"]
+        labels = (base_labels + sec_labels + extra_labels)[: len(w)]
         w_str = "  ".join(f"{l}={v:.1f}" for l, v in zip(labels, w))
         print_success(f"\n  Scoring: LEARNED weights from your ratings")
         print_info(f"    {w_str}")
@@ -339,6 +340,45 @@ def show_stats(graph: HierarchicalResearchGraph):
 
 
 # â”€â”€ Search session â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+def _pick_focus_papers(graph: HierarchicalResearchGraph) -> list[str]:
+    """
+    Focus mode: let the user anchor this discovery run on a few papers from
+    their OWN library. The context vector and the Personalized-PageRank
+    restart distribution then centre on that subset — multi-seed exploration
+    around chosen anchors instead of the whole graph.
+    """
+    raw = ask(
+        "Focus on specific papers? Keyword to search YOUR library "
+        "(Enter = whole graph)", "",
+    ).strip().lower()
+    if not raw:
+        return []
+    hits = [m for m in graph.all_papers()
+            if m.kind == "paper" and raw in m.title.lower()][:10]
+    if not hits:
+        print_warn(f"No papers in your library match '{raw}'.")
+        return []
+    for i, m in enumerate(hits, 1):
+        r = f"  rated {m.user_rating:.0f}/10" if m.user_rating else ""
+        print_info(f"  [{i}] {m.title[:70]} ({m.year or '?'}){r}")
+    sel = ask("Anchor on which? (numbers, comma-separated; Enter = all shown)",
+              "").strip()
+    if not sel:
+        chosen = hits
+    else:
+        idxs = []
+        for tok in sel.split(","):
+            try:
+                idxs.append(int(tok.strip()) - 1)
+            except ValueError:
+                continue
+        chosen = [hits[i] for i in idxs if 0 <= i < len(hits)]
+    if chosen:
+        print_success(f"Focus mode: discovery centred on {len(chosen)} "
+                      "anchor paper(s).")
+    return [m.paper_id for m in chosen]
+
 
 def search_session(graph: HierarchicalResearchGraph, plot: bool = True):
     if graph.context_vector() is None:
@@ -353,6 +393,9 @@ def search_session(graph: HierarchicalResearchGraph, plot: bool = True):
     print_info("\nOptional: extra search keywords (comma-separated), or Enter to skip:")
     raw   = ask("Keywords", "")
     extra = [kw.strip() for kw in raw.split(",") if kw.strip()] if raw.strip() else []
+
+    # Focus mode (multi-seed anchored discovery)
+    focus_ids = _pick_focus_papers(graph)
 
     print()
     if query and cfg.LLM_ENABLED and not _check_llm_available():
@@ -379,6 +422,7 @@ def search_session(graph: HierarchicalResearchGraph, plot: bool = True):
         candidates, n=cfg.N_RECOMMENDATIONS,
         exploration_ratio=cfg.EXPLORATION_RATIO,
         hyde_embedding=hyde_embedding,
+        focus_ids=focus_ids or None,
     )
     display_results(results)
 
