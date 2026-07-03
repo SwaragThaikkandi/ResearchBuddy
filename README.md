@@ -30,7 +30,15 @@ frontend is bundled vanilla JS (no npm, no CDN — fully offline). Tabs:
   a "show top N" control, and **optional PDF attach after rating** (GROBID
   parses it into section embeddings + references — CLI parity, no typing paths)
 - **Harvest** — legal open-access full-text autopilot
-- **Review** — one-click review pack (BibTeX / RIS / matrix / scaffold / PRISMA)
+- **Reasoning** — ask questions about your own collection (relevant papers,
+  theme profiles, citation lineages, bridge/frontier papers) and rate the
+  answer to tune the graph
+- **Review** — one click builds the review **and shows it inline** (themed
+  scaffold + PRISMA rendered in the page) plus a **thought map**: theme
+  bubbles sized by paper count, green arcs for screened share, amber rings
+  marking under-screened gaps, link thickness = theme coupling
+- **Evolution** — time-series charts of graph growth, connectivity, and
+  structure quality from the snapshot history
 - **Watches** — living-review queries
 - **Collaborate** — social-psyche: your identity fingerprint, contribution
   ledger (with chain verification), pinned peers, **live secure merge**

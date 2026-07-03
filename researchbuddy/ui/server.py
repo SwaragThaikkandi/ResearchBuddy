@@ -445,10 +445,27 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
     def review_pack(body: dict):
         from researchbuddy.core.review_builder import export_review_pack
         with state.lock:
-            pack = export_review_pack(state.graph,
-                                      use_llm=bool(body.get("use_llm")))
+            try:
+                state.set_progress(
+                    "Building the review pack — themes, citation keys, "
+                    "synthesis matrix, PRISMA flow…")
+                pack = export_review_pack(state.graph,
+                                          use_llm=bool(body.get("use_llm")))
+            finally:
+                state.end_progress()
+
+        def _read(name: str) -> str:
+            p = Path(pack) / name
+            try:
+                return p.read_text(encoding="utf-8") if p.exists() else ""
+            except OSError:
+                return ""
         return {"path": str(pack),
-                "files": sorted(p.name for p in Path(pack).iterdir())}
+                "files": sorted(p.name for p in Path(pack).iterdir()),
+                # inline content so the UI can SHOW the review, not just
+                # point at files on disk
+                "scaffold": _read("review_scaffold.md"),
+                "prisma": _read("prisma_flow.md")}
 
     # ── Watches (living review) ──────────────────────────────────────────
     @app.get("/api/watches")
@@ -664,6 +681,197 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
         except Exception as e:                       # pragma: no cover
             logger.warning("could not persist CORE key: %s", e)
         return {"set": core_fetcher.has_api_key()}
+
+    @app.post("/api/core_test")
+    def core_test():
+        """Live end-to-end CORE check: one tiny real query. Surfaces exactly
+        why CORE 'is not working' (no key / bad key / network / fine)."""
+        import requests as _rq
+        from researchbuddy.core import core_fetcher as cf
+        try:
+            r = _rq.get(f"{cfg.CORE_API_URL}/search/works",
+                        params={"q": "test", "limit": 1},
+                        headers=cf._HEADERS, timeout=15)
+            if r.status_code == 200:
+                detail = ("key accepted — fast lane active" if cf.has_api_key()
+                          else "reachable WITHOUT a key (slow polite rate)")
+                return {"ok": True, "status": 200, "has_key": cf.has_api_key(),
+                        "detail": detail}
+            if r.status_code == 401:
+                return {"ok": False, "status": 401, "has_key": cf.has_api_key(),
+                        "detail": "401 Unauthorized — the key is wrong or "
+                                  "expired. Re-copy it from "
+                                  "core.ac.uk/services/api."}
+            if r.status_code == 429:
+                return {"ok": False, "status": 429, "has_key": cf.has_api_key(),
+                        "detail": "429 rate-limited — wait a minute and retry."}
+            return {"ok": False, "status": r.status_code,
+                    "has_key": cf.has_api_key(),
+                    "detail": f"CORE answered HTTP {r.status_code}"}
+        except Exception as e:
+            return {"ok": False, "status": 0, "has_key": cf.has_api_key(),
+                    "detail": f"network error: {e}"}
+
+    @app.post("/api/core_enrich")
+    def core_enrich(body: dict):
+        """Run CORE full-text enrichment NOW, visibly. retry_failed clears
+        the 'already tried' marks — necessary when papers were imported
+        before the API key existed (they were marked enriched even though
+        CORE returned nothing, so they were never retried)."""
+        with state.lock:
+            try:
+                if body.get("retry_failed"):
+                    # keep only papers that truly carry full-text embeddings
+                    state.graph._fulltext_enriched = {
+                        m.paper_id for m in state.graph.all_papers()
+                        if m.filepath}
+                n_todo = len([m for m in state.graph.all_papers()
+                              if m.paper_id not in
+                              getattr(state.graph, "_fulltext_enriched", set())])
+                state.set_progress(
+                    f"Asking CORE for full text of {n_todo} paper(s) — "
+                    "~1 s/paper without a key, much faster with one…")
+                enriched = state.graph.enrich_with_full_text(verbose=False)
+                if enriched:
+                    state.set_progress("Rebuilding hierarchy with enriched "
+                                       "embeddings…", 0.9)
+                    state.graph.rebuild_hierarchy()
+                _save()
+            finally:
+                state.end_progress()
+        return {"enriched": enriched, "checked": n_todo}
+
+    # ── Reasoning mode (the CLI's option 7, in the browser) ─────────────
+    @app.post("/api/query")
+    def query(body: dict):
+        from researchbuddy.core.reasoner import Reasoner
+        q = (body.get("query") or "").strip()
+        if not q:
+            raise HTTPException(400, "query required")
+        if not state.graph.all_papers():
+            raise HTTPException(400, "no papers in the graph yet")
+        with state.lock:
+            try:
+                state.set_progress(
+                    "Reasoning over your collection — PageRank relevance, "
+                    "theme profiling, citation lineages, bridge detection…")
+                result = Reasoner(top_k=cfg.QUERY_TOP_K).reason(q, state.graph)
+            finally:
+                state.end_progress()
+            # remember for feedback
+            state.last_query = {
+                "embedding": result.query_embedding,
+                "paper_ids": [m.paper_id for m, _, _ in
+                              result.relevant_papers],
+            }
+        return {
+            "relevant": [dict(_paper_json(m, score=s),
+                              degree=info.get("degree", 0),
+                              role=info.get("role", ""))
+                         for m, s, info in result.relevant_papers],
+            "themes": [{
+                "id": cp.cluster.node_id, "n_papers": cp.n_papers,
+                "match": round(cp.similarity, 3), "maturity": cp.maturity,
+                "density": round(cp.density, 3),
+                "central": (cp.central_paper.title[:80]
+                            if cp.central_paper else ""),
+            } for cp in (result.cluster_profiles or [])[:5]],
+            "lineages": [{
+                "type": ("citation chain" if lin.path_type == "citation_chain"
+                         else "semantic path"),
+                "titles": [(state.graph.get_paper(pid).title[:60]
+                            if state.graph.get_paper(pid) else pid[:12])
+                           for pid in lin.path],
+            } for lin in (result.lineages or [])],
+            "connections": [
+                [(state.graph.get_paper(a).title[:60]
+                  if state.graph.get_paper(a) else a[:12]),
+                 (state.graph.get_paper(b).title[:60]
+                  if state.graph.get_paper(b) else b[:12]), desc]
+                for a, b, desc in (result.connections or [])[:8]],
+            "bridges": [m.title[:80] for m in (result.bridge_papers or [])],
+            "frontier": [[m.title[:70], round(sim, 3)]
+                         for m, sim in (result.frontier_papers or [])],
+            "narrative": result.temporal_narrative or "",
+            "gap_note": result.gap_note or "",
+        }
+
+    @app.post("/api/query_feedback")
+    def query_feedback(body: dict):
+        rating = float(body.get("rating", 0))
+        last = getattr(state, "last_query", None)
+        if last is None:
+            raise HTTPException(400, "no query to rate")
+        if not (1 <= rating <= 10):
+            raise HTTPException(400, "rating must be 1-10")
+        with state.lock:
+            state.graph.apply_query_feedback(
+                last["embedding"], last["paper_ids"], rating)
+            _save()
+        return {"ok": True}
+
+    # ── Review thought-map (synthesis-level concept diagram) ─────────────
+    @app.get("/api/review_map")
+    def review_map():
+        from researchbuddy.core.review_builder import themes as rb_themes
+        with state.lock:
+            ths = rb_themes(state.graph)
+            p2n = state.graph.paper_to_niche()
+            # inter-theme coupling: summed semantic edge weight across niches
+            coupling: dict[tuple, float] = {}
+            try:
+                for u, v, d in state.graph.G_semantic.edges(data=True):
+                    nu, nv = p2n.get(u), p2n.get(v)
+                    if nu and nv and nu != nv:
+                        key = tuple(sorted((nu, nv)))
+                        coupling[key] = (coupling.get(key, 0.0)
+                                         + float(d.get("weight", 0) or 0))
+            except Exception as e:
+                logger.debug("coupling skipped: %s", e)
+        out_themes = []
+        for th in ths:
+            n = len(th["papers"])
+            rated = th["n_rated"]
+            out_themes.append({
+                "id": th["cluster_id"], "label": th["label"],
+                "n": n, "rated": rated,
+                "years": th["year_range"],
+                # under-screened theme = a gap worth attention
+                "gap": bool(n >= 3 and rated < max(2, n // 3)),
+                "top": [m.title[:70] for m in
+                        sorted(th["papers"],
+                               key=lambda m: -(m.user_rating or 0))[:6]],
+            })
+        max_w = max(coupling.values()) if coupling else 1.0
+        links = sorted(
+            ({"a": a, "b": b, "w": round(w / max_w, 3)}
+             for (a, b), w in coupling.items() if w / max_w >= 0.05),
+            key=lambda l: -l["w"])[:80]     # strongest only — readable map
+        return {"themes": out_themes, "links": links}
+
+    # ── Graph evolution time-series ──────────────────────────────────────
+    @app.get("/api/evolution")
+    def evolution():
+        import json as _json
+        log = cfg.HISTORY_DIR / "evolution.jsonl"
+        if not log.exists():
+            return {"series": []}
+        keep = ("timestamp_iso", "total_papers", "rated_papers",
+                "semantic_edges", "citation_edges", "niche_clusters",
+                "modularity_combined", "clustering_combined",
+                "largest_component_frac")
+        series = []
+        with open(log, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+                series.append({k: rec.get(k) for k in keep})
+        return {"series": series[-500:]}
 
     @app.post("/api/switch_backend")
     def switch_backend():

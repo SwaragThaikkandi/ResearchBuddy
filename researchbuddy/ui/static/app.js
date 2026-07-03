@@ -66,6 +66,7 @@ function showTab(name) {
   if (name === "watches") loadWatches();
   if (name === "collab") loadCollab();
   if (name === "services") loadServices();
+  if (name === "evolution") loadEvolution();
 }
 document.querySelectorAll("#tabs button").forEach(btn => {
   btn.onclick = () => showTab(btn.dataset.tab);
@@ -421,18 +422,238 @@ $("#h-run").onclick = async () => {
 
 /* ── Review tab ───────────────────────────────────────────────────────── */
 $("#r-run").onclick = async () => {
-  $("#r-status").textContent = "building pack…";
+  $("#r-status").textContent = "";
   $("#r-run").disabled = true;
   try {
-    const r = await api("/api/review_pack", { use_llm: $("#r-llm").checked });
+    const r = await withProgress("Building your review…", () =>
+      api("/api/review_pack", { use_llm: $("#r-llm").checked }));
     const out = $("#r-out");
     out.classList.remove("hidden");
-    out.innerHTML = `Pack written to <code>${esc(r.path)}</code><br>` +
+    out.innerHTML = `Files saved to <code>${esc(r.path)}</code><br>` +
       r.files.map(f => `<span class="res-tag">${esc(f)}</span>`).join(" ");
-    $("#r-status").textContent = "";
+    // Show the review right here, not just file paths.
+    if (r.scaffold) {
+      $("#r-scaffold").classList.remove("hidden");
+      $("#r-scaffold").innerHTML = mdLite(r.scaffold);
+    }
+    if (r.prisma) {
+      $("#r-prisma").classList.remove("hidden");
+      $("#r-prisma").innerHTML = mdLite(r.prisma);
+    }
+    // And the thought map alongside it.
+    $("#r-map-run").click();
   } catch (e) { $("#r-status").textContent = "error: " + e.message; }
   finally { $("#r-run").disabled = false; }
 };
+
+/* ── Reasoning tab ────────────────────────────────────────────────────── */
+$("#q-run").onclick = async () => {
+  const q = $("#q-input").value.trim();
+  if (!q) return;
+  $("#q-run").disabled = true; $("#q-status").textContent = "";
+  try {
+    const r = await withProgress("Reasoning over your collection…", () =>
+      api("/api/query", { query: q }));
+    $("#q-out").classList.remove("hidden");
+    $("#q-relevant").innerHTML = r.relevant.map(p =>
+      `<div class="banner"><b>${esc(p.title)}</b>
+       <span class="res-meta">(${p.year ?? "?"}) · relevance
+       ${(p.score * 100).toFixed(0)}% · ${p.degree} connections
+       ${p.role ? "· " + esc(p.role) : ""}
+       ${p.rating != null ? "· rated " + p.rating + "/10" : ""}</span></div>`
+    ).join("") || '<p class="note">nothing relevant found</p>';
+    $("#q-themes").innerHTML = r.themes.map(t =>
+      `<div class="banner">${esc(t.id)} — ${t.n_papers} papers · match
+       ${(t.match * 100).toFixed(0)}% · ${esc(t.maturity)} · density
+       ${(t.density * 100).toFixed(0)}%<br>
+       <span class="res-meta">key paper: ${esc(t.central)}</span></div>`
+    ).join("") || '<p class="note">no theme profiles yet (rebuild hierarchy)</p>';
+    $("#q-lineages").innerHTML =
+      r.lineages.map(l => `<div class="banner"><span class="res-meta">
+        ${esc(l.type)}:</span> ${l.titles.map(esc).join(" → ")}</div>`).join("") +
+      r.connections.map(c => `<div class="banner">${esc(c[0])} ↔ ${esc(c[1])}
+        <span class="res-meta">(${esc(c[2])})</span></div>`).join("") ||
+      '<p class="note">none found</p>';
+    $("#q-bridges").innerHTML =
+      (r.bridges.length ? "<b>Bridges:</b> " + r.bridges.map(esc).join(" · ") : "") +
+      (r.frontier.length ? "<br><b>Frontier:</b> " +
+        r.frontier.map(f => `${esc(f[0])} (${(f[1] * 100).toFixed(0)}%)`).join(" · ") : "") +
+      (r.narrative ? `<br><span class="res-meta">${esc(r.narrative)}</span>` : "") +
+      (r.gap_note ? `<br><span class="warn">${esc(r.gap_note)}</span>` : "") ||
+      '<p class="note">none found</p>';
+    const rate = $("#q-rate"); rate.innerHTML = "";
+    for (let i = 1; i <= 10; i++) {
+      const b = document.createElement("button");
+      b.textContent = i;
+      b.onclick = async () => {
+        await api("/api/query_feedback", { rating: i });
+        rate.querySelectorAll("button").forEach(x => x.classList.remove("rated"));
+        b.classList.add("rated");
+      };
+      rate.appendChild(b);
+    }
+  } catch (e) { $("#q-status").textContent = "error: " + e.message; }
+  finally { $("#q-run").disabled = false; }
+};
+
+/* ── Tiny markdown-lite renderer (headings, tables, bold, code) ───────── */
+function mdLite(md) {
+  const lines = md.split("\n"); let html = "", inTable = false;
+  for (const ln of lines) {
+    if (/^\|/.test(ln)) {
+      if (/^\|[\s\-|]+\|$/.test(ln)) continue;            // separator row
+      const cells = ln.split("|").slice(1, -1).map(c => inline(c.trim()));
+      if (!inTable) { html += "<table>"; inTable = true; }
+      html += "<tr><td>" + cells.join("</td><td>") + "</td></tr>";
+      continue;
+    }
+    if (inTable) { html += "</table>"; inTable = false; }
+    if (/^### /.test(ln)) html += `<h4>${inline(ln.slice(4))}</h4>`;
+    else if (/^## /.test(ln)) html += `<h3>${inline(ln.slice(3))}</h3>`;
+    else if (/^# /.test(ln)) html += `<h2>${inline(ln.slice(2))}</h2>`;
+    else if (/^> /.test(ln)) html += `<p class="note">${inline(ln.slice(2))}</p>`;
+    else if (/^- /.test(ln)) html += `<li>${inline(ln.slice(2))}</li>`;
+    else if (/^---/.test(ln)) html += "<hr>";
+    else if (ln.trim()) html += `<p>${inline(ln)}</p>`;
+  }
+  if (inTable) html += "</table>";
+  return html;
+  function inline(s) {
+    return esc(s)
+      .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+      .replace(/\*(.+?)\*/g, "<i>$1</i>")
+      .replace(/`(.+?)`/g, "<code>$1</code>")
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g,
+               '<a href="$2" target="_blank">$1</a>');
+  }
+}
+
+/* ── Review: inline scaffold + thought map ────────────────────────────── */
+let reviewMapData = null;
+
+$("#r-map-run").onclick = () => withProgress("Mapping your themes…",
+  async () => {
+    reviewMapData = await api("/api/review_map");
+    $("#r-map-wrap").classList.remove("hidden");
+    drawReviewMap();
+  }).catch(e => alert("map failed: " + e.message));
+
+function drawReviewMap() {
+  const d = reviewMapData;
+  const canvas = $("#r-map");
+  canvas.width = canvas.parentElement.clientWidth - 20;
+  const W = canvas.width, H = canvas.height;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, W, H);
+  const ths = d.themes;
+  if (!ths.length) return;
+  // circular layout, biggest theme centred
+  const sorted = [...ths].sort((a, b) => b.n - a.n);
+  const maxN = sorted[0].n;
+  const pos = {};
+  sorted.forEach((t, i) => {
+    if (i === 0) pos[t.id] = { x: W / 2, y: H / 2 };
+    else {
+      const ang = (i - 1) / (sorted.length - 1) * 2 * Math.PI - Math.PI / 2;
+      pos[t.id] = { x: W / 2 + Math.cos(ang) * W * 0.33,
+                    y: H / 2 + Math.sin(ang) * H * 0.36 };
+    }
+    t.r = 18 + 34 * Math.sqrt(t.n / maxN);
+  });
+  // links
+  for (const l of d.links) {
+    const a = pos[l.a], b = pos[l.b];
+    if (!a || !b) continue;
+    ctx.strokeStyle = `rgba(77,163,255,${0.12 + 0.5 * l.w})`;
+    ctx.lineWidth = 1 + 5 * l.w;
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  }
+  // bubbles
+  for (const t of ths) {
+    const p = pos[t.id];
+    ctx.fillStyle = "#1e2740";
+    ctx.beginPath(); ctx.arc(p.x, p.y, t.r, 0, 7); ctx.fill();
+    ctx.strokeStyle = t.gap ? "#ffb454" : "#2a3654";
+    ctx.lineWidth = t.gap ? 3 : 1.5;
+    ctx.beginPath(); ctx.arc(p.x, p.y, t.r, 0, 7); ctx.stroke();
+    // green arc = screened share
+    if (t.n) {
+      ctx.strokeStyle = "#43d17c"; ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, t.r + 4, -Math.PI / 2,
+              -Math.PI / 2 + 2 * Math.PI * (t.rated / t.n));
+      ctx.stroke();
+    }
+    ctx.fillStyle = "#dbe4f5"; ctx.font = "12px sans-serif";
+    ctx.textAlign = "center";
+    const words = t.label.split(" ");
+    words.slice(0, 3).forEach((w, i) =>
+      ctx.fillText(w.slice(0, 14), p.x, p.y - 6 + i * 13));
+    ctx.fillStyle = "#8494b5";
+    ctx.fillText(`${t.rated}/${t.n}`, p.x, p.y + t.r - 6);
+  }
+  canvas.onclick = (ev) => {
+    const r = canvas.getBoundingClientRect();
+    const x = ev.clientX - r.left, y = ev.clientY - r.top;
+    const hit = ths.find(t => {
+      const p = pos[t.id];
+      return (p.x - x) ** 2 + (p.y - y) ** 2 < t.r ** 2;
+    });
+    const det = $("#r-map-detail");
+    if (!hit) { det.classList.add("hidden"); return; }
+    det.classList.remove("hidden");
+    det.innerHTML = `<b>${esc(hit.label)}</b> — ${hit.n} papers,
+      ${hit.rated} screened${hit.gap ?
+        ' · <span class="warn">under-screened (gap)</span>' : ""}
+      ${hit.years ? ` · ${hit.years[0]}–${hit.years[1]}` : ""}<br>` +
+      hit.top.map(t2 => `<div class="res-meta">• ${esc(t2)}</div>`).join("");
+  };
+}
+
+/* ── Evolution charts ─────────────────────────────────────────────────── */
+function drawSeries(canvasSel, series, fields, colors, normalize) {
+  const canvas = $(canvasSel);
+  canvas.width = canvas.parentElement.clientWidth - 20;
+  const W = canvas.width, H = canvas.height, pad = 34;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, W, H);
+  if (series.length < 2) {
+    ctx.fillStyle = "#8494b5"; ctx.font = "13px sans-serif";
+    ctx.fillText("need at least 2 snapshots", 20, 30);
+    return;
+  }
+  let max = 1;
+  if (!normalize)
+    for (const f of fields)
+      for (const s of series) max = Math.max(max, +s[f] || 0);
+  ctx.strokeStyle = "#2a3654";
+  ctx.strokeRect(pad, 8, W - pad - 8, H - pad - 8);
+  ctx.fillStyle = "#8494b5"; ctx.font = "11px sans-serif";
+  ctx.fillText(normalize ? "1.0" : String(max), 4, 16);
+  ctx.fillText("0", 4, H - pad);
+  fields.forEach((f, fi) => {
+    ctx.strokeStyle = colors[fi]; ctx.lineWidth = 2; ctx.beginPath();
+    series.forEach((s, i) => {
+      const v = +s[f] || 0;
+      const x = pad + (W - pad - 8) * i / (series.length - 1);
+      const y = 8 + (H - pad - 16) * (1 - v / (normalize ? 1 : max));
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.stroke();
+  });
+}
+async function loadEvolution() {
+  const d = await api("/api/evolution");
+  $("#ev-empty").classList.toggle("hidden", d.series.length >= 2);
+  drawSeries("#ev-growth", d.series,
+    ["total_papers", "rated_papers", "niche_clusters"],
+    ["#4da3ff", "#43d17c", "#c084fc"], false);
+  drawSeries("#ev-edges", d.series,
+    ["semantic_edges", "citation_edges"], ["#4da3ff", "#ffb454"], false);
+  drawSeries("#ev-quality", d.series,
+    ["modularity_combined", "clustering_combined", "largest_component_frac"],
+    ["#4da3ff", "#43d17c", "#ffb454"], true);
+}
 
 /* ── Watches tab ──────────────────────────────────────────────────────── */
 async function loadWatches() {
@@ -648,6 +869,30 @@ $("#sv-core-save").onclick = async () => {
     $("#sv-core-status").textContent = r.set
       ? "key saved — fast lane active" : "key cleared";
   } catch (e) { $("#sv-core-status").textContent = "error: " + e.message; }
+};
+$("#sv-core-test").onclick = async () => {
+  $("#sv-core-status").textContent = "testing…";
+  try {
+    const r = await api("/api/core_test", {});
+    $("#sv-core-status").innerHTML =
+      `<span class="${r.ok ? "ok" : "err"}">${esc(r.detail)}</span>`;
+    $("#sv-core-dot").className =
+      "dot " + (r.ok && r.has_key ? "on" : (r.ok ? "dim" : "off"));
+  } catch (e) { $("#sv-core-status").textContent = "error: " + e.message; }
+};
+$("#sv-core-enrich").onclick = async () => {
+  $("#sv-core-enrich").disabled = true;
+  $("#sv-core-enrich-status").textContent = "";
+  try {
+    const r = await withProgress("Asking CORE for full texts…", () =>
+      api("/api/core_enrich",
+          { retry_failed: $("#sv-core-retry").checked }));
+    $("#sv-core-enrich-status").innerHTML =
+      `<span class="ok">${r.enriched} enriched</span> of ${r.checked} tried`;
+    loadStats();
+  } catch (e) {
+    $("#sv-core-enrich-status").textContent = "error: " + e.message;
+  } finally { $("#sv-core-enrich").disabled = false; }
 };
 
 async function svcAction(name, action, statusEl) {

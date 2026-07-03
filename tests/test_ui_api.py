@@ -338,6 +338,108 @@ def test_attach_pdf_validates(client, graph_with_papers, monkeypatch,
                                        "application/pdf")}).status_code == 400
 
 
+# ── Reasoning / review map / evolution / CORE actions ─────────────────────────
+
+def test_query_endpoint_and_feedback(client, graph_with_papers, monkeypatch):
+    monkeypatch.setattr(srv, "save_graph", lambda g: None)
+    r = client.post("/api/query", json={"query": "bayesian decision making"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert {"relevant", "themes", "lineages", "bridges",
+            "frontier", "narrative"} <= set(body)
+    fb = client.post("/api/query_feedback", json={"rating": 8})
+    assert fb.status_code == 200
+    assert client.post("/api/query_feedback",
+                       json={"rating": 99}).status_code == 400
+
+
+def test_query_validates(client):
+    assert client.post("/api/query", json={"query": ""}).status_code == 400
+
+
+def test_review_map_shape(client, graph_with_papers, monkeypatch):
+    import researchbuddy.core.graph_model as gm
+    monkeypatch.setattr(gm, "_get_cached_keybert", lambda: None)
+    graph_with_papers.rebuild_hierarchy()
+    r = client.get("/api/review_map")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["themes"], "at least one theme expected"
+    t = body["themes"][0]
+    assert {"id", "label", "n", "rated", "gap", "top"} <= set(t)
+    assert isinstance(body["links"], list)
+
+
+def test_review_pack_returns_inline_content(client, graph_with_papers,
+                                            monkeypatch, tmp_path):
+    import researchbuddy.core.review_builder as rb
+    import researchbuddy.core.graph_model as gm
+    monkeypatch.setattr(gm, "_get_cached_keybert", lambda: None)
+    monkeypatch.setattr(rb, "REVIEW_EXPORT_DIR", tmp_path)
+    monkeypatch.setattr(rb, "LLM_ENABLED", False)
+    from researchbuddy.core import audit
+    monkeypatch.setattr(audit, "PRISMA_LOG", tmp_path / "log.jsonl")
+
+    r = client.post("/api/review_pack", json={"use_llm": False})
+    assert r.status_code == 200
+    body = r.json()
+    assert "Literature Review Scaffold" in body["scaffold"]
+    assert "PRISMA" in body["prisma"]
+
+
+def test_evolution_series(client, monkeypatch, tmp_path):
+    import researchbuddy.ui.server as srv_mod
+    monkeypatch.setattr(srv_mod.cfg, "HISTORY_DIR", tmp_path)
+    # empty
+    assert client.get("/api/evolution").json()["series"] == []
+    # two snapshots
+    import json as _json
+    with open(tmp_path / "evolution.jsonl", "w", encoding="utf-8") as f:
+        for i in (1, 2):
+            f.write(_json.dumps({"timestamp_iso": f"2026-0{i}-01",
+                                 "total_papers": 10 * i,
+                                 "semantic_edges": 100 * i,
+                                 "junk_field": "dropped"}) + "\n")
+    s = client.get("/api/evolution").json()["series"]
+    assert len(s) == 2
+    assert s[1]["total_papers"] == 20
+    assert "junk_field" not in s[1]
+
+
+def test_core_test_endpoint(client, monkeypatch):
+    class _R:
+        def __init__(self, code): self.status_code = code
+    import requests as rq
+    monkeypatch.setattr(rq, "get", lambda *a, **k: _R(401))
+    body = client.post("/api/core_test").json()
+    assert body["ok"] is False and body["status"] == 401
+    assert "Unauthorized" in body["detail"]
+    monkeypatch.setattr(rq, "get", lambda *a, **k: _R(200))
+    assert client.post("/api/core_test").json()["ok"] is True
+
+
+def test_core_enrich_retry_clears_marks(client, graph_with_papers,
+                                        monkeypatch):
+    monkeypatch.setattr(srv, "save_graph", lambda g: None)
+    g = graph_with_papers
+    # simulate the real bug: everything marked tried, nothing has full text
+    g._fulltext_enriched = {m.paper_id for m in g.all_papers()}
+    calls = {}
+
+    def fake_enrich(verbose=False):
+        calls["todo"] = len([m for m in g.all_papers()
+                             if m.paper_id not in g._fulltext_enriched])
+        return 0
+
+    monkeypatch.setattr(g, "enrich_with_full_text", fake_enrich)
+    # without retry: nothing to do
+    client.post("/api/core_enrich", json={})
+    assert calls["todo"] == 0
+    # with retry: marks cleared (no paper has a filepath) → all retried
+    client.post("/api/core_enrich", json={"retry_failed": True})
+    assert calls["todo"] == 5
+
+
 # ── CORE API key ───────────────────────────────────────────────────────────────
 
 def test_core_key_set_and_clear(client, monkeypatch, tmp_path):

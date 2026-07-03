@@ -15,7 +15,9 @@
     <button data-tab="discover">Discover</button>
     <button data-tab="snowball">Snowball</button>
     <button data-tab="harvest">Harvest</button>
+    <button data-tab="reason">Reasoning</button>
     <button data-tab="review">Review</button>
+    <button data-tab="evolution">Evolution</button>
     <button data-tab="watches">Watches</button>
     <button data-tab="collab">Collaborate</button>
     <button data-tab="services">Services</button>
@@ -124,17 +126,73 @@
     <pre id="h-log" class="log hidden"></pre>
   </section>
 
+  <!-- ── Reasoning (query your collection) ─────────────────────────────── -->
+  <section id="tab-reason" class="tab">
+    <p class="note">Ask questions about <b>your own collection</b>. The
+      reasoner finds the most relevant papers (PageRank + embeddings),
+      profiles the research themes they belong to, traces citation lineages,
+      and flags bridge / frontier papers. Rating an answer tunes the graph.</p>
+    <div class="form row">
+      <input id="q-input" style="min-width:420px"
+             placeholder="e.g. what do we know about response-time models under time pressure?">
+      <button id="q-run" class="primary">Ask</button>
+      <span id="q-status"></span>
+    </div>
+    <div id="q-out" class="hidden">
+      <div class="card"><h3>Most relevant papers</h3><div id="q-relevant"></div></div>
+      <div class="card"><h3>Research themes</h3><div id="q-themes"></div></div>
+      <div class="card"><h3>Lineages &amp; connections</h3><div id="q-lineages"></div></div>
+      <div class="card"><h3>Bridges &amp; frontier</h3><div id="q-bridges"></div></div>
+      <div class="card">
+        <h3>Was this answer useful?</h3>
+        <p class="note">A high rating strengthens the links between these
+          papers; a low one dampens them. This is how the graph learns what
+          "relevant" means to you.</p>
+        <div class="rate-row" id="q-rate"></div>
+      </div>
+    </div>
+  </section>
+
   <!-- ── Review ────────────────────────────────────────────────────────── -->
   <section id="tab-review" class="tab">
-    <p class="note">One click exports BibTeX, RIS, a synthesis matrix, a
-      themed review scaffold, and a PRISMA flow report. Only bibliographic
-      facts + your own ratings — no third-party text is reproduced.</p>
+    <p class="note">One click builds the full review: themed scaffold with
+      citation keys, BibTeX/RIS, synthesis matrix, PRISMA flow — and shows it
+      right here. Only bibliographic facts + your own ratings; no third-party
+      text is reproduced.</p>
     <div class="form row">
       <label><input type="checkbox" id="r-llm"> use local LLM for theme synthesis</label>
-      <button id="r-run" class="primary">Export review pack</button>
+      <button id="r-run" class="primary">Build review</button>
+      <button id="r-map-run">Draw thought map</button>
       <span id="r-status"></span>
     </div>
     <div id="r-out" class="banner hidden"></div>
+    <div id="r-map-wrap" class="hidden">
+      <h3>Thought map — your review at a glance</h3>
+      <p class="note">Each bubble is a research <b>theme</b> (sized by paper
+        count; the green arc shows how much of it you've screened). Lines =
+        how strongly themes talk to each other. <span class="warn">Amber
+        rings</span> mark under-screened themes — your gaps. Click a bubble
+        to list its papers.</p>
+      <canvas id="r-map" height="520"></canvas>
+      <div id="r-map-detail" class="banner hidden"></div>
+    </div>
+    <div id="r-scaffold" class="card hidden"></div>
+    <div id="r-prisma" class="card hidden"></div>
+  </section>
+
+  <!-- ── Evolution ─────────────────────────────────────────────────────── -->
+  <section id="tab-evolution" class="tab">
+    <p class="note">How your research graph grew over time — every save
+      writes one snapshot line. Solid proof your review is converging (papers
+      up, modularity stabilising) or telling you to keep digging.</p>
+    <div id="ev-empty" class="banner hidden">No history yet — the log grows
+      each time the graph is saved.</div>
+    <div class="card"><h3>Growth</h3><canvas id="ev-growth" height="220"></canvas>
+      <div class="res-meta">papers (blue) · rated (green) · niches (purple)</div></div>
+    <div class="card"><h3>Connectivity</h3><canvas id="ev-edges" height="220"></canvas>
+      <div class="res-meta">semantic edges (blue) · citation edges (orange)</div></div>
+    <div class="card"><h3>Structure quality</h3><canvas id="ev-quality" height="220"></canvas>
+      <div class="res-meta">modularity (blue) · clustering (green) · largest-component share (orange) — all 0–1</div></div>
   </section>
 
   <!-- ── Watches ───────────────────────────────────────────────────────── -->
@@ -203,7 +261,15 @@
         <input id="sv-core-key" type="password"
                placeholder="paste CORE API key (blank = clear)">
         <button id="sv-core-save" class="primary">Save key</button>
+        <button id="sv-core-test">Test connection</button>
         <span id="sv-core-status"></span>
+      </div>
+      <div class="form row">
+        <button id="sv-core-enrich">Enrich my library via CORE now</button>
+        <label title="papers imported BEFORE the key existed were marked as already-tried and never retried — this clears those marks">
+          <input type="checkbox" id="sv-core-retry" checked>
+          retry papers that failed before the key was set</label>
+        <span id="sv-core-enrich-status"></span>
       </div>
     </div>
     <div class="card">
@@ -219,9 +285,32 @@
       installed. <code>pip install -e &lt;path&gt;/social-psyche[net]</code></div>
     <div id="c-body">
       <div class="card">
+        <h3>How this works (2 minutes)</h3>
+        <ol class="note" style="line-height:1.9">
+          <li><b>You and a colleague each run ResearchBuddy.</b> Merging lets
+            both of you discover each other's papers — <i>without</i> either
+            of you revealing your full reading list (only papers you BOTH
+            have are identified; the rest stays private).</li>
+          <li><b>Swap fingerprints once.</b> The code below is your identity
+            — like a passport number for your research graph. Read it to
+            your colleague over the phone or in person, and note down
+            theirs. This is what stops an impostor in the middle.</li>
+          <li><b>Pin them as a peer.</b> "Host" is simply the address of
+            their computer — on the same office network it's their machine's
+            IP (they can find it with <code>ipconfig</code>); over the
+            internet it's whatever address reaches their machine. "Port" is
+            just a door number — keep the default 9333 unless it's taken.</li>
+          <li><b>Merge.</b> One of you clicks <i>wait for peer</i>, the other
+            picks the pinned peer and clicks <i>Merge</i>. Everything travels
+            encrypted between your two machines only — no server, no cloud,
+            no files. Both of you get a signed receipt in your ledgers.</li>
+        </ol>
+      </div>
+      <div class="card">
         <h3>My identity</h3>
-        <p class="note">Read this fingerprint to your collaborator over a
-          trusted channel (phone / in person) so they can pin you.</p>
+        <p class="note">Your research passport number. Read it to your
+          collaborator over a trusted channel (phone / in person) so they can
+          pin you — never just email it, an impostor could too.</p>
         <code id="c-fp">…</code>
       </div>
       <div class="card">
@@ -229,27 +318,40 @@
         <div id="c-ledger">…</div>
       </div>
       <div class="card">
-        <h3>Pinned peers</h3>
+        <h3>Pinned peers <span class="res-meta">your trusted colleagues</span></h3>
+        <p class="note">Pin a colleague once (after checking their fingerprint
+          by phone / in person); every later merge verifies them
+          automatically and refuses impostors.</p>
         <div id="c-peers"></div>
         <div class="form row">
-          <input id="cp-name" placeholder="name" style="width:7em">
-          <input id="cp-host" placeholder="host" style="width:10em">
-          <input id="cp-port" placeholder="port" style="width:5em">
-          <input id="cp-fp" placeholder="fingerprint (verified out of band)">
+          <input id="cp-name" placeholder="their name (e.g. alice)" style="width:11em"
+                 title="Any nickname you like — just for your list">
+          <input id="cp-host" placeholder="their computer's address" style="width:13em"
+                 title="Their machine's IP or hostname — same-network: they run ipconfig and read you the IPv4 address">
+          <input id="cp-port" placeholder="9333" style="width:5em"
+                 title="A door number on their machine — keep 9333 unless it's in use">
+          <input id="cp-fp" placeholder="their fingerprint (checked by phone / in person)"
+                 title="The identity code from THEIR Collaborate tab">
           <button id="cp-add">Pin peer</button>
         </div>
       </div>
       <div class="card">
-        <h3>Live merge (secure, no files)</h3>
+        <h3>Live merge <span class="res-meta">encrypted, machine-to-machine, no files</span></h3>
+        <p class="note"><b>One of you waits, the other connects</b> — like
+          answering vs. placing a phone call. Decide who does which; it
+          doesn't matter for the result.</p>
         <div class="form row">
-          <select id="cm-mode">
-            <option value="connect">connect (dial peer)</option>
-            <option value="serve">serve (wait for peer)</option>
+          <select id="cm-mode"
+                  title="wait = your machine answers; connect = you dial them">
+            <option value="connect">connect to my colleague (I dial)</option>
+            <option value="serve">wait for my colleague (they dial me)</option>
           </select>
-          <select id="cm-peer"><option value="">— pinned peer —</option></select>
-          <input id="cm-host" placeholder="host (connect)" style="width:10em">
+          <select id="cm-peer" title="pick a pinned colleague — fills everything in">
+            <option value="">— pinned peer —</option></select>
+          <input id="cm-host" placeholder="their address (if not pinned)" style="width:13em">
           <input id="cm-port" placeholder="9333" style="width:5em">
-          <label><input type="checkbox" id="cm-ids" checked> share DOIs+titles</label>
+          <label title="ON: your colleague can import the papers you have and they don't. OFF: fully anonymous — only the shape of your graph is compared">
+            <input type="checkbox" id="cm-ids" checked> let them import my papers</label>
           <button id="cm-run" class="primary">Merge</button>
           <span id="cm-status"></span>
         </div>
