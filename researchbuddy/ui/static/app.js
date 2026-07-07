@@ -63,7 +63,7 @@ function showTab(name) {
   document.querySelectorAll(".tab").forEach(t =>
     t.classList.toggle("active", t.id === "tab-" + name));
   if (name === "graph") loadGraph();
-  if (name === "watches") loadWatches();
+  if (name === "watches") { loadWatches(); loadSentinel(); }
   if (name === "collab") loadCollab();
   if (name === "services") loadServices();
   if (name === "evolution") loadEvolution();
@@ -654,6 +654,67 @@ async function loadEvolution() {
     ["modularity_combined", "clustering_combined", "largest_component_frac"],
     ["#4da3ff", "#43d17c", "#ffb454"], true);
 }
+
+/* ── Sentinel (surveillance) ──────────────────────────────────────────── */
+async function loadSentinel() {
+  try {
+    const s = await api("/api/sentinel");
+    $("#sn-enabled").checked = s.config.enabled;
+    $("#sn-interval").value = s.config.interval_hours;
+    $("#sn-thresh").value = s.config.min_score;
+    $("#sn-dot").className = "dot " + (s.config.enabled ? "on" : "dim");
+    const last = s.config.last_run
+      ? new Date(s.config.last_run * 1000).toLocaleString() : "never";
+    $("#sn-status").textContent =
+      `last scan: ${last} · inbox: ${s.inbox_count}`;
+    const inbox = await api("/api/sentinel/inbox");
+    const el = $("#sn-inbox");
+    el.innerHTML = inbox.length
+      ? "<h4>Inbox — new papers awaiting your verdict</h4>" : "";
+    inbox.forEach(e => {
+      const d = document.createElement("div");
+      d.className = "banner";
+      const doi = e.doi
+        ? ` · <a href="https://doi.org/${esc(e.doi)}" target="_blank">open</a>` : "";
+      d.innerHTML = `<b>${esc(e.title)}</b>
+        <span class="res-meta">(${e.year ?? "?"}) · score ${e.score} ·
+        via "${esc(e.watch)}" · ${esc(e.found_at)}${doi}</span><br>
+        <span class="res-abs">${esc(e.abstract || "")}</span>
+        <div class="rate-row">
+          <button class="sn-accept primary">Add to graph</button>
+          <button class="sn-dismiss">Dismiss</button>
+        </div>`;
+      d.querySelector(".sn-accept").onclick = async () => {
+        await api("/api/sentinel/inbox/accept", { token: e.token });
+        loadSentinel(); loadStats();
+      };
+      d.querySelector(".sn-dismiss").onclick = async () => {
+        await api("/api/sentinel/inbox/dismiss", { token: e.token });
+        loadSentinel();
+      };
+      el.appendChild(d);
+    });
+  } catch (e) { $("#sn-status").textContent = "sentinel unavailable"; }
+}
+$("#sn-save").onclick = async () => {
+  await api("/api/sentinel", {
+    enabled: $("#sn-enabled").checked,
+    interval_hours: +$("#sn-interval").value,
+    min_score: +$("#sn-thresh").value });
+  loadSentinel();
+};
+$("#sn-scan").onclick = async () => {
+  $("#sn-scan").disabled = true;
+  try {
+    const r = await withProgress("Sentinel sweep — scanning watches…", () =>
+      api("/api/sentinel/scan", {}));
+    $("#sn-status").textContent =
+      `${r.new} new paper(s) filed` +
+      (r.digest ? ` · digest written` : "");
+    loadSentinel();
+  } catch (e) { $("#sn-status").textContent = "error: " + e.message; }
+  finally { $("#sn-scan").disabled = false; }
+};
 
 /* ── Watches tab ──────────────────────────────────────────────────────── */
 async function loadWatches() {

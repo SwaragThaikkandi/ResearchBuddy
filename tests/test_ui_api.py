@@ -19,7 +19,8 @@ def client(graph_with_papers, monkeypatch):
     monkeypatch.setattr(srv, "save_graph", lambda g: None)   # no disk writes
     from researchbuddy.core import audit
     monkeypatch.setattr(audit, "PRISMA_LOG", audit.PRISMA_LOG)  # keep default
-    app = srv.create_app(graph=graph_with_papers, autosave=False)
+    app = srv.create_app(graph=graph_with_papers, autosave=False,
+                         scheduler=False)
     return TestClient(app)
 
 

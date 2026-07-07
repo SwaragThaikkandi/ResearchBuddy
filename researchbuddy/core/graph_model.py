@@ -45,6 +45,24 @@ from researchbuddy.config import (
 # canonical layout for the extended weight vector (see __init__ / __setstate__).
 EXTRA_SIGNAL_TYPES    = ["ppr", "impact"]
 EXTRA_SIGNAL_DEFAULTS = [1.5, 0.5]
+
+
+def _coerce_year(value) -> Optional[int]:
+    """Publication year as int or None — never a string.
+
+    Years arrive from many producers (GROBID reference parsing, OpenAlex,
+    CrossRef, capsules, archives) and GROBID in particular yields strings
+    like "2018" or "n.d.". Arithmetic like `now().year - meta.year` then
+    crashes with TypeError. One coercion at the PaperMeta boundary fixes
+    every producer at once. Out-of-range values (OCR garbage) become None.
+    """
+    if value is None:
+        return None
+    try:
+        y = int(str(value).strip()[:4])
+    except (ValueError, TypeError):
+        return None
+    return y if 1000 <= y <= 2100 else None
 from researchbuddy.core.embedder import embed, cosine_similarity, mean_pool
 from researchbuddy.core.hierarchy import (
     build_adaptive_hswn, ClusterNode, n_levels_detected,
@@ -138,6 +156,12 @@ class PaperMeta:
     # Thought nodes get distinct visualisation + strong implicit weight on
     # the user-context vector so the graph aligns with the user's thinking.
     kind: str                       = "paper"
+
+    def __post_init__(self):
+        # Type boundary: year must be int or None (GROBID refs yield "2018",
+        # "n.d."; archives yield JSON strings). String years crash scoring
+        # arithmetic (now().year - meta.year) deep inside rank_candidates.
+        self.year = _coerce_year(self.year)
 
     @property
     def effective_weight(self) -> float:
@@ -2407,6 +2431,9 @@ class HierarchicalResearchGraph:
                 meta.cited_by_count = None
             if not hasattr(meta, "source_ranks"):
                 meta.source_ranks = {}
+            # v2.5.1 — string years from old GROBID refs crash scoring;
+            # unpickling bypasses __post_init__, so coerce here too.
+            meta.year = _coerce_year(getattr(meta, "year", None))
         # v0.2.0 used n_levels; v0.3.0 uses alpha only
         if not hasattr(self, "alpha"):
             self.alpha = FUSION_ALPHA

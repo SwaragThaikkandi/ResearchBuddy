@@ -197,6 +197,26 @@
 
   <!-- ── Watches ───────────────────────────────────────────────────────── -->
   <section id="tab-watches" class="tab">
+    <div class="card">
+      <h3><i id="sn-dot" class="dot dim"></i> Sentinel — automatic surveillance</h3>
+      <p class="note">When enabled, ResearchBuddy scans your watched topics on
+        a schedule <b>by itself</b> (while the UI is running), triages the
+        finds with your personal relevance model, files the keepers into the
+        inbox below, and writes a dated digest to
+        <code>~/.researchbuddy/digests/</code>. Your machine watching public
+        literature — nobody watching you.</p>
+      <div class="form row">
+        <label><input type="checkbox" id="sn-enabled"> enabled</label>
+        <label>every <input id="sn-interval" type="number" value="24" min="1"
+          max="168" style="width:4.5em"> hours</label>
+        <label>keep score ≥ <input id="sn-thresh" type="number" value="0.35"
+          min="0" max="1" step="0.05" style="width:5em"></label>
+        <button id="sn-save">Apply</button>
+        <button id="sn-scan" class="primary">Scan now</button>
+        <span id="sn-status"></span>
+      </div>
+      <div id="sn-inbox"></div>
+    </div>
     <div class="form row">
       <input id="w-q" placeholder="Watch query (topic)">
       <input id="w-kw" placeholder="keywords, comma-separated">

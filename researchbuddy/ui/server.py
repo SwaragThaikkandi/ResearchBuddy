@@ -127,7 +127,8 @@ def _ingest_draft_pdfs(graph: HierarchicalResearchGraph,
 # ── App factory ───────────────────────────────────────────────────────────────
 
 def create_app(graph: Optional[HierarchicalResearchGraph] = None,
-               autosave: bool = True) -> FastAPI:
+               autosave: bool = True,
+               scheduler: bool = True) -> FastAPI:
     app = FastAPI(title="ResearchBuddy", docs_url=None, redoc_url=None)
 
     if graph is None:
@@ -501,6 +502,94 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
                             "n_found": rep["n_found"],
                             "results": _results_json(rep["results"])})
         return out
+
+    # ── Sentinel: continuous literature surveillance ─────────────────────
+    @app.get("/api/sentinel")
+    def sentinel_status():
+        from researchbuddy.core import sentinel as sn
+        cfg_s = sn.load_config()
+        return {"config": cfg_s,
+                "inbox_count": len(sn.inbox_list()),
+                "due": sn.is_due(cfg_s)}
+
+    @app.post("/api/sentinel")
+    def sentinel_configure(body: dict):
+        from researchbuddy.core import sentinel as sn
+        cfg_s = sn.load_config()
+        if "enabled" in body:
+            cfg_s["enabled"] = bool(body["enabled"])
+        if "interval_hours" in body:
+            cfg_s["interval_hours"] = max(1, min(168,
+                                                 int(body["interval_hours"])))
+        if "min_score" in body:
+            cfg_s["min_score"] = max(0.0, min(1.0, float(body["min_score"])))
+        sn.save_config(cfg_s)
+        return {"config": sn.load_config()}
+
+    @app.post("/api/sentinel/scan")
+    def sentinel_scan():
+        from researchbuddy.core import sentinel as sn
+        with state.lock:
+            try:
+                report = sn.run_scan(state.graph, progress=state.set_progress)
+            finally:
+                state.end_progress()
+        return report
+
+    @app.get("/api/sentinel/inbox")
+    def sentinel_inbox():
+        from researchbuddy.core import sentinel as sn
+        return sn.inbox_list()
+
+    @app.post("/api/sentinel/inbox/accept")
+    def sentinel_accept(body: dict):
+        from researchbuddy.core import sentinel as sn
+        entry = sn.inbox_remove(body.get("token", ""))
+        if entry is None:
+            raise HTTPException(404, "not in inbox")
+        with state.lock:
+            meta = sn.entry_to_meta(entry)
+            if state.graph.get_paper(meta.paper_id) is None:
+                state.graph.embed_abstract(meta)
+                state.graph.add_paper(meta, meta.embedding)
+            rating = body.get("rating")
+            if rating is not None and 1 <= float(rating) <= 10:
+                state.graph.rate_paper(meta.paper_id, float(rating))
+                audit.log_event("screen", paper_id=meta.paper_id,
+                                title=meta.title[:200], doi=meta.doi,
+                                rating=float(rating),
+                                decision=audit.screen_decision(float(rating)))
+            state.remember([meta])
+            _save()
+        return {"ok": True, "paper_id": meta.paper_id}
+
+    @app.post("/api/sentinel/inbox/dismiss")
+    def sentinel_dismiss(body: dict):
+        from researchbuddy.core import sentinel as sn
+        return {"ok": sn.inbox_remove(body.get("token", "")) is not None}
+
+    # Background scheduler: wakes every minute; runs a scan when one is due.
+    # Daemon thread → dies with the server; scans share the graph lock so
+    # they never interleave with user actions.
+    if scheduler:
+        def _sentinel_loop():
+            from researchbuddy.core import sentinel as sn
+            while True:
+                time.sleep(60)
+                try:
+                    if sn.is_due(sn.load_config()):
+                        logger.info("[sentinel] scheduled scan starting")
+                        with state.lock:
+                            try:
+                                sn.run_scan(state.graph,
+                                            progress=state.set_progress)
+                            finally:
+                                state.end_progress()
+                except Exception as e:
+                    logger.warning("[sentinel] scan failed: %s", e)
+
+        threading.Thread(target=_sentinel_loop, daemon=True,
+                         name="sentinel").start()
 
     @app.post("/api/save")
     def save_now():

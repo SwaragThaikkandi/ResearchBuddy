@@ -39,7 +39,12 @@ frontend is bundled vanilla JS (no npm, no CDN — fully offline). Tabs:
   marking under-screened gaps, link thickness = theme coupling
 - **Evolution** — time-series charts of graph growth, connectivity, and
   structure quality from the snapshot history
-- **Watches** — living-review queries
+- **Watches** — living-review queries, now with **Sentinel**: enable it and
+  ResearchBuddy scans your watched topics on a schedule *by itself* (while
+  the UI runs), triages finds with your personal relevance model, files
+  keepers into an inbox (accept → graph / dismiss), and writes a dated
+  Markdown digest to `~/.researchbuddy/digests/` — continuous literature
+  surveillance, running on your machine, watching public literature only
 - **Collaborate** — social-psyche: your identity fingerprint, contribution
   ledger (with chain verification), pinned peers, **live secure merge**
   (serve/connect), and signed capsule publication
