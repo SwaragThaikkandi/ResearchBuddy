@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name            = "researchbuddy"
-version         = "0.13.0"
+version         = "0.14.0"
 description     = "Hierarchical graph-based literature search assistant for researchers"
 readme          = "README.md"
 requires-python = ">=3.9"
@@ -69,6 +69,7 @@ all = [
 researchbuddy = "researchbuddy.cli:main"
 researchbuddy-evolution = "researchbuddy.evolution:main"
 researchbuddy-ui = "researchbuddy.ui.server:main"
+researchbuddy-sentinel = "researchbuddy.sentinel_cli:main"
 
 [project.urls]
 Homepage   = "https://github.com/SwaragThaikkandi/ResearchBuddy"

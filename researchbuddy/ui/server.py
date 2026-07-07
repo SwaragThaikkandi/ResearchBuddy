@@ -147,6 +147,14 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
     except Exception as e:                            # pragma: no cover
         logger.debug("CORE key pref load skipped: %s", e)
 
+    # Reapply kept self-tuning experiments (the overnight Karpathy loop).
+    if scheduler:      # skip in tests — rebuilds can be expensive
+        try:
+            from researchbuddy.core.autotune import apply_saved_tuning
+            apply_saved_tuning(state.graph)
+        except Exception as e:                        # pragma: no cover
+            logger.debug("autotune apply skipped: %s", e)
+
     def _save():
         if autosave:
             try:
@@ -502,6 +510,27 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
                             "n_found": rep["n_found"],
                             "results": _results_json(rep["results"])})
         return out
+
+    # ── Autotune: the tool researches itself (Karpathy loop) ─────────────
+    @app.post("/api/autotune")
+    def autotune_run(body: dict):
+        from researchbuddy.core import autotune as at
+        rounds = max(1, min(int(body.get("rounds", 10)), 100))
+        with state.lock:
+            try:
+                report = at.run_session(state.graph, rounds=rounds,
+                                        progress=state.set_progress)
+                if report.get("ready"):
+                    _save()
+            finally:
+                state.end_progress()
+        return report
+
+    @app.get("/api/autotune/log")
+    def autotune_log():
+        from researchbuddy.core import autotune as at
+        return {"rows": at.read_log(last=50),
+                "tuning": at.load_tuning()}
 
     # ── Sentinel: continuous literature surveillance ─────────────────────
     @app.get("/api/sentinel")

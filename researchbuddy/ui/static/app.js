@@ -642,7 +642,47 @@ function drawSeries(canvasSel, series, fields, colors, normalize) {
     ctx.stroke();
   });
 }
+async function loadAutotuneLog() {
+  try {
+    const d = await api("/api/autotune/log");
+    const el = $("#at-log");
+    const tuned = Object.entries(d.tuning || {});
+    el.innerHTML = tuned.length
+      ? `<p class="res-meta">active tuned values: ` +
+        tuned.map(([k, v]) => `<code>${esc(k)}=${v}</code>`).join(" ") + "</p>"
+      : "";
+    if (d.rows.length) {
+      el.innerHTML += "<table><tr><th>when</th><th>param</th><th>old→new</th>" +
+        "<th>score</th><th>best</th><th>verdict</th></tr>" +
+        d.rows.slice(-15).reverse().map(r =>
+          `<tr><td>${esc(r.timestamp)}</td><td>${esc(r.param)}</td>
+           <td>${esc(r.old)}→${esc(r.new)}</td><td>${esc(r.objective)}</td>
+           <td>${esc(r.best)}</td>
+           <td class="${r.status === "keep" ? "ok" : ""}">${esc(r.status)}</td></tr>`
+        ).join("") + "</table>";
+    }
+  } catch (e) {}
+}
+$("#at-run").onclick = async () => {
+  $("#at-run").disabled = true; $("#at-status").textContent = "";
+  try {
+    const r = await withProgress("Self-tuning experiments…", () =>
+      api("/api/autotune", { rounds: +$("#at-rounds").value }));
+    const out = $("#at-out"); out.classList.remove("hidden");
+    out.innerHTML = r.ready
+      ? `alignment score <b>${r.baseline}</b> → <b class="ok">${r.best}</b> · ` +
+        `${Object.keys(r.kept).length} change(s) kept` +
+        (Object.keys(r.kept).length
+          ? ": " + Object.entries(r.kept).map(([k, v]) =>
+              `<code>${esc(k)}=${v}</code>`).join(" ") : "")
+      : `<span class="warn">${esc(r.note)}</span>`;
+    loadAutotuneLog();
+  } catch (e) { $("#at-status").textContent = "error: " + e.message; }
+  finally { $("#at-run").disabled = false; }
+};
+
 async function loadEvolution() {
+  loadAutotuneLog();
   const d = await api("/api/evolution");
   $("#ev-empty").classList.toggle("hidden", d.series.length >= 2);
   drawSeries("#ev-growth", d.series,

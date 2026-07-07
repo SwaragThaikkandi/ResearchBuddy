@@ -56,6 +56,35 @@ Long operations (search, snowball, harvest, PDF parsing) show a **progress
 bar with a plain-language explanation** of the current step underneath —
 polled live from the server.
 
+## Overnight autonomy — Sentinel + Autotune
+
+Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch):
+give the system one ground-truth metric and a mutate → measure →
+keep/discard loop, and let it run while you sleep.
+
+```bash
+# register a nightly job (Windows Task Scheduler; prints the cron line on
+# Linux/macOS). Runs even when the UI is closed:
+researchbuddy-sentinel --install-task --time 03:00 --autotune 20
+
+# or run once, headless:
+researchbuddy-sentinel --autotune 20
+```
+
+Each night: **Sentinel** scans your watched topics, triages new papers with
+your personal relevance model, files keepers into the inbox, and writes a
+Markdown digest. Then **Autotune** runs the Karpathy loop on ResearchBuddy
+itself: perturb one scoring hyperparameter (alpha, PageRank damping,
+similarity threshold, weight regularisation, rating half-life), re-measure
+how well the recommender ranks the papers *you already rated*
+(AUC/NDCG/precision — deterministic, fully offline), keep only genuine
+improvements (> epsilon), log every experiment to
+`~/.researchbuddy/autotune_experiments.tsv`, and persist kept changes so
+they load on every startup. You wake up to a digest of new papers and a
+measurably better-tuned tool. (Honesty note: this optimises preference
+alignment on your rated set — a diagnostic, not a held-out benchmark; the
+epsilon threshold and the full experiment log keep it accountable.)
+
 The CLI (`researchbuddy`) remains fully equivalent — the UI is a view over
 the same engine and the same local data.
 

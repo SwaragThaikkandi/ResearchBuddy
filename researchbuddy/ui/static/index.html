@@ -193,6 +193,25 @@
       <div class="res-meta">semantic edges (blue) · citation edges (orange)</div></div>
     <div class="card"><h3>Structure quality</h3><canvas id="ev-quality" height="220"></canvas>
       <div class="res-meta">modularity (blue) · clustering (green) · largest-component share (orange) — all 0–1</div></div>
+    <div class="card">
+      <h3>Self-tuning — the tool researches itself</h3>
+      <p class="note">Inspired by <a href="https://github.com/karpathy/autoresearch"
+        target="_blank">karpathy/autoresearch</a>: perturb one scoring
+        parameter, re-measure how well the recommender ranks the papers
+        <b>you already rated</b> (AUC/NDCG — offline, deterministic), keep
+        the change only if the score genuinely improves, log every
+        experiment. Kept changes persist and load on every startup.
+        Run overnight without the UI:
+        <code>researchbuddy-sentinel --install-task --autotune 20</code></p>
+      <div class="form row">
+        <label>rounds <input id="at-rounds" type="number" value="10" min="1"
+          max="100" style="width:5em"></label>
+        <button id="at-run" class="primary">Run experiments now</button>
+        <span id="at-status"></span>
+      </div>
+      <div id="at-out" class="banner hidden"></div>
+      <div id="at-log"></div>
+    </div>
   </section>
 
   <!-- ── Watches ───────────────────────────────────────────────────────── -->

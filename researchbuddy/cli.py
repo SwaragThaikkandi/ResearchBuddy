@@ -2338,6 +2338,16 @@ def main():
         graph = HierarchicalResearchGraph(alpha=cfg.FUSION_ALPHA)
         print_info("Starting with a fresh graph.")
     else:
+        # Reapply kept self-tuning experiments (researchbuddy-sentinel
+        # --autotune runs overnight; its wins carry into every session).
+        try:
+            from researchbuddy.core.autotune import apply_saved_tuning
+            applied = apply_saved_tuning(graph)
+            if applied:
+                print_info(f"  Self-tuned parameters applied: "
+                           f"{', '.join(applied)}")
+        except Exception as e:
+            logger.debug("autotune apply skipped: %s", e)
         if args.alpha is not None:
             graph.alpha = cfg.FUSION_ALPHA
         s = graph.stats()
