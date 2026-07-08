@@ -63,7 +63,9 @@ function showTab(name) {
   document.querySelectorAll(".tab").forEach(t =>
     t.classList.toggle("active", t.id === "tab-" + name));
   if (name === "graph") loadGraph();
-  if (name === "watches") { loadWatches(); loadSentinel(); }
+  if (name === "watches") loadWatches();
+  if (name === "sentinel") { loadSentinel(); loadDigests(); }
+  if (name === "scout") loadScout();
   if (name === "collab") loadCollab();
   if (name === "services") loadServices();
   if (name === "evolution") loadEvolution();
@@ -754,6 +756,84 @@ $("#sn-scan").onclick = async () => {
     loadSentinel();
   } catch (e) { $("#sn-status").textContent = "error: " + e.message; }
   finally { $("#sn-scan").disabled = false; }
+};
+
+/* ── Sentinel digests browser ─────────────────────────────────────────── */
+async function loadDigests() {
+  try {
+    const list = await api("/api/sentinel/digests");
+    const el = $("#sn-digest-list");
+    el.innerHTML = list.length ? "" :
+      '<p class="note">No digests yet — they appear after a scan finds papers.</p>';
+    list.forEach(d => {
+      const b = document.createElement("button");
+      b.textContent = `${d.name}  (${d.modified})`;
+      b.style.margin = "3px";
+      b.onclick = async () => {
+        const r = await api(`/api/sentinel/digest?name=${encodeURIComponent(d.name)}`);
+        const v = $("#sn-digest-view");
+        v.classList.remove("hidden");
+        v.innerHTML = mdLite(r.content);
+      };
+      el.appendChild(b);
+    });
+  } catch (e) {}
+}
+
+/* ── Living Graph (Bayesian scout) ────────────────────────────────────── */
+async function loadScout() {
+  try {
+    const s = await api("/api/scout");
+    $("#sg-enabled").checked = s.enabled;
+    $("#sg-dot").className = "dot " + (s.enabled ? "on" : "dim");
+    const last = s.last_run
+      ? new Date(s.last_run * 1000).toLocaleString() : "never";
+    $("#sg-stats").textContent =
+      `cycles: ${s.cycles} · last: ${last} · confirmed anchors: ${s.anchors}`;
+    const el = $("#sg-slate"); el.innerHTML = "";
+    if (!s.slate.length) {
+      el.innerHTML = '<p class="note">Slate is empty — run a cycle.</p>';
+      return;
+    }
+    s.slate.forEach(p => {
+      const d = document.createElement("div");
+      d.className = "card";
+      const doi = p.doi
+        ? ` · <a href="https://doi.org/${esc(p.doi)}" target="_blank">open</a>` : "";
+      d.innerHTML = `<div class="res-title">${esc(p.title)}</div>
+        <div class="res-meta">${esc((p.authors || []).join(", "))}
+        (${p.year ?? "?"}) · scout score ${p.score}${doi}</div>
+        <div class="res-abs">${esc(p.abstract || "")}</div>
+        <div class="rate-row"><span class="res-meta">evidence:</span></div>`;
+      const row = d.querySelector(".rate-row");
+      for (let i = 1; i <= 10; i++) {
+        const b = document.createElement("button");
+        b.textContent = i;
+        b.onclick = async () => {
+          try {
+            await api("/api/scout/rate", { token: p.token, rating: i });
+            d.remove(); loadStats();
+          } catch (e) { alert("rate failed: " + e.message); }
+        };
+        row.appendChild(b);
+      }
+      el.appendChild(d);
+    });
+  } catch (e) { $("#sg-status").textContent = "scout unavailable"; }
+}
+$("#sg-enabled").onchange = async () =>
+  api("/api/scout", { enabled: $("#sg-enabled").checked }).then(loadScout);
+$("#sg-cycle").onclick = async () => {
+  $("#sg-cycle").disabled = true; $("#sg-status").textContent = "";
+  try {
+    const r = await withProgress("Living-graph cycle…", () =>
+      api("/api/scout/cycle", {}));
+    $("#sg-status").textContent = r.ok
+      ? `+${r.acquired} acquired · −${r.pruned} pruned · graph size ${r.size}`
+      : r.note;
+    loadScout();
+  } catch (e) { $("#sg-status").textContent = "error: " + e.message; }
+  finally { $("#sg-cycle").disabled = false; }
 };
 
 /* ── Watches tab ──────────────────────────────────────────────────────── */

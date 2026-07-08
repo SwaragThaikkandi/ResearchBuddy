@@ -75,11 +75,13 @@ def test_session_refuses_without_ratings(graph_with_papers, tmp_path):
 
 
 def test_session_keep_discard_and_persist(tmp_path, monkeypatch):
-    """Scripted objective: baseline 0.50, then 0.60 (keep), then 0.55
+    """Scripted objectives: baseline 0.50, then 0.60 (keep), then 0.55
     (discard → revert). Verifies TSV log, persisted tuning, reverts."""
     g = _rated_graph()
-    scores = iter([0.50, 0.60, 0.55])
-    monkeypatch.setattr(at, "_objective", lambda graph: next(scores))
+    scores = iter([{"train": 0.50, "val": 0.50},
+                   {"train": 0.60, "val": 0.60},
+                   {"train": 0.55, "val": 0.55}])
+    monkeypatch.setattr(at, "_objectives", lambda graph: next(scores))
     # deterministic: only tune alpha, both rounds
     monkeypatch.setattr(at, "PARAM_SPECS",
                         {"alpha": at.PARAM_SPECS["alpha"]})
@@ -100,6 +102,38 @@ def test_session_keep_discard_and_persist(tmp_path, monkeypatch):
     # every experiment logged
     rows = at.read_log(tmp_path / "log.tsv")
     assert [r["status"] for r in rows] == ["baseline", "keep", "discard"]
+
+
+def test_goodhart_guard_rejects_validation_degradation(tmp_path, monkeypatch):
+    """The anti-Goodhart test: a change that inflates the TRAIN metric but
+    tanks VALIDATION must be discarded and reverted, however large the
+    train gain looks."""
+    g = _rated_graph()
+    scores = iter([{"train": 0.50, "val": 0.50},
+                   {"train": 0.90, "val": 0.20}])     # gamed the train half
+    monkeypatch.setattr(at, "_objectives", lambda graph: next(scores))
+    monkeypatch.setattr(at, "PARAM_SPECS",
+                        {"alpha": at.PARAM_SPECS["alpha"]})
+
+    alpha_before = g.alpha
+    rep = at.run_session(g, rounds=1, seed=1,
+                         log_path=tmp_path / "log.tsv",
+                         tuning_path=tmp_path / "tuning.json")
+    assert rep["kept"] == {}
+    assert rep["best"] == 0.50                        # gain NOT accepted
+    assert g.alpha == pytest.approx(alpha_before)     # reverted
+    rows = at.read_log(tmp_path / "log.tsv")
+    assert rows[-1]["status"] == "discard(val)"       # named for the log
+
+
+def test_objectives_split_deterministic():
+    g = _rated_graph(n=12)
+    a = at._objectives(g)
+    b = at._objectives(g)
+    assert a == b                                     # stable split
+    assert a["val"] is not None                       # 12 rated → holdout on
+    g2 = _rated_graph(n=8)
+    assert at._objectives(g2)["val"] is None          # <10 → train-only
 
 
 def test_apply_saved_tuning(tmp_path):

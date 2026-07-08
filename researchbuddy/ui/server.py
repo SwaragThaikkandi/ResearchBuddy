@@ -597,12 +597,90 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
         from researchbuddy.core import sentinel as sn
         return {"ok": sn.inbox_remove(body.get("token", "")) is not None}
 
+    # ── Living Graph (Bayesian scout) ────────────────────────────────────
+    @app.get("/api/scout")
+    def scout_status():
+        from researchbuddy.core import scout as sg
+        state_s = sg.load_state()
+        return {"enabled": state_s.get("enabled", False),
+                "interval_hours": state_s.get("interval_hours", 24),
+                "last_run": state_s.get("last_run", 0.0),
+                "cycles": state_s.get("cycles", 0),
+                "anchors": len(state_s.get("anchors", [])),
+                "slate": state_s.get("slate", [])}
+
+    @app.post("/api/scout")
+    def scout_configure(body: dict):
+        from researchbuddy.core import scout as sg
+        state_s = sg.load_state()
+        if "enabled" in body:
+            state_s["enabled"] = bool(body["enabled"])
+        if "interval_hours" in body:
+            state_s["interval_hours"] = max(1, min(168,
+                                                   int(body["interval_hours"])))
+        sg.save_state(state_s)
+        return {"ok": True}
+
+    @app.post("/api/scout/cycle")
+    def scout_cycle():
+        from researchbuddy.core import scout as sg
+        with state.lock:
+            try:
+                report = sg.run_cycle(state.graph,
+                                      progress=state.set_progress)
+            finally:
+                state.end_progress()
+        return report
+
+    @app.post("/api/scout/rate")
+    def scout_rate(body: dict):
+        from researchbuddy.core import scout as sg
+        rating = float(body.get("rating", 0))
+        if not (1 <= rating <= 10):
+            raise HTTPException(400, "rating must be 1-10")
+        with state.lock:
+            res = sg.apply_feedback(state.graph, body.get("token", ""),
+                                    rating)
+            if res.get("ok"):
+                _save()
+        if not res.get("ok"):
+            raise HTTPException(404, res.get("note", "unknown scout paper"))
+        return res
+
+    @app.get("/api/sentinel/digests")
+    def sentinel_digests():
+        from researchbuddy.core import sentinel as sn
+        d = sn.DIGEST_DIR
+        if not d.exists():
+            return []
+        out = []
+        for p in sorted(d.glob("digest_*.md"), reverse=True)[:60]:
+            out.append({"name": p.name,
+                        "size": p.stat().st_size,
+                        "modified": time.strftime(
+                            "%Y-%m-%d %H:%M",
+                            time.localtime(p.stat().st_mtime))})
+        return out
+
+    @app.get("/api/sentinel/digest")
+    def sentinel_digest(name: str):
+        from researchbuddy.core import sentinel as sn
+        import re as _re
+        # strict allow-list: no traversal, only our own digest files
+        if not _re.fullmatch(r"digest_\d{8}_\d{4}\.md", name):
+            raise HTTPException(400, "bad digest name")
+        p = sn.DIGEST_DIR / name
+        if not p.exists():
+            raise HTTPException(404, "no such digest")
+        return {"name": name, "content": p.read_text(encoding="utf-8")}
+
     # Background scheduler: wakes every minute; runs a scan when one is due.
     # Daemon thread → dies with the server; scans share the graph lock so
     # they never interleave with user actions.
     if scheduler:
         def _sentinel_loop():
             from researchbuddy.core import sentinel as sn
+            from researchbuddy.core import scout as sg
             while True:
                 time.sleep(60)
                 try:
@@ -616,6 +694,17 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
                                 state.end_progress()
                 except Exception as e:
                     logger.warning("[sentinel] scan failed: %s", e)
+                try:
+                    if sg.is_due(sg.load_state()):
+                        logger.info("[scout] scheduled cycle starting")
+                        with state.lock:
+                            try:
+                                sg.run_cycle(state.graph,
+                                             progress=state.set_progress)
+                            finally:
+                                state.end_progress()
+                except Exception as e:
+                    logger.warning("[scout] cycle failed: %s", e)
 
         threading.Thread(target=_sentinel_loop, daemon=True,
                          name="sentinel").start()

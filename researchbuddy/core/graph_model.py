@@ -164,9 +164,23 @@ class PaperMeta:
         self.year = _coerce_year(self.year)
 
     @property
+    def evidence_factor(self) -> float:
+        """Likelihood tempering (β) for the Bayesian update. Full-text
+        papers carry full evidence weight; scout papers judged from the
+        abstract alone are discounted (tempered likelihood). The discount
+        disappears the moment full text arrives (attach/harvest)."""
+        if self.filepath or self.section_embeddings:
+            return 1.0
+        if self.source == "scout":
+            from researchbuddy.config import ABSTRACT_EVIDENCE_DISCOUNT
+            return float(ABSTRACT_EVIDENCE_DISCOUNT)
+        return 1.0
+
+    @property
     def effective_weight(self) -> float:
         if self.user_rating is not None:
-            return self.user_rating * self.temporal_decay_factor
+            return (self.user_rating * self.temporal_decay_factor
+                    * self.evidence_factor)
         return DEFAULT_SEED_WEIGHT if self.source == "seed" else 0.0
 
     @property

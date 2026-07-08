@@ -70,6 +70,18 @@ def run_headless(autotune_rounds: int = 0) -> int:
     if report.get("digest"):
         print(f"[sentinel] digest: {report['digest']}")
 
+    # Living-graph cycle (Bayesian scout) when the user enabled it.
+    from researchbuddy.core import scout as sg
+    if sg.load_state().get("enabled"):
+        print("[scout] running a living-graph cycle ...")
+        rep = sg.run_cycle(graph, progress=lambda s, *a: print(f"  {s}"))
+        if rep.get("ok"):
+            print(f"[scout] +{rep['acquired']} acquired, "
+                  f"-{rep['pruned']} pruned, "
+                  f"{len(rep['slate'])} paper(s) on the slate.")
+        else:
+            print(f"[scout] skipped: {rep.get('note')}")
+
     if autotune_rounds > 0:
         print(f"[autotune] running {autotune_rounds} experiment round(s) ...")
         result = at.run_session(

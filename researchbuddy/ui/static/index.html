@@ -18,6 +18,8 @@
     <button data-tab="reason">Reasoning</button>
     <button data-tab="review">Review</button>
     <button data-tab="evolution">Evolution</button>
+    <button data-tab="sentinel">Sentinel</button>
+    <button data-tab="scout">Living Graph</button>
     <button data-tab="watches">Watches</button>
     <button data-tab="collab">Collaborate</button>
     <button data-tab="services">Services</button>
@@ -214,16 +216,16 @@
     </div>
   </section>
 
-  <!-- ── Watches ───────────────────────────────────────────────────────── -->
-  <section id="tab-watches" class="tab">
+  <!-- ── Sentinel (surveillance) ───────────────────────────────────────── -->
+  <section id="tab-sentinel" class="tab">
     <div class="card">
       <h3><i id="sn-dot" class="dot dim"></i> Sentinel — automatic surveillance</h3>
       <p class="note">When enabled, ResearchBuddy scans your watched topics on
         a schedule <b>by itself</b> (while the UI is running), triages the
         finds with your personal relevance model, files the keepers into the
-        inbox below, and writes a dated digest to
-        <code>~/.researchbuddy/digests/</code>. Your machine watching public
-        literature — nobody watching you.</p>
+        inbox below, and writes a dated digest. For scans with the UI closed:
+        <code>researchbuddy-sentinel --install-task</code>. Your machine
+        watching public literature — nobody watching you.</p>
       <div class="form row">
         <label><input type="checkbox" id="sn-enabled"> enabled</label>
         <label>every <input id="sn-interval" type="number" value="24" min="1"
@@ -236,6 +238,49 @@
       </div>
       <div id="sn-inbox"></div>
     </div>
+    <div class="card">
+      <h3>Digests — your morning briefings</h3>
+      <p class="note">One Markdown briefing per scan that found something.
+        Click to read it here; files live in
+        <code>~/.researchbuddy/digests/</code>.</p>
+      <div id="sn-digest-list"></div>
+      <div id="sn-digest-view" class="banner hidden"></div>
+    </div>
+  </section>
+
+  <!-- ── Living Graph (Bayesian scout) ─────────────────────────────────── -->
+  <section id="tab-scout" class="tab">
+    <div class="card">
+      <h3><i id="sg-dot" class="dot dim"></i> Living Graph — a scout that
+        explores for you</h3>
+      <p class="note">A second, self-optimising graph lives alongside yours.
+        Each cycle it <b>acquires</b> new literature (abstracts only),
+        <b>prunes itself</b> with graph-theoretic queries (PageRank mass from
+        your interests, coverage gaps, diversity), and presents its best
+        finds below. <b>Your graph is the prior; the scout is the
+        likelihood; your ratings are the evidence</b> — rate a scout paper
+        and it flows into your main graph as a Bayesian update
+        (abstract-only evidence is deliberately discounted vs full text;
+        attach or harvest the PDF later and the discount disappears).</p>
+      <div class="form row">
+        <label><input type="checkbox" id="sg-enabled"> run a cycle daily
+          (with Sentinel's scheduler)</label>
+        <button id="sg-cycle" class="primary">Run a cycle now</button>
+        <span id="sg-status"></span>
+      </div>
+      <div id="sg-stats" class="res-meta"></div>
+    </div>
+    <div class="card">
+      <h3>The scout's slate — rate to teach both graphs</h3>
+      <p class="note">Ratings here update the scout's anchors <i>and</i> your
+        main graph's posterior. High = imported into your graph as a liked
+        paper; low = negative evidence.</p>
+      <div id="sg-slate" class="results"></div>
+    </div>
+  </section>
+
+  <!-- ── Watches ───────────────────────────────────────────────────────── -->
+  <section id="tab-watches" class="tab">
     <div class="form row">
       <input id="w-q" placeholder="Watch query (topic)">
       <input id="w-kw" placeholder="keywords, comma-separated">

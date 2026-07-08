@@ -107,6 +107,56 @@ def _objective(graph: HierarchicalResearchGraph) -> Optional[float]:
     return round(sum(vals) / len(vals), 6) if vals else None
 
 
+def _metric_on(graph: HierarchicalResearchGraph, metas) -> Optional[float]:
+    """Same objective, restricted to a subset of rated papers."""
+    metas = [m for m in metas
+             if m.embedding is not None and m.user_rating is not None]
+    pos = {m.paper_id for m in metas if m.user_rating >= 7}
+    neg = {m.paper_id for m in metas if m.user_rating <= 3}
+    if len(metas) < 4 or not pos or not neg:
+        return None
+    scores = {m.paper_id: float(graph.score_candidate(m)) for m in metas}
+    ratings = {m.paper_id: float(m.user_rating) for m in metas}
+    k = max(1, min(10, len(pos)))
+    order = sorted(scores, key=lambda pid: (-scores[pid], pid))
+    vals = [v for v in (
+        HierarchicalResearchGraph._pairwise_auc(
+            [scores[p] for p in pos], [scores[p] for p in neg]),
+        HierarchicalResearchGraph._ndcg_at_k(order, ratings, k),
+        HierarchicalResearchGraph._precision_at_k(order, pos, k),
+    ) if v is not None]
+    return round(sum(vals) / len(vals), 6) if vals else None
+
+
+def _objectives(graph: HierarchicalResearchGraph) -> Optional[dict]:
+    """
+    Goodhart guard: a deterministic train/validation split of the rated set.
+    The loop OPTIMISES on train but may only KEEP a change if validation
+    does not degrade — the classic defence against an aggressive optimiser
+    gaming its own metric. Below 10 rated papers the split would be too
+    noisy, so validation is skipped (train-only, with the epsilon guard).
+    """
+    rated = sorted((m for m in graph.rated_papers()
+                    if m.embedding is not None),
+                   key=lambda m: m.paper_id)
+    if _objective(graph) is None:
+        return None
+    if len(rated) < 10:
+        return {"train": _objective(graph), "val": None}
+    # Stratified split: alternate WITHIN positives and WITHIN negatives so
+    # both halves contain both classes regardless of id ordering.
+    train, val = [], []
+    for group in ([m for m in rated if m.user_rating >= 7],
+                  [m for m in rated if m.user_rating <= 3],
+                  [m for m in rated if 3 < m.user_rating < 7]):
+        for i, m in enumerate(group):
+            (train if i % 2 == 0 else val).append(m)
+    t, v = _metric_on(graph, train), _metric_on(graph, val)
+    if t is None:                       # degenerate split — fall back
+        return {"train": _objective(graph), "val": None}
+    return {"train": t, "val": v}
+
+
 def _apply(graph: HierarchicalResearchGraph, name: str, value: float) -> None:
     spec = PARAM_SPECS[name]
     spec["set"](graph, value)
@@ -122,8 +172,9 @@ def _log_row(row: list, path: Optional[Path] = None) -> None:
     p = Path(path or LOG_FILE)
     p.parent.mkdir(parents=True, exist_ok=True)
     if not p.exists():
-        p.write_text("timestamp\tparam\told\tnew\tobjective\tbest\tstatus\n",
-                     encoding="utf-8")
+        p.write_text(
+            "timestamp\tparam\told\tnew\tobjective\tval\tbest\tstatus\n",
+            encoding="utf-8")
     with open(p, "a", encoding="utf-8") as f:
         f.write("\t".join(str(x) for x in row) + "\n")
 
@@ -204,18 +255,22 @@ def run_session(
     say = progress or (lambda *a, **k: None)
     rng = random.Random(seed)
 
-    base = _objective(graph)
-    if base is None:
+    obj = _objectives(graph)
+    if obj is None:
         return {"ready": False,
                 "note": "Need >=6 rated papers with >=2 positives and "
                         ">=2 negatives before self-tuning can measure "
                         "anything."}
+    base, base_val = obj["train"], obj["val"]
 
-    say(f"Baseline preference-alignment score: {base:.4f}", 0.02)
+    say(f"Baseline preference-alignment score: {base:.4f}"
+        + (f" (validation {base_val:.4f})" if base_val is not None else ""),
+        0.02)
     _log_row([time.strftime("%Y-%m-%d %H:%M:%S"), "baseline", "", "",
-              base, base, "baseline"], log_path)
+              base, base_val if base_val is not None else "",
+              base, "baseline"], log_path)
 
-    best = base
+    best, best_val = base, base_val
     kept: dict[str, float] = {}
     names = list(PARAM_SPECS.keys())
     experiments = []
@@ -230,18 +285,30 @@ def run_session(
         say(f"[{i + 1}/{rounds}] trying {name}: {old} → {new}",
             0.05 + 0.9 * i / max(rounds, 1))
         _apply(graph, name, new)
-        score = _objective(graph)
+        o = _objectives(graph) or {"train": None, "val": None}
+        score, val = o["train"], o["val"]
 
-        if score is not None and score > best + epsilon:
+        # Goodhart guard: train must genuinely improve AND validation must
+        # not degrade. An optimiser that games the train half gets caught
+        # by the half it never optimised.
+        val_ok = (val is None or best_val is None
+                  or val >= best_val - epsilon)
+        if score is not None and score > best + epsilon and val_ok:
             status, best = "keep", score
+            if val is not None:
+                best_val = val
             kept[name] = new
         else:
-            status = "discard"
+            status = ("discard(val)" if (score is not None
+                                         and score > best + epsilon
+                                         and not val_ok) else "discard")
             _apply(graph, name, old)          # revert, recompute state
         _log_row([time.strftime("%Y-%m-%d %H:%M:%S"), name, old, new,
-                  score if score is not None else "", best, status], log_path)
+                  score if score is not None else "",
+                  val if val is not None else "", best, status], log_path)
         experiments.append({"param": name, "old": old, "new": new,
-                            "objective": score, "status": status})
+                            "objective": score, "val": val,
+                            "status": status})
 
     if kept:
         tuning = load_tuning(tuning_path)
@@ -252,5 +319,6 @@ def run_session(
     say(f"Self-tuning done: {base:.4f} → {best:.4f} "
         f"({len(kept)} change(s) kept)", 1.0)
     return {"ready": True, "baseline": base, "best": best,
+            "baseline_val": base_val, "best_val": best_val,
             "improved": best > base, "kept": kept,
             "experiments": experiments}

@@ -56,6 +56,33 @@ Long operations (search, snowball, harvest, PDF parsing) show a **progress
 bar with a plain-language explanation** of the current step underneath —
 polled live from the server.
 
+## The Living Graph — a fully Bayesian learning architecture
+
+Your main graph is the **prior** (accumulated, full-text-grade belief). A
+second, self-optimising **scout graph** is the **likelihood**: each cycle it
+acquires abstract-only literature seeded by the prior, then optimises
+itself with graph-theoretic queries — PageRank mass flowing from
+prior-aligned and user-confirmed nodes, pruning of low-mass regions,
+diversity-selected slates. Your ratings on its slate are the **evidence**;
+rated papers flow into the main graph as a **posterior** update.
+
+Two safeguards make this honest:
+
+- **Tempered likelihood.** The scout only sees abstracts; abstract-only
+  evidence enters the posterior at β = 0.7 of full-text weight
+  (`ABSTRACT_EVIDENCE_DISCOUNT`). Attach or harvest the PDF later and the
+  discount disappears automatically.
+- **The Goodhart firewall.** The scout can never write to your graph on its
+  own — every posterior update passes through your judgment. The optimiser
+  and the ground truth are different agents. Likewise, Autotune (below) now
+  optimises on a stratified TRAIN half of your ratings and may only keep a
+  change if the untouched VALIDATION half does not degrade — an aggressive
+  optimiser that games its metric gets caught by the half it never saw
+  (`discard(val)` in the experiment log).
+
+UI: **Living Graph** tab — enable daily cycles, run one now, rate the
+slate. Headless: cycles run in `researchbuddy-sentinel` when enabled.
+
 ## Overnight autonomy — Sentinel + Autotune
 
 Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch):

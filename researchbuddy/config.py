@@ -200,6 +200,22 @@ WATCHES_FILE = DATA_DIR / "watches.json"
 # ── PRISMA audit trail ────────────────────────────────────────────────────────
 PRISMA_LOG = HISTORY_DIR / "prisma_log.jsonl"
 
+# ── Living Graph (Bayesian scout) ─────────────────────────────────────────────
+# A second, self-optimising graph: your main graph is the PRIOR, the scout is
+# the LIKELIHOOD (abstract-only acquisitions, pruned by graph-theoretic
+# queries), and your ratings on its slate are the EVIDENCE that updates the
+# main graph to a posterior.
+SCOUT_GRAPH_FILE   = DATA_DIR / "scout_graph.pkl"
+SCOUT_FILE         = DATA_DIR / "scout.json"
+SCOUT_MAX_SIZE     = 300     # scout graph is pruned back to this each cycle
+SCOUT_ACQUIRE      = 60      # new abstract-only papers pulled per cycle
+SCOUT_SLATE_SIZE   = 12      # papers presented for rating per cycle
+# Likelihood tempering: abstract-only evidence is weaker than full-text
+# evidence. Ratings on scout papers enter the posterior with this factor
+# (β < 1 — standard tempered-Bayes). Attaching/harvesting the PDF later
+# removes the discount automatically.
+ABSTRACT_EVIDENCE_DISCOUNT = 0.7
+
 # Reproducibility / reliability
 DETERMINISTIC_MODE   = True    # stable query expansion/rerank + deterministic tie-breaks
 SEARCH_CACHE_ENABLED = True    # cache LLM search helpers (query expansion + reranking)
