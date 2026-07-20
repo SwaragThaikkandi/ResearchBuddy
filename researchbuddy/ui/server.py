@@ -66,7 +66,7 @@ class UIState:
 # ── Serialization helpers ─────────────────────────────────────────────────────
 
 def _paper_json(m: PaperMeta, score: Optional[float] = None,
-                label: str = "") -> dict:
+                label: str = "", sigma: Optional[float] = None) -> dict:
     return {
         "token": m.paper_id,
         "title": m.title,
@@ -83,12 +83,23 @@ def _paper_json(m: PaperMeta, score: Optional[float] = None,
         "cited_by": getattr(m, "cited_by_count", None),
         "has_fulltext": bool(m.filepath),
         "score": round(score, 3) if score is not None else None,
+        # Honest error bar on the recommendation (bootstrap ensemble spread).
+        "sigma": round(sigma, 3) if sigma is not None else None,
         "label": label,
     }
 
 
-def _results_json(results) -> list[dict]:
-    return [_paper_json(m, score=s, label=lab) for m, s, lab in results]
+def _results_json(results, graph=None) -> list[dict]:
+    out = []
+    for m, s, lab in results:
+        sigma = None
+        if graph is not None:
+            try:
+                _, sigma = graph.score_with_uncertainty(m)
+            except Exception:                 # never break a result list
+                sigma = None
+        out.append(_paper_json(m, score=s, label=lab, sigma=sigma))
+    return out
 
 
 def _ingest_draft_pdfs(graph: HierarchicalResearchGraph,
@@ -304,7 +315,7 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
                 state.remember([m for m, _, _ in results])
             finally:
                 state.end_progress()
-        return {"results": _results_json(results),
+        return {"results": _results_json(results, state.graph),
                 "n_fetched": len(candidates)}
 
     @app.post("/api/rate")
@@ -333,6 +344,24 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
                             decision=audit.screen_decision(rating))
             _save()
         return {"ok": True, "paper_id": meta.paper_id}
+
+    @app.get("/api/rating_queue")
+    def rating_queue(n: int = 10):
+        """Active learning: the unrated papers already in your graph whose
+        rating would teach the model the most (uncertainty x relevance)."""
+        n = max(1, min(int(n), 50))
+        with state.lock:
+            rows = state.graph.rating_queue(n=n)
+            ens = getattr(state.graph, "_weight_ensemble", None)
+            out = [dict(_paper_json(m, score=s, sigma=sg),
+                        acquisition=round(a, 4))
+                   for m, s, sg, a in rows]
+        return {"queue": out,
+                "ensemble_ready": ens is not None,
+                "note": ("" if ens is not None else
+                         "Rate a few more papers (>=10, with positives and "
+                         "negatives) and the model can start measuring its "
+                         "own uncertainty.")}
 
     @app.post("/api/rebuild")
     def rebuild():
@@ -389,7 +418,8 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
                 state.remember([m for m, _, _ in results])
             finally:
                 state.end_progress()
-        return {"results": _results_json(results), "stats": stats_d}
+        return {"results": _results_json(results, state.graph),
+                "stats": stats_d}
 
     # ── Attach a PDF to a rated/known paper (CLI parity: richer node) ────
     @app.post("/api/attach_pdf")

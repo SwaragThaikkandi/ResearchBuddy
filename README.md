@@ -56,6 +56,22 @@ Long operations (search, snowball, harvest, PDF parsing) show a **progress
 bar with a plain-language explanation** of the current step underneath —
 polled live from the server.
 
+## Honest uncertainty + active learning
+
+The scorer is fitted from *your* finite, noisy ratings, so it has sampling
+uncertainty — and pretending otherwise is overconfidence. ResearchBuddy
+bootstraps the weight fit into an ensemble; the spread of ensemble scores is
+a real error bar, shown as `match 83% ±3` on every result.
+
+That error bar then does work. **Active learning** (UI: *Discover → Teach the
+model*, CLI: menu 21) ranks the unrated papers in your graph by
+**uncertainty × relevance** — the acquisition function the Bayesian loop was
+missing. Instead of re-asking about papers it already understands, the model
+asks you to adjudicate the ones your verdict would actually teach it,
+turning rating from a chore into the fastest possible way to sharpen every
+future recommendation. Optimal experimental design, pointed at your own
+attention.
+
 ## The Living Graph — a fully Bayesian learning architecture
 
 Your main graph is the **prior** (accumulated, full-text-grade belief). A

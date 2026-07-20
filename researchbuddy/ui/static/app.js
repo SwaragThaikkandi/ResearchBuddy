@@ -91,7 +91,15 @@ function resultCard(p) {
   div.className = "card";
   const tags = [];
   if (p.label === "explore") tags.push('<span class="res-tag explore">EXPLORE</span>');
-  if (p.score != null) tags.push(`<span class="res-tag">match ${(p.score * 100).toFixed(0)}%</span>`);
+  if (p.score != null) {
+    // Show the error bar when the model can measure one — an honest
+    // "how sure am I?" instead of a bare point estimate.
+    const pm = (p.sigma != null && p.sigma > 0.001)
+      ? ` ±${(p.sigma * 100).toFixed(0)}` : "";
+    const unsure = (p.sigma != null && p.sigma >= 0.08)
+      ? ' title="the model is unsure about this one — rating it teaches it a lot"' : "";
+    tags.push(`<span class="res-tag"${unsure}>match ${(p.score * 100).toFixed(0)}%${pm}</span>`);
+  }
   if (p.peer_reviewed === true) tags.push('<span class="res-tag">peer-reviewed</span>');
   if (p.peer_reviewed === false) tags.push('<span class="res-tag">preprint</span>');
   if (p.cited_by != null) tags.push(`<span class="res-tag">${p.cited_by} cites</span>`);
@@ -376,6 +384,34 @@ $("#d-run").onclick = async () => {
     renderResults($("#d-results"), r.results);
   } catch (e) { $("#d-status").textContent = "error: " + e.message; }
   finally { $("#d-run").disabled = false; }
+};
+
+/* ── Active learning: what to rate next ───────────────────────────────── */
+$("#al-load").onclick = async () => {
+  $("#al-load").disabled = true;
+  $("#al-status").textContent = "";
+  try {
+    const r = await api("/api/rating_queue?n=8");
+    $("#al-status").innerHTML = r.ensemble_ready
+      ? `<span class="ok">ranked by expected information gain</span>`
+      : `<span class="warn">${esc(r.note)}</span>`;
+    const el = $("#al-queue");
+    el.innerHTML = "";
+    if (!r.queue.length) {
+      el.innerHTML = '<p class="note">No unrated papers in your graph.</p>';
+      return;
+    }
+    r.queue.forEach(p => {
+      const card = resultCard(p);
+      const why = document.createElement("div");
+      why.className = "res-meta";
+      why.innerHTML = `uncertainty ±${((p.sigma || 0) * 100).toFixed(0)} · ` +
+        `info gain ${(p.acquisition ?? 0).toFixed(3)}`;
+      card.insertBefore(why, card.querySelector(".rate-row"));
+      el.appendChild(card);
+    });
+  } catch (e) { $("#al-status").textContent = "error: " + e.message; }
+  finally { $("#al-load").disabled = false; }
 };
 
 /* ── Snowball tab ─────────────────────────────────────────────────────── */

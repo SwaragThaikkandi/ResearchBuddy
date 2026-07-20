@@ -97,6 +97,21 @@
       <span id="d-status"></span>
     </div>
     <div id="d-results" class="results"></div>
+
+    <div class="card">
+      <h3>Teach the model — papers worth rating next</h3>
+      <p class="note">Active learning: instead of re-asking about papers it
+        already understands, the model picks the unrated papers in your graph
+        whose verdict would <b>reduce its uncertainty the most</b> (spread of
+        a bootstrap ensemble fitted to your ratings, weighted by relevance).
+        Rating a handful here sharpens every future recommendation. The
+        <code>±</code> on a match score is that same uncertainty.</p>
+      <div class="form row">
+        <button id="al-load">Show what to rate next</button>
+        <span id="al-status"></span>
+      </div>
+      <div id="al-queue" class="results"></div>
+    </div>
   </section>
 
   <!-- ── Snowball ──────────────────────────────────────────────────────── -->

@@ -94,6 +94,18 @@ RRF_BLEND          = 0.15   # weight of RRF evidence in the final relevance
 # IMPACT_SATURATION cites/year (field-typical "very high impact").
 IMPACT_SATURATION  = 50
 
+# ── Uncertainty + active learning ─────────────────────────────────────────────
+# The scorer is fit from your ratings, so it has sampling uncertainty. We
+# bootstrap the weight fit into an ensemble; the spread of ensemble scores is
+# an honest error bar, and it drives which papers are worth rating next
+# (max expected information gain — optimal experimental design on your own
+# attention, the acquisition function the Bayesian loop was missing).
+ENSEMBLE_SIZE        = 12    # bootstrap replicas of the learned weights
+ENSEMBLE_MIN_RATINGS = 10    # below this the ensemble is too noisy to fit
+# Acquisition = relevance^RELEVANCE_EXP * uncertainty. Pure uncertainty picks
+# weird papers; pure relevance re-asks what the model already knows.
+ACQUISITION_RELEVANCE_EXP = 0.5
+
 # ── Learned scoring weights ───────────────────────────────────────────────────
 WEIGHT_LEARNING_MIN_RATINGS = 8   # minimum rated papers before learning kicks in
 WEIGHT_LEARNING_REGULARIZATION = 0.1  # L2 regularization strength

@@ -1959,6 +1959,63 @@ def archive_session(graph: HierarchicalResearchGraph) -> Optional[HierarchicalRe
     return None
 
 
+# ── Active learning ───────────────────────────────────────────────────────────
+
+def active_learning_session(graph: HierarchicalResearchGraph) -> None:
+    """
+    Ask the user to rate the papers whose verdict would teach the model the
+    most — uncertainty (bootstrap-ensemble spread) weighted by relevance.
+    Optimal experimental design pointed at the user's own attention.
+    """
+    print_header("Teach the Model")
+    print_info(
+        "These are the unrated papers already in your graph that the model is\n"
+        "least sure about. Rating them sharpens every future recommendation\n"
+        "far more than rating papers it already understands."
+    )
+    queue = graph.rating_queue(n=10)
+    if not queue:
+        print_warn("No unrated papers in the graph. Search (1) or snowball "
+                   "(16) to bring in candidates first.")
+        return
+    if getattr(graph, "_weight_ensemble", None) is None:
+        print_warn(
+            "Not enough ratings yet to measure uncertainty (need ~10 rated, "
+            "with both positives and negatives). Showing best-effort order; "
+            "rate a few and the error bars switch on."
+        )
+
+    rated_any = False
+    for i, (meta, score, sigma, acq) in enumerate(queue, 1):
+        print()
+        print_header(f"{i} of {len(queue)}")
+        display_paper(i, meta, score, "")
+        print_info(f"      model confidence: {score * 100:.0f}% "
+                   f"±{sigma * 100:.0f}   (information gain {acq:.3f})")
+        raw = ask("Rating (1-10, s=skip, q=stop)", "s").strip().lower()
+        if raw == "q":
+            break
+        if raw in ("", "s", "0"):
+            continue
+        try:
+            rating = max(1, min(10, int(raw)))
+        except ValueError:
+            print_warn("Not a number — skipping.")
+            continue
+        graph.rate_paper(meta.paper_id, float(rating))
+        audit.log_event("screen", paper_id=meta.paper_id,
+                        title=meta.title[:200], doi=meta.doi, rating=rating,
+                        decision=audit.screen_decision(float(rating)),
+                        channel="active_learning")
+        rated_any = True
+
+    if rated_any:
+        print_info("\n[graph] Refitting weights + uncertainty ensemble ...")
+        if graph.learn_signal_weights():
+            print_success("[graph] Model updated from your new ratings.")
+        save(graph)
+
+
 # ── Main menu ─────────────────────────────────────────────────────────────────
 
 def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
@@ -1983,6 +2040,7 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
         "18": "Living review (watch queries — what's new since last check)",
         "19": "Graph capsules — share / merge with a collaborator (social-psyche)",
         "20": "Open archive — export/import full graph, zero lock-in (JSONL/NPZ)",
+        "21": "Teach the model — rate the papers it's most unsure about",
         "q": "Save & quit",
     }
     while True:
@@ -2073,6 +2131,8 @@ def main_menu(graph: HierarchicalResearchGraph, plot: bool = True):
             new_graph = archive_session(graph)
             if new_graph is not None:
                 graph = new_graph
+        elif choice == "21":
+            active_learning_session(graph)
         else:
             print_warn("Unknown option.")
 

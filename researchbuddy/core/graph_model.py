@@ -39,6 +39,7 @@ from researchbuddy.config import (
     COLD_START_THRESHOLD, SCORED_SECTION_TYPES,
     PPR_DAMPING, PPR_TOPK_NEIGHBORS, MMR_LAMBDA,
     RRF_K, RRF_BLEND, IMPACT_SATURATION,
+    ENSEMBLE_SIZE, ENSEMBLE_MIN_RATINGS, ACQUISITION_RELEVANCE_EXP,
 )
 
 # Extra scoring signals appended after the per-section block. Order is the
@@ -261,6 +262,9 @@ class HierarchicalResearchGraph:
             + list(EXTRA_SIGNAL_DEFAULTS)
         )
         self._learned_signal_weights: Optional[np.ndarray] = None
+        # Bootstrap ensemble of learned weights → score error bars + the
+        # active-learning acquisition function. None until enough ratings.
+        self._weight_ensemble: Optional[np.ndarray] = None
         # Personalized-PageRank mass cache (paper_id -> normalised network
         # mass). Invalidated with the context vector; rebuilt lazily.
         self._ppr_mass_cache: Optional[dict[str, float]] = None
@@ -1475,25 +1479,116 @@ class HierarchicalResearchGraph:
         X = np.array(X)
         y = np.array(y)
 
-        # Simple logistic regression via gradient descent (no sklearn dependency)
+        weights = self._fit_weights(X, y)
+        self._learned_signal_weights = weights
+        # Refit the bootstrap ensemble that powers score uncertainty +
+        # active learning (cheap: same solver on resampled rows).
+        self._fit_weight_ensemble(X, y)
+        logger.info("Learned signal weights: %s",
+                    ", ".join(f"{w:.2f}" for w in weights))
+        return True
+
+    def _fit_weights(self, X: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """Logistic regression by gradient descent (no sklearn dependency),
+        clamped positive and rescaled to the default weight budget."""
         n_features = X.shape[1]
-        weights = np.ones(n_features)  # start from uniform
+        weights = np.ones(n_features)
         lr = 0.5
         reg = WEIGHT_LEARNING_REGULARIZATION
-
         for _ in range(200):
             logits = X @ weights
             probs = 1.0 / (1.0 + np.exp(-np.clip(logits, -20, 20)))
             grad = X.T @ (probs - y) / len(y) + reg * weights
             weights -= lr * grad
-
-        # Clamp to positive and normalize to same scale as defaults
         weights = np.maximum(weights, 0.05)
-        weights = weights * (self._default_signal_weights.sum() / weights.sum())
-        self._learned_signal_weights = weights
-        logger.info("Learned signal weights: %s",
-                    ", ".join(f"{w:.2f}" for w in weights))
-        return True
+        return weights * (self._default_signal_weights.sum() / weights.sum())
+
+    def _fit_weight_ensemble(self, X: np.ndarray, y: np.ndarray) -> None:
+        """
+        Bootstrap the weight fit into an ensemble. The spread of the
+        ensemble's scores for a candidate is an honest error bar on the
+        recommendation — the model was fit from a finite, noisy set of your
+        ratings, and pretending otherwise is overconfidence.
+
+        Resamples are stratified (positives and negatives drawn separately)
+        so a replica can never end up single-class and degenerate.
+        """
+        self._weight_ensemble = None
+        n = len(y)
+        if n < ENSEMBLE_MIN_RATINGS:
+            return
+        pos_idx = np.flatnonzero(y >= 0.5)
+        neg_idx = np.flatnonzero(y < 0.5)
+        if len(pos_idx) < 2 or len(neg_idx) < 2:
+            return
+        rng = np.random.RandomState(12345)      # deterministic per fit
+        members = []
+        for _ in range(int(ENSEMBLE_SIZE)):
+            take = np.concatenate([
+                rng.choice(pos_idx, size=len(pos_idx), replace=True),
+                rng.choice(neg_idx, size=len(neg_idx), replace=True)])
+            try:
+                members.append(self._fit_weights(X[take], y[take]))
+            except Exception as e:              # pragma: no cover - defensive
+                logger.debug("ensemble member failed: %s", e)
+        self._weight_ensemble = np.vstack(members) if members else None
+
+    # ── Score uncertainty + active learning ──────────────────────────────────
+
+    def score_with_uncertainty(self, meta: PaperMeta) -> tuple[float, float]:
+        """
+        (score, sigma) for a candidate. sigma is the standard deviation of the
+        bootstrap ensemble's fused scores — how much the recommendation would
+        move if your ratings had come out slightly differently. 0.0 when no
+        ensemble exists yet (too few ratings), which reads as "no error bar
+        available" rather than "certain".
+        """
+        score = self.score_candidate(meta)
+        ens = getattr(self, "_weight_ensemble", None)
+        if ens is None or len(self._papers) < COLD_START_THRESHOLD:
+            return score, 0.0
+        signals = self._extract_signals(meta)
+        if signals is None:
+            return score, 0.0
+        mask = self._signal_mask(meta, ens.shape[1])
+        vals = []
+        for w in ens:
+            wm = w[: len(mask)] * mask
+            total = float(wm.sum()) or 1.0
+            vals.append(float(np.clip(np.dot(signals[: len(wm)], wm) / total,
+                                      0.0, 1.0)))
+        return score, float(np.std(vals))
+
+    def acquisition_score(self, meta: PaperMeta) -> float:
+        """
+        Expected value of asking the user to rate this paper: uncertainty
+        weighted by relevance. Rating a paper the model is unsure about
+        teaches it the most; the relevance factor keeps the questions on
+        topic instead of maximally weird.
+        """
+        score, sigma = self.score_with_uncertainty(meta)
+        return float(sigma * (max(score, 0.0) ** ACQUISITION_RELEVANCE_EXP))
+
+    def rating_queue(self, n: int = 10,
+                     candidates: Optional[list[PaperMeta]] = None
+                     ) -> list[tuple[PaperMeta, float, float, float]]:
+        """
+        Papers most worth rating next, as (meta, score, sigma, acquisition).
+
+        Defaults to the UNRATED papers already in your graph — the cheapest
+        possible way to sharpen the model, since they need no new downloads.
+        """
+        pool = candidates if candidates is not None else [
+            m for m in self._papers.values()
+            if m.user_rating is None and m.kind == "paper"
+            and m.embedding is not None]
+        out = []
+        for m in pool:
+            score, sigma = self.score_with_uncertainty(m)
+            acq = float(sigma * (max(score, 0.0) ** ACQUISITION_RELEVANCE_EXP))
+            out.append((m, score, sigma, acq))
+        out.sort(key=lambda t: (-t[3], t[0].paper_id))
+        return out[:n]
 
     def _build_section_context_vectors(self) -> None:
         """
@@ -1653,6 +1748,38 @@ class HierarchicalResearchGraph:
 
     # ── Comprehensive multi-level scoring ──────────────────────────────────────
 
+    def _signal_mask(self, meta: PaperMeta, n: int) -> np.ndarray:
+        """
+        1.0 for signals this candidate can actually supply, 0.0 otherwise.
+
+        Masked weights leave BOTH numerator and denominator, so a candidate is
+        scored on available evidence instead of being punished for missing it.
+        Search candidates are abstract-only (no section embeddings, no
+        equations); once the user's ratings favour those signals, leaving
+        their weight in the denominator deflates every fresh candidate below
+        the relevance floor — the "142 fetched, 0 shown" failure.
+        """
+        mask = np.ones(n)
+        cand_secs = getattr(meta, "section_embeddings", None) or {}
+        sec_ctx = getattr(self, "_section_context_vecs", {}) or {}
+        for i, stype in enumerate(SCORED_SECTION_TYPES):
+            pos = 7 + i
+            if pos < n and (stype not in cand_secs
+                            or sec_ctx.get(stype) is None):
+                mask[pos] = 0.0
+        # Extras: ppr needs graph edges; impact needs a citation count;
+        # equation needs both candidate equations and a user equation context.
+        n_sec = len(SCORED_SECTION_TYPES)
+        ppr_pos, imp_pos, eq_pos = 7 + n_sec, 7 + n_sec + 1, 7 + n_sec + 2
+        if ppr_pos < n and self._ppr_mass() is None:
+            mask[ppr_pos] = 0.0
+        if imp_pos < n and getattr(meta, "cited_by_count", None) is None:
+            mask[imp_pos] = 0.0
+        if eq_pos < n and (getattr(meta, "equation_embedding", None) is None
+                           or getattr(self, "_equation_context_vec", None) is None):
+            mask[eq_pos] = 0.0
+        return mask
+
     def score_candidate(self, meta: PaperMeta) -> float:
         """
         Comprehensive relevance score combining seven signals.
@@ -1677,37 +1804,7 @@ class HierarchicalResearchGraph:
 
         # ── Apply weights (learned or default) ────────────────────────────
         w = self._signal_weights()
-        # Mask out signals the candidate structurally cannot supply, removing
-        # their weight from BOTH numerator and denominator. Search candidates
-        # are abstract-only (no per-section embeddings), so their section
-        # signals are necessarily 0. When the user's ratings have learned to
-        # favour section similarity (common once full-text papers are ingested),
-        # leaving those weights in the denominator deflates every fresh
-        # candidate below the relevance floor — the "142 fetched, 0 shown,
-        # No new candidates found" failure. Score on available evidence instead.
-        mask = np.ones_like(w)
-        cand_secs = getattr(meta, "section_embeddings", None) or {}
-        sec_ctx = getattr(self, "_section_context_vecs", {}) or {}
-        for i, stype in enumerate(SCORED_SECTION_TYPES):
-            pos = 7 + i
-            if pos < len(mask) and (stype not in cand_secs
-                                    or sec_ctx.get(stype) is None):
-                mask[pos] = 0.0
-        # Extras masked the same way when their evidence is unavailable:
-        # ppr needs graph edges; impact needs a citation count from the API.
-        n_sec = len(SCORED_SECTION_TYPES)
-        ppr_pos, imp_pos, eq_pos = 7 + n_sec, 7 + n_sec + 1, 7 + n_sec + 2
-        if ppr_pos < len(mask) and self._ppr_mass() is None:
-            mask[ppr_pos] = 0.0
-        if imp_pos < len(mask) and getattr(meta, "cited_by_count", None) is None:
-            mask[imp_pos] = 0.0
-        # equation: needs both a candidate equation embedding AND a user
-        # equation-preference vector (built from rated full-text papers).
-        if eq_pos < len(mask) and (
-                getattr(meta, "equation_embedding", None) is None
-                or getattr(self, "_equation_context_vec", None) is None):
-            mask[eq_pos] = 0.0
-        wm = w * mask
+        wm = w * self._signal_mask(meta, len(w))
         total_w = float(wm.sum()) or 1.0
         fused = float(np.dot(signals, wm) / total_w)
         return float(np.clip(fused, 0.0, 1.0))
@@ -2514,6 +2611,15 @@ class HierarchicalResearchGraph:
         # v2.6.0 — equation-preference vector
         if not hasattr(self, "_equation_context_vec"):
             self._equation_context_vec = None
+        # v2.7.0 — bootstrap weight ensemble (uncertainty + active learning).
+        # Refit on the next learn_signal_weights(); stale-length ensembles from
+        # an older signal schema are dropped rather than padded (a bootstrap
+        # replica must match the current feature space exactly).
+        if not hasattr(self, "_weight_ensemble"):
+            self._weight_ensemble = None
+        elif (self._weight_ensemble is not None
+              and self._weight_ensemble.shape[1] != n_total):
+            self._weight_ensemble = None
         for meta in self._papers.values():
             if not hasattr(meta, "venue"):
                 meta.venue = ""
