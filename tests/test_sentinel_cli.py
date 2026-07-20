@@ -67,6 +67,10 @@ def test_headless_run(graph_with_papers, monkeypatch):
                         lambda g, progress=None: {"new": 2, "per_watch": [],
                                                   "digest": None})
     monkeypatch.setattr(at, "apply_saved_tuning", lambda g: [])
+    # Isolate the scout: without this the headless run reads the developer's
+    # real ~/.researchbuddy/scout_graph.pkl and hits the network.
+    from researchbuddy.core import scout as sg
+    monkeypatch.setattr(sg, "load_state", lambda path=None: {"enabled": False})
     monkeypatch.setattr(
         at, "run_session",
         lambda g, rounds, progress=None: {"ready": True, "baseline": 0.5,

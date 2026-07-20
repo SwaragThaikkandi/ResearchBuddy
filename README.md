@@ -584,6 +584,11 @@ The ranking engine is built on citable retrieval science, not vibes:
   instead of ten near-duplicates of the best hit.
 - **Age-normalised impact prior** — log-scaled citations-per-year from
   OpenAlex/CrossRef counts, masked when unknown.
+- **Equation similarity** — GROBID already extracts every equation from your
+  full-text PDFs; that data is now embedded and scored. For a modeller the
+  real query is *"who uses a likelihood like mine?"* — an equation question,
+  not an abstract question. Masked (never penalising) for abstract-only
+  candidates, exactly like the section signals.
 - **Focus mode** — anchor a search on a few papers from *your* library; the
   context vector and the PageRank restart distribution centre on that subset
   (multi-seed exploration with an explicit, inspectable scoring model).

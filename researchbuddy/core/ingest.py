@@ -101,6 +101,8 @@ def ingest_pdf_into_meta(
         graph.embed_paper(meta, ep.chunks)
     if getattr(ep, "sections", None):
         graph.embed_paper_sections(meta, ep.sections)
+    # Equation embedding (the 'equation' scoring signal) — full text only.
+    graph.embed_equations(meta)
 
     return {
         "parser":     getattr(ep, "parser", "pdfplumber"),

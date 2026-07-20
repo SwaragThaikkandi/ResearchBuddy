@@ -83,12 +83,19 @@ def remove_watch(index: int, path: Optional[Path] = None) -> bool:
 # ── Checking ──────────────────────────────────────────────────────────────────
 
 def _search_since(query: str, since: str, limit: int = 50) -> list[PaperMeta]:
-    """OpenAlex search restricted to works published on/after `since`."""
+    """OpenAlex search restricted to works INDEXED on/after `since`.
+
+    Recall fix: OpenAlex indexes papers days-to-weeks after publication, so
+    filtering on publication_date silently drops anything published before
+    your last check but indexed after it — a permanent surveillance blind
+    spot. from_created_date filters on when the record entered OpenAlex,
+    which is exactly 'what is newly visible to me'. Dedup downstream drops
+    anything already in the graph."""
     import os
     params = {
         "search":   query,
         "per-page": min(limit, 200),
-        "filter":   f"from_publication_date:{since},has_abstract:true",
+        "filter":   f"from_created_date:{since},has_abstract:true",
         "sort":     "publication_date:desc",
     }
     mailto = os.getenv("OPENALEX_MAILTO", "").strip()

@@ -44,7 +44,10 @@ logger = logging.getLogger(__name__)
 ARCHIVE_FORMAT_VERSION = 1
 
 # PaperMeta fields serialised to JSON (arrays go to embeddings.npz instead).
-_SKIP_FIELDS = {"embedding", "section_embeddings"}
+# Array-valued fields go to embeddings.npz (or are regenerated on re-ingest),
+# never into JSON. equation_embedding is regenerated the next time the PDF is
+# ingested, so it is simply skipped here.
+_SKIP_FIELDS = {"embedding", "section_embeddings", "equation_embedding"}
 
 
 class ArchiveError(ValueError):

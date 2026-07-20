@@ -223,11 +223,14 @@ def rating_session(graph: HierarchicalResearchGraph,
 
         meta.times_shown += 1
         meta.last_shown   = time.time()
-        # Ensure the paper exists in the graph (with abstract-only emb)
-        if meta.paper_id not in {p.paper_id for p in graph.all_papers()}:
+        # Ensure the paper exists in the graph (with abstract-only emb).
+        # add_or_get resolves a title/DOI collision to the resident id so
+        # rate_paper never hits KeyError on a candidate that duplicates an
+        # existing paper under a different id.
+        if graph.resolve_paper_id(meta) is None:
             graph.embed_abstract(meta)
-            graph.add_paper(meta, meta.embedding)
-        graph.rate_paper(meta.paper_id, float(rating))
+        pid = graph.add_or_get(meta, meta.embedding)
+        graph.rate_paper(pid, float(rating))
         rated_any = True
 
         if rating >= 7:
@@ -326,7 +329,7 @@ def show_stats(graph: HierarchicalResearchGraph):
         base_labels = ["context", "niche", "area", "citation", "snf", "pub_qual", "recency"]
         # Per-section labels (only present in v2.3.0+ learned weights)
         sec_labels = [f"sec[{s[:4]}]" for s in cfg.SCORED_SECTION_TYPES]
-        extra_labels = ["ppr", "impact"]
+        extra_labels = ["ppr", "impact", "equation"]
         labels = (base_labels + sec_labels + extra_labels)[: len(w)]
         w_str = "  ".join(f"{l}={v:.1f}" for l, v in zip(labels, w))
         print_success(f"\n  Scoring: LEARNED weights from your ratings")

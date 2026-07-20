@@ -162,6 +162,40 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
             except Exception as e:      # pragma: no cover - defensive
                 logger.warning("autosave failed: %s", e)
 
+    # ── Cross-origin request guard (CSRF) ────────────────────────────────
+    # The server binds to 127.0.0.1, but "local" is not "safe": any website
+    # you happen to visit can POST a multipart form to localhost:8230 and
+    # inject PDFs / ratings into your graph (JSON endpoints are incidentally
+    # protected by CORS preflight; form posts are NOT). Reject any state-
+    # changing request whose Origin/Referer is not this local UI.
+    def _local_origin(value: str) -> bool:
+        if not value:
+            return False
+        try:
+            from urllib.parse import urlparse
+            host = (urlparse(value).hostname or "").strip("[]")
+        except ValueError:
+            return False
+        return host in {"127.0.0.1", "localhost", "::1"}
+
+    @app.middleware("http")
+    async def _csrf_guard(request, call_next):
+        if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+            origin = request.headers.get("origin") or ""
+            referer = request.headers.get("referer") or ""
+            # Only judge requests that declare an origin. A browser ALWAYS
+            # sends Origin on a cross-site POST (including form posts), so a
+            # foreign page cannot reach a state-changing endpoint. Requests
+            # with no Origin/Referer are non-browser clients (curl, the CLI)
+            # and already had to be local to reach a 127.0.0.1-bound socket.
+            if (origin or referer) and not (_local_origin(origin)
+                                            or _local_origin(referer)):
+                from fastapi.responses import JSONResponse
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "cross-origin request refused"})
+        return await call_next(request)
+
     # ── Static frontend ──────────────────────────────────────────────────
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)),
@@ -284,13 +318,15 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
             meta = g.get_paper(token) or state.candidates.get(token)
             if meta is None:
                 raise HTTPException(404, "unknown paper/candidate")
-            if meta.paper_id not in {p.paper_id for p in g.all_papers()}:
-                if meta.embedding is None:
-                    g.embed_abstract(meta)
-                g.add_paper(meta, meta.embedding)
+            if meta.embedding is None and g.resolve_paper_id(meta) is None:
+                g.embed_abstract(meta)
             meta.times_shown += 1
             meta.last_shown = time.time()
-            g.rate_paper(meta.paper_id, rating)
+            # add_or_get avoids the title-collision KeyError: a candidate whose
+            # title matches an existing paper resolves to that paper's id.
+            pid = g.add_or_get(meta, meta.embedding)
+            g.rate_paper(pid, rating)
+            meta = g.get_paper(pid)
             audit.log_event("screen", paper_id=meta.paper_id,
                             title=meta.title[:200], doi=meta.doi,
                             rating=rating,
@@ -578,19 +614,19 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
             raise HTTPException(404, "not in inbox")
         with state.lock:
             meta = sn.entry_to_meta(entry)
-            if state.graph.get_paper(meta.paper_id) is None:
+            if state.graph.resolve_paper_id(meta) is None:
                 state.graph.embed_abstract(meta)
-                state.graph.add_paper(meta, meta.embedding)
+            pid = state.graph.add_or_get(meta, meta.embedding)
             rating = body.get("rating")
             if rating is not None and 1 <= float(rating) <= 10:
-                state.graph.rate_paper(meta.paper_id, float(rating))
-                audit.log_event("screen", paper_id=meta.paper_id,
+                state.graph.rate_paper(pid, float(rating))
+                audit.log_event("screen", paper_id=pid,
                                 title=meta.title[:200], doi=meta.doi,
                                 rating=float(rating),
                                 decision=audit.screen_decision(float(rating)))
             state.remember([meta])
             _save()
-        return {"ok": True, "paper_id": meta.paper_id}
+        return {"ok": True, "paper_id": pid}
 
     @app.post("/api/sentinel/inbox/dismiss")
     def sentinel_dismiss(body: dict):
@@ -1212,20 +1248,52 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
                 _save()
             return {"status": "done", "result": _result_json(res)}
 
-        # serve mode — background thread, single job at a time
+        # serve mode — background thread, single job at a time.
         if state.merge_job.get("status") == "waiting":
             raise HTTPException(409, "already waiting for a peer")
 
         def _serve():
+            # C1 fix: the blocking accept() must NOT hold the graph lock, or
+            # the whole UI freezes until a peer connects (or forever). Bind +
+            # accept + handshake happen lock-free; the graph lock is taken
+            # only for the actual merge/save, which is brief.
+            import socket
+            from social_psyche.secure_channel import responder_handshake
+            from social_psyche.netmerge import run_merge
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
+                srv.bind(("0.0.0.0", port))
+                srv.listen(1)
+                srv.settimeout(1.0)
+                while state.merge_job.get("status") == "waiting":
+                    try:
+                        conn, _addr = srv.accept()
+                        break
+                    except socket.timeout:
+                        continue
+                else:
+                    return                       # cancelled before a peer came
+                chan = responder_handshake(conn, kwargs["identity"],
+                                           kwargs["expected_peer_fp"])
                 with state.lock:
-                    res = netmerge.serve(state.graph, "0.0.0.0", port,
-                                         **kwargs)
+                    with chan:
+                        res = run_merge(
+                            chan, state.graph, initiator=False,
+                            share_identifiers=kwargs["share_identifiers"],
+                            share_ratings=kwargs["share_ratings"],
+                            do_psi=kwargs["do_psi"],
+                            identity=kwargs["identity"])
                     _save()
                 state.merge_job = {"status": "done",
                                    "result": _result_json(res)}
             except Exception as e:
                 state.merge_job = {"status": "error", "error": str(e)}
+            finally:
+                try:
+                    srv.close()
+                except OSError:
+                    pass
 
         state.merge_job = {"status": "waiting", "port": port}
         threading.Thread(target=_serve, daemon=True).start()
@@ -1235,6 +1303,15 @@ def create_app(graph: Optional[HierarchicalResearchGraph] = None,
     @app.get("/api/sp/merge/status")
     def sp_merge_status():
         return state.merge_job
+
+    @app.post("/api/sp/merge/cancel")
+    def sp_merge_cancel():
+        """Stop waiting for a peer. The serve loop polls this status with a
+        1 s accept timeout, so it exits within a second."""
+        if state.merge_job.get("status") == "waiting":
+            state.merge_job = {"status": "idle", "cancelled": True}
+            return {"ok": True}
+        return {"ok": False, "status": state.merge_job.get("status")}
 
     return app
 

@@ -152,15 +152,26 @@ def _scout_ppr(scout: HierarchicalResearchGraph,
 
 
 def _prune(scout: HierarchicalResearchGraph, keep_scores: dict[str, float],
-           max_size: int) -> HierarchicalResearchGraph:
+           max_size: int,
+           protect: Optional[set[str]] = None) -> HierarchicalResearchGraph:
     """Keep the top max_size papers by keep-score; the scout stays small,
-    sharp, and cheap. (No remove-node API → rebuild a fresh graph.)"""
+    sharp, and cheap. (No remove-node API → rebuild a fresh graph.)
+
+    `protect` (rated papers + confirmed anchors) are ALWAYS kept regardless
+    of score — pruning your own confirmed evidence would be self-defeating
+    and could lose an anchor stranded in a sparse region."""
+    protect = protect or set()
     papers = scout.all_papers()
     if len(papers) <= max_size:
         return scout
-    papers.sort(key=lambda m: (-keep_scores.get(m.paper_id, 0.0), m.paper_id))
+    protected = [m for m in papers
+                 if m.paper_id in protect or m.user_rating is not None]
+    rest = [m for m in papers
+            if m.paper_id not in protect and m.user_rating is None]
+    rest.sort(key=lambda m: (-keep_scores.get(m.paper_id, 0.0), m.paper_id))
+    keep = protected + rest[: max(0, max_size - len(protected))]
     fresh = HierarchicalResearchGraph()
-    for m in papers[:max_size]:
+    for m in keep:
         fresh.add_paper(m, m.embedding)
     return fresh
 
@@ -187,6 +198,18 @@ def run_cycle(
     state = load_state(state_path)
     scout = scout if scout is not None else load_scout_graph(graph_path)
     prior = main_graph.context_vector()
+
+    # Embedding-space guard: if the user switched embedding models, the
+    # persisted scout carries vectors of a different dimension than the
+    # prior. Comparing them raises deep inside cosine_similarity, so start
+    # the scout over in the new space instead.
+    if prior is not None:
+        stale = [m for m in scout.all_papers()
+                 if m.embedding is not None and len(m.embedding) != len(prior)]
+        if stale:
+            logger.info("[scout] embedding dim changed (%d stale papers) — "
+                        "resetting the scout graph", len(stale))
+            scout = HierarchicalResearchGraph()
     anchors = set(state.get("anchors", []))
     avoid = set(state.get("avoid", []))
 
@@ -241,7 +264,7 @@ def run_cycle(
             + 0.4 * ppr.get(m.paper_id, 0.0)
             for m in scout.all_papers()}
     before = len(scout.all_papers())
-    scout = _prune(scout, keep, max_size)
+    scout = _prune(scout, keep, max_size, protect=anchors)
     pruned = before - len(scout.all_papers())
     if pruned:
         try:
@@ -328,20 +351,21 @@ def apply_feedback(
                          venue=entry.get("venue", ""), source="scout")
 
     # evidence into the posterior (tempered by evidence_factor)
-    if main_graph.get_paper(meta.paper_id) is None:
-        clone = PaperMeta(
-            paper_id=meta.paper_id, title=meta.title, abstract=meta.abstract,
-            authors=list(meta.authors), year=meta.year, doi=meta.doi,
-            url=meta.url, venue=meta.venue,
-            cited_by_count=getattr(meta, "cited_by_count", None),
-            source="scout")
-        if meta.embedding is not None:
-            clone.embedding = meta.embedding
-        else:
-            main_graph.embed_abstract(clone)
-        main_graph.add_paper(clone, clone.embedding)
-    main_graph.rate_paper(meta.paper_id, float(rating))
-    audit.log_event("screen", paper_id=meta.paper_id, title=meta.title[:200],
+    clone = PaperMeta(
+        paper_id=meta.paper_id, title=meta.title, abstract=meta.abstract,
+        authors=list(meta.authors), year=meta.year, doi=meta.doi,
+        url=meta.url, venue=meta.venue,
+        cited_by_count=getattr(meta, "cited_by_count", None),
+        source="scout")
+    if meta.embedding is not None:
+        clone.embedding = meta.embedding
+    elif main_graph.resolve_paper_id(clone) is None:
+        main_graph.embed_abstract(clone)
+    # add_or_get resolves title/DOI collisions to the resident id → no KeyError.
+    # (meta.paper_id stays the scout token for anchor/slate bookkeeping below.)
+    pid = main_graph.add_or_get(clone, clone.embedding)
+    main_graph.rate_paper(pid, float(rating))
+    audit.log_event("screen", paper_id=pid, title=meta.title[:200],
                     doi=meta.doi, rating=float(rating),
                     decision=audit.screen_decision(float(rating)),
                     channel="scout")

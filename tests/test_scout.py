@@ -70,6 +70,27 @@ def test_cycle_acquires_prunes_slates(graph_with_papers, sample_papers,
     assert all(e["title"].lower() not in main_titles for e in rep["slate"])
 
 
+def test_cycle_resets_scout_on_embedding_dim_change(sample_papers,
+                                                    monkeypatch, paths):
+    """Switching embedding models leaves the persisted scout in a different
+    vector space; comparing it to the prior used to crash in
+    cosine_similarity. The cycle must reset the scout instead."""
+    main = _prior_graph(sample_papers)
+    stale_scout = HierarchicalResearchGraph()
+    stale = PaperMeta(paper_id="old_dim", title="From another model",
+                      abstract="x", source="scout",
+                      embedding=np.ones(768) / np.sqrt(768))   # wrong dim
+    stale_scout.add_paper(stale, stale.embedding)
+    sg.save_scout_graph(stale_scout, paths["graph_path"])
+
+    monkeypatch.setattr("researchbuddy.core.searcher.search_openalex",
+                        _fake_openalex(sample_papers[0].embedding))
+    rep = sg.run_cycle(main, acquire=6, max_size=10, slate_size=3, **paths)
+    assert rep["ok"]
+    kept = {m.paper_id for m in sg.load_scout_graph(paths["graph_path"]).all_papers()}
+    assert "old_dim" not in kept          # stale space discarded, no crash
+
+
 def test_cycle_refuses_empty_prior(paths, monkeypatch):
     empty = HierarchicalResearchGraph()
     rep = sg.run_cycle(empty, **paths)

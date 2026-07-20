@@ -43,8 +43,15 @@ from researchbuddy.config import (
 
 # Extra scoring signals appended after the per-section block. Order is the
 # canonical layout for the extended weight vector (see __init__ / __setstate__).
-EXTRA_SIGNAL_TYPES    = ["ppr", "impact"]
-EXTRA_SIGNAL_DEFAULTS = [1.5, 0.5]
+#   ppr      — Personalized-PageRank mass (multi-hop graph relevance)
+#   impact   — age-normalised citation prior
+#   equation — similarity of a candidate's math to the equations of papers the
+#              user rated highly. GROBID extracts equations from full-text PDFs
+#              (meta.equations); this turns that previously-unused asset into a
+#              scoring signal — for a modeller, "who uses a likelihood like
+#              mine?" is an equation query, not an abstract query.
+EXTRA_SIGNAL_TYPES    = ["ppr", "impact", "equation"]
+EXTRA_SIGNAL_DEFAULTS = [1.5, 0.5, 0.8]
 
 
 def _coerce_year(value) -> Optional[int]:
@@ -151,6 +158,10 @@ class PaperMeta:
     figure_captions: list[str]      = field(default_factory=list)  # figure captions
     table_captions: list[str]       = field(default_factory=list)  # table captions
     equations: list[str]            = field(default_factory=list)  # math formulae
+    # Embedding of the paper's concatenated equations (GROBID full-text only).
+    # Powers the 'equation' scoring signal — find papers whose MATH resembles
+    # the math of papers you rate highly. None for abstract-only papers.
+    equation_embedding: Optional[np.ndarray] = field(default=None, repr=False)
     # kind = "paper" (default, anything from search/PDF import) | "essay" |
     # "note" | "question" | "outline" | "draft" — anything user-authored.
     # Thought nodes get distinct visualisation + strong implicit weight on
@@ -261,6 +272,9 @@ class HierarchicalResearchGraph:
         # None entries mean "no rated paper has that section embedded yet".
         self._section_context_vecs: dict[str, Optional[np.ndarray]] = {}
         self._section_context_dirty: bool = True
+        # User equation-preference vector (mean of rated papers' equation
+        # embeddings). Rebuilt with the section context on rating changes.
+        self._equation_context_vec: Optional[np.ndarray] = None
 
         # ── Hyper-parameters ──────────────────────────────────────────────
         self.alpha = alpha
@@ -330,7 +344,54 @@ class HierarchicalResearchGraph:
         self._invalidate()
         return True
 
+    def resolve_paper_id(self, meta: PaperMeta) -> Optional[str]:
+        """The paper_id already resident for `meta` (matched by id → DOI →
+        normalised title), or None. Guards against add_paper returning False
+        on a title/id collision while a caller then rates a non-existent id."""
+        if meta.paper_id in self._papers:
+            return meta.paper_id
+        doi = (getattr(meta, "doi", "") or "").lower()
+        if doi:
+            for m in self._papers.values():
+                if (m.doi or "").lower() == doi:
+                    return m.paper_id
+        norm = (meta.title or "").lower().strip()
+        if norm and norm in self._seen_titles:
+            for m in self._papers.values():
+                if (m.title or "").lower().strip() == norm:
+                    return m.paper_id
+        return None
+
+    def add_or_get(self, meta: PaperMeta,
+                   embedding: Optional[np.ndarray] = None) -> str:
+        """Return the resident paper_id for `meta`, adding it if new. Always
+        yields an id that rate_paper() can accept — the safe way to
+        add-then-rate a candidate that might already be in the graph."""
+        existing = self.resolve_paper_id(meta)
+        if existing is not None:
+            return existing
+        self.add_paper(meta, embedding)
+        return meta.paper_id
+
     # ── Embeddings ─────────────────────────────────────────────────────────────
+
+    def embed_equations(self, meta: PaperMeta) -> None:
+        """Embed the paper's equations into meta.equation_embedding.
+
+        GROBID captures equations as text/LaTeX in meta.equations; we join a
+        capped set and embed them so 'papers with similar math' becomes a
+        scoring dimension. No-op when there are no equations."""
+        eqs = [e for e in (getattr(meta, "equations", None) or []) if e.strip()]
+        if not eqs:
+            meta.equation_embedding = None
+            return
+        try:
+            joined = "\n".join(eqs[:40])[:4000]
+            meta.equation_embedding = embed(joined)
+            self._section_context_dirty = True   # user eq context may change
+        except Exception as e:
+            logger.debug("equation embed failed: %s", e)
+            meta.equation_embedding = None
 
     def embed_paper(self, meta: PaperMeta, text_chunks: list[str]):
         if not text_chunks:
@@ -1465,7 +1526,30 @@ class HierarchicalResearchGraph:
                 self._section_context_vecs[stype] = mean_pool(vecs, weights)
             else:
                 self._section_context_vecs[stype] = None
+
+        # Equation-preference vector: mean of the equation embeddings of
+        # positively-rated papers (rating x temporal decay), same as sections.
+        eq_vecs: list[np.ndarray] = []
+        eq_w: list[float] = []
+        for m in rated:
+            emb = getattr(m, "equation_embedding", None)
+            if emb is not None and m.user_rating >= 5:
+                eq_vecs.append(emb)
+                eq_w.append(float(m.user_rating) * float(m.temporal_decay_factor))
+        self._equation_context_vec = mean_pool(eq_vecs, eq_w) if eq_vecs else None
+
         self._section_context_dirty = False
+
+    def _equation_signal(self, meta: PaperMeta) -> Optional[float]:
+        """cos(user equation-preference vector, candidate equation embedding),
+        or None when either side is absent (masked out of scoring)."""
+        if self._section_context_dirty:
+            self._build_section_context_vectors()
+        ctx = self._equation_context_vec
+        cand = getattr(meta, "equation_embedding", None)
+        if ctx is None or cand is None:
+            return None
+        return float(cosine_similarity(ctx, cand))
 
     def _section_signals(self, meta: PaperMeta) -> np.ndarray:
         """
@@ -1560,6 +1644,11 @@ class HierarchicalResearchGraph:
         imp = self._impact_signal(meta)
         signals[n_base + n_sec + 1] = imp if imp is not None else 0.0
 
+        # N+3: equation similarity (masked when candidate has no equations or
+        # the user has rated no equation-bearing papers yet).
+        eqs = self._equation_signal(meta)
+        signals[n_base + n_sec + 2] = eqs if eqs is not None else 0.0
+
         return signals
 
     # ── Comprehensive multi-level scoring ──────────────────────────────────────
@@ -1607,11 +1696,17 @@ class HierarchicalResearchGraph:
         # Extras masked the same way when their evidence is unavailable:
         # ppr needs graph edges; impact needs a citation count from the API.
         n_sec = len(SCORED_SECTION_TYPES)
-        ppr_pos, imp_pos = 7 + n_sec, 7 + n_sec + 1
+        ppr_pos, imp_pos, eq_pos = 7 + n_sec, 7 + n_sec + 1, 7 + n_sec + 2
         if ppr_pos < len(mask) and self._ppr_mass() is None:
             mask[ppr_pos] = 0.0
         if imp_pos < len(mask) and getattr(meta, "cited_by_count", None) is None:
             mask[imp_pos] = 0.0
+        # equation: needs both a candidate equation embedding AND a user
+        # equation-preference vector (built from rated full-text papers).
+        if eq_pos < len(mask) and (
+                getattr(meta, "equation_embedding", None) is None
+                or getattr(self, "_equation_context_vec", None) is None):
+            mask[eq_pos] = 0.0
         wm = w * mask
         total_w = float(wm.sum()) or 1.0
         fused = float(np.dot(signals, wm) / total_w)
@@ -2416,6 +2511,9 @@ class HierarchicalResearchGraph:
             self._focus_ids = None
         if not hasattr(self, "_context_override"):
             self._context_override = None
+        # v2.6.0 — equation-preference vector
+        if not hasattr(self, "_equation_context_vec"):
+            self._equation_context_vec = None
         for meta in self._papers.values():
             if not hasattr(meta, "venue"):
                 meta.venue = ""
@@ -2437,6 +2535,9 @@ class HierarchicalResearchGraph:
                 meta.table_captions = []
             if not hasattr(meta, "equations"):
                 meta.equations = []
+            # v2.6.0 — equation embedding (backfilled lazily on next ingest)
+            if not hasattr(meta, "equation_embedding"):
+                meta.equation_embedding = None
             # v2.4.0 — user-content nodes
             if not hasattr(meta, "kind"):
                 meta.kind = "paper"
